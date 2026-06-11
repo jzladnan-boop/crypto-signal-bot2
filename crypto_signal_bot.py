@@ -39,6 +39,10 @@ RSI_BUY      = 30
 RSI_SELL     = 70
 CHECK_EVERY  = 60
 
+TELEGRAM_TOKEN   = "8912210093:AAFV9iO98UMgIMGJomHmNTdwM31lCABuLt8"
+TELEGRAM_CHAT_ID = "-1003541055173"
+
+
 # ──────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
