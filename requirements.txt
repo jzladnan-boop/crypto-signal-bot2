@@ -1,5 +1,5 @@
 python-binance==1.0.17
 pandas
-pandas-ta
+ta-lib
 requests
 numpy
