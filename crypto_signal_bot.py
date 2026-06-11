@@ -188,6 +188,7 @@ def run_bot():
 
     while True:
         # ── حساب أقصى صفقات حسب الرصيد الحالي ──
+        usdt_balance = 0.0
         try:
             usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
             max_trades   = max(1, int((usdt_balance - RESERVE_USDT) / TRADE_AMOUNT))
