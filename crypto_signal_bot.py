@@ -18,8 +18,6 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import ta
 
-import requests
-print("MY_IP_IS:", requests.get('https://api.ipify.org').text)
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات
 # ──────────────────────────────────────────────
