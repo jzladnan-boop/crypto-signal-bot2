@@ -85,7 +85,12 @@ SYMBOLS_REQUESTED = [
     "GMTUSDT", "MINAUSDT", "TWTUSDT", "VETUSDT", "SKLUSDT", "ARPAUSDT", "ENJUSDT", "IOSTUSDT",
     "BCHUSDT", "APTUSDT", "ATOMUSDT",
 ]
-
+def get_valid_symbols(client):
+    exchange_info = client.get_exchange_info()
+    available = {s["symbol"] for s in exchange_info["symbols"] if s["status"] == "TRADING"}
+    valid = [s for s in SYMBOLS_REQUESTED if s in available]
+    log.info(f"✅ عملات صالحة: {len(valid)} من {len(SYMBOLS_REQUESTED)}")
+    return valid
 
 INTERVAL        = Client.KLINE_INTERVAL_15MINUTE
 RSI_PERIOD      = 14
