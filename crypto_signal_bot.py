@@ -16,40 +16,20 @@ import ta
 # ⚙️ الإعدادات (قائمة العملات مدمجة في سطر نظيف لمنع خطأ الـ 316)
 # ──────────────────────────────────────────────
 BASE_SYMBOLS = [
-    "ACE", "ACH", "ADA", "AERGO", "ASI", "AHT", "AION", "AIOZ", "AIXBT", "AKT",
-    "ALGO", "ALT", "AMB", "AMP", "ANKR", "ANT", "APT", "ARB", "ARKM", "ARPA",
-    "ARRR", "ARV", "ASM", "ASTA", "ASTR", "ATA", "ATL", "ATOM", "AVA", "AVAX",
-    "AZERO", "BANANA", "BAND", "BAT", "BCH", "BCN", "BEAM", "BFC", "BIFI", "BIO",
-    "BLZ", "BMT", "BNK", "BORA", "BOSON", "BSV", "BTC", "CASPER", "CELO", "CELR",
-    "CENNZ", "CGPT", "CFX", "CHR", "CHRH", "CHZ", "CKB", "CLV", "CMT", "COOKIE",
-    "CQT", "CSPR", "CTK", "CTSI", "CTXC", "CVC", "DAG", "DASH", "DATA", "DENT",
-    "DERO", "DEXT", "DFA", "DGB", "DIA", "DKA", "DLT", "DNT", "DOCK", "DOGE",
-    "DOT", "DREYAI", "DTA", "DUSK", "DVPN", "EDEN", "EDU", "EGLD", "EIGEN", "EL",
-    "ELF", "ENJ", "ENS", "EOS", "EPIC", "ERC20", "ESP", "ETC", "ETH", "ETHW",
-    "EURI", "EWT", "FET", "FIL", "FIO", "FIRO", "FITFI", "FLAI", "FLUX", "FTM",
-    "FX", "GATA", "GLC", "GLM", "GMT", "GO", "GPC", "GRIN", "GRS", "GRT",
-    "GTC", "HAI", "HAPI", "HBAR", "HC", "HERO", "HIVE", "HNT", "HYPER", "ICP",
-    "ICK", "IMX", "INT", "INTT", "IOST", "IOTA", "IOTX", "IQ", "IRIS", "KAI",
-    "KAS", "KEEP", "KEY", "KLAY", "KLV", "KMD", "KRL", "KSM", "LAI", "LINEA",
-    "LINK", "LISA", "LIT", "LN", "LOOM", "LRC", "LSK", "LSS", "LTC", "LTO",
-    "LUMIA", "LXT", "LYXE", "MAID", "MASK", "MATIC", "MDT", "METIS", "META", "MINA",
-    "MITH", "MOVR", "MTL", "MTH", "MUSD", "MVL", "MYTH", "NAS", "NAV", "NEAR",
-    "NEBL", "NEO", "NFTB", "NIM", "NKN", "NTRN", "NU", "NULS", "NXS", "OGN",
-    "OLT", "OMG", "OMI", "ONE", "ONG", "ORAI", "ORC", "OST", "OXEN", "OXT",
-    "PAAL", "PERL", "PHA", "PHB", "PIVX", "PNK", "POA", "POLY", "POND", "POWR",
-    "PROM", "PROS", "PUNDIX", "PYTH", "QKC", "QLC", "QNT", "QSP", "QTUM", "RAD",
-    "RARE", "RAZOR", "RBTC", "REEF", "REQ", "REV", "RIF", "RKN", "RLC", "RMRK",
-    "RLY", "RON", "ROSE", "RVN", "SAFE", "SAND", "SBD", "SC", "SCRT", "SFP",
-    "SHR", "SKL", "SKM", "SNT", "SNTVT", "SOC", "SOL", "SOLVE", "SPI", "SSV",
-    "STC", "STMX", "STORJ", "STPT", "STRAX", "STX", "SUI", "SUTER", "SWASH", "SXP",
-    "SYS", "TEL", "TFUEL", "THETA", "TIME", "TOMO", "TORN", "TRAC", "TRB", "TRX",
-    "TRIAS", "TTN", "TTT", "TVK", "TWT", "UQC", "USDP", "UTK", "VAI", "VAL",
-    "VARA", "VELO", "VERI", "VET", "VTHO", "VID", "VIDT", "VIRTUAL", "VITE", "WABI",
-    "WAXP", "WIC", "WICC", "WLD", "WTC", "XAUT", "XCN", "XDC", "XEC", "XEM",
-    "XLM", "XMR", "XPR", "XRP", "XTZ", "XYM", "XYO", "XMN", "YOUC", "ZEC",
-    "ZENT", "ZIG", "ZIL", "ZK", "ZRO"
+    "ACE", "ACH", "ADA", "AERGO", "ASI", "AIOZ", "AKT", "ALGO", "ALT", "ANKR",
+    "ANT", "APT", "ARB", "ARKM", "ARPA", "ASTR", "ATA", "ATOM", "AVA", "AVAX",
+    "AZERO", "BANANA", "BAND", "BAT", "BCH", "BEAM", "BFC", "BIFI", "BLZ", "BNK",
+    "BORA", "BSV", "BTC", "CELO", "CELR", "CFX", "CHR", "CHZ", "CKB", "CLV",
+    "COOKIE", "CSPR", "CTK", "CTSI", "CTXC", "CVC", "DAG", "DASH", "DATA", "DENT",
+    "DERO", "DEXT", "DGB", "DIA", "DOCK", "DOGE", "DOT", "DUSK", "DVPN", "EDEN",
+    "EDU", "EGLD", "EIGEN", "ELF", "ENJ", "ENS", "EOS", "ETC", "ETH", "ETHW",
+    "EURI", "EWT", "FET", "FIL", "FIO", "FIRO", "FLUX", "FTM", "FX", "GLM",
+    "GMT", "GRT", "GTC", "HBAR", "HERO", "HIVE", "HNT", "ICP", "IMX", "IOST",
+    "IOTA", "IOTX", "IQ", "KAS", "KEY", "KLAY", "KMD", "KRL", "KSM", "LINK",
+    "LIT", "LOOM", "LRC", "LSK", "LTC", "LTO", "LUMIA", "MASK", "MATIC", "MDT",
+    "METIS", "MINA", "MOVR", "MTL", "NEAR", "NEO", "NKN", "NTRN", "NULS", "OGN",
+    "OMG", "ONE", "ONG", "ORAI", "OXT", "PAAL", "PHA", "PHB", "PIVX", "POND"
 ]
-
 # توليد أزواج USDT تلقائياً لتجنب أخطاء المنصة
 SYMBOLS = [f"{s}USDT" for s in BASE_SYMBOLS]
 
