@@ -21,7 +21,7 @@ import ta
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات
 # ──────────────────────────────────────────────
-RAW_SYMBOLS = [
+SYMBOLS = [
     "STRAXUSDT", "KONETUSDT", "QAITUSDT", "WALLIUSDT", "SPCUSDT", "SHAREUSDT", "BALLUSDT", "BLENDUSDT",
     "MEGAUSDT", "PROSUSDT", "ACNUSDT", "STAYUSDT", "OPGUSDT", "STUSDT", "LWPUSDT", "DUPEUSDT",
     "WLUSDT", "USATUSDT", "PRLUSDT", "ADIUSDT", "IONUSDT", "BTCBUSDT", "XMNUSDT", "TXUSDT",
