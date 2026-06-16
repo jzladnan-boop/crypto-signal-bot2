@@ -155,11 +155,32 @@ def buy_market(client, symbol, usdt_amount):
         return None
 
 def sell_market(client, symbol, qty):
-    """يبيع بسعر السوق"""
+    """يبيع بسعر السوق - يجيب الكمية الفعلية من المحفظة"""
     try:
-        order = client.order_market_sell(symbol=symbol, quantity=qty)
+        # جيب الكمية الفعلية من المحفظة
+        asset = symbol.replace("USDT", "")
+        balance = client.get_asset_balance(asset=asset)
+        actual_qty = float(balance["free"])
+
+        if actual_qty <= 0:
+            log.warning(f"⚠️ {symbol}: رصيد العملة صفر، تخطي البيع")
+            return None
+
+        # تقريب الكمية حسب قواعد Binance
+        info = client.get_symbol_info(symbol)
+        step_size = None
+        for f in info["filters"]:
+            if f["filterType"] == "LOT_SIZE":
+                step_size = float(f["stepSize"])
+                break
+
+        if step_size:
+            precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+            actual_qty = round(actual_qty - (actual_qty % step_size), precision)
+
+        order = client.order_market_sell(symbol=symbol, quantity=actual_qty)
         price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        log.info(f"✅ بيع {symbol} | الكمية: {qty} | السعر: {price}")
+        log.info(f"✅ بيع {symbol} | الكمية: {actual_qty} | السعر: {price}")
         return price
     except BinanceAPIException as e:
         log.error(f"❌ خطأ بيع {symbol}: {e}")
@@ -185,6 +206,10 @@ def run_bot():
 
     # تتبع آخر إشارة شراء لكل عملة (لتجنب التكرار)
     last_signal = {s: False for s in SYMBOLS}
+
+    # Heartbeat - آخر مرة أرسل إشعار "البوت شغال"
+    last_heartbeat = time.time()
+    HEARTBEAT_INTERVAL = 3600  # كل ساعة
 
     while True:
         # ── حساب أقصى صفقات حسب الرصيد الحالي ──
@@ -295,6 +320,17 @@ def run_bot():
                     log.error(f"⚠️ {symbol}: {e}")
 
         log.info(f"⏳ صفقات مفتوحة: {len(open_trades)}/{max_trades} | رصيد USDT: {usdt_balance:.2f}$ | استنى {CHECK_EVERY}ث")
+
+        # ── Heartbeat كل ساعة ──
+        if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL:
+            send_telegram(
+                f"💚 <b>البوت شغال</b>\n"
+                f"💰 رصيد USDT: {usdt_balance:.2f}$\n"
+                f"📂 صفقات مفتوحة: {len(open_trades)}/{max_trades}\n"
+                f"👁️ يراقب {len(SYMBOLS)} عملة"
+            )
+            last_heartbeat = time.time()
+
         time.sleep(CHECK_EVERY)
 
 
