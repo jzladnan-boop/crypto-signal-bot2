@@ -13,7 +13,7 @@ from binance.exceptions import BinanceAPIException
 import ta
 
 # ──────────────────────────────────────────────
-# ⚙️ الإعدادات (قائمة العملات مدمجة في سطر نظيف لمنع خطأ الـ 316)
+# ⚙️ الإعدادات
 # ──────────────────────────────────────────────
 BASE_SYMBOLS = [
     "ACE", "ACH", "ADA", "AERGO", "ASI", "AIOZ", "AKT", "ALGO", "ALT", "ANKR",
@@ -30,18 +30,22 @@ BASE_SYMBOLS = [
     "METIS", "MINA", "MOVR", "MTL", "NEAR", "NEO", "NKN", "NTRN", "NULS", "OGN",
     "OMG", "ONE", "ONG", "ORAI", "OXT", "PAAL", "PHA", "PHB", "PIVX", "POND"
 ]
-# توليد أزواج USDT تلقائياً لتجنب أخطاء المنصة
 SYMBOLS = [f"{s}USDT" for s in BASE_SYMBOLS]
 
 INTERVAL        = Client.KLINE_INTERVAL_15MINUTE
 RSI_PERIOD      = 14
-RSI_BUY         = 30       # شراء عند RSI ≤ 30
-RSI_SELL        = 70       # تفعيل trailing عند RSI ≥ 70
-STOP_LOSS_PCT   = 0.025    # 2.5% stop loss
-TRAIL_ABOVE_PCT = 0.05     # بيع لو السعر ارتفع 5% فوق سعر RSI 70
-TRADE_AMOUNT    = 15.0     # دولار لكل صفقة
-RESERVE_USDT    = 5.0      # سيولة احتياطية دايماً محجوزة
-CHECK_EVERY     = 60       # ثانية بين كل دورة فحص
+RSI_BUY         = 30
+RSI_SELL        = 70
+STOP_LOSS_PCT   = 0.025
+TRAIL_ABOVE_PCT = 0.05
+TRADE_AMOUNT    = 15.0
+RESERVE_USDT    = 5.0
+CHECK_EVERY     = 60
+
+# MACD Settings - 8,17,6 أسرع من الافتراضي 12,26,9
+MACD_FAST   = 8
+MACD_SLOW   = 17
+MACD_SIGNAL = 6
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -83,8 +87,8 @@ def get_indicators(client, symbol):
     # RSI
     rsi = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
 
-    # MACD
-    macd_obj    = ta.trend.MACD(close=closes)
+    # MACD - إعدادات مخففة 8,17,6
+    macd_obj    = ta.trend.MACD(close=closes, window_slow=MACD_SLOW, window_fast=MACD_FAST, window_sign=MACD_SIGNAL)
     macd_line   = macd_obj.macd()
     signal_line = macd_obj.macd_signal()
 
@@ -183,13 +187,13 @@ def run_bot():
         raise EnvironmentError("❌ ضع BINANCE_API_KEY و BINANCE_API_SECRET في المتغيرات!")
 
     client = Client(api_key, api_secret)
-    log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة")
-    send_telegram(f"🚀 <b>بوت التداول شغال!</b>\nيراقب {len(SYMBOLS)} عملة\n💵 ${TRADE_AMOUNT} لكل صفقة")
+    log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة | MACD ({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})")
+    send_telegram(f"🚀 <b>بوت التداول شغال!</b>\nيراقب {len(SYMBOLS)} عملة\n💵 ${TRADE_AMOUNT} لكل صفقة\n📊 MACD: {MACD_FAST},{MACD_SLOW},{MACD_SIGNAL}")
 
     open_trades = {}
     last_signal = {s: False for s in SYMBOLS}
     last_heartbeat = time.time()
-    HEARTBEAT_INTERVAL = 3600  
+    HEARTBEAT_INTERVAL = 3600
 
     while True:
         usdt_balance = 0.0
@@ -198,7 +202,7 @@ def run_bot():
             max_trades   = max(1, int((usdt_balance - RESERVE_USDT) / TRADE_AMOUNT))
         except Exception as e:
             log.error(f"⚠️ خطأ جلب الرصيد: {e}")
-            max_trades = len(open_trades)  
+            max_trades = len(open_trades)
 
         # ── فحص الصفقات المفتوحة أولاً ──
         for symbol in list(open_trades.keys()):
@@ -212,7 +216,7 @@ def run_bot():
                 if not trade["trailing_active"] and rsi >= RSI_SELL:
                     trade["trailing_active"] = True
                     trade["rsi70_price"]     = price
-                    trade["stop_loss"]       = price  
+                    trade["stop_loss"]       = price
                     log.info(f"🔶 {coin} وصل RSI 70 | SL انتقل لـ {price}")
                     send_telegram(f"🔶 <b>{coin}</b> وصل RSI 70!\n💰 السعر: {price}\n🛡️ Stop Loss انتقل لـ {price}")
 
@@ -281,10 +285,15 @@ def run_bot():
                 except Exception as e:
                     log.error(f"⚠️ {symbol}: {e}")
 
-        log.info(f"⏳ صفقات مفتوحة: {len(open_trades)}/{max_trades} | رصيد USDT: {usdt_balance:.2f}$")
+        log.info(f"⏳ صفقات مفتوحة: {len(open_trades)}/{max_trades} | رصيد USDT: {usdt_balance:.2f}$ | استنى {CHECK_EVERY}ث")
 
         if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL:
-            send_telegram(f"💚 <b>البوت شغال</b>\n💰 رصيد USDT: {usdt_balance:.2f}$\n📂 صفقات مفتوحة: {len(open_trades)}/{max_trades}")
+            send_telegram(
+                f"💚 <b>البوت شغال</b>\n"
+                f"💰 رصيد USDT: {usdt_balance:.2f}$\n"
+                f"📂 صفقات مفتوحة: {len(open_trades)}/{max_trades}\n"
+                f"👁️ يراقب {len(SYMBOLS)} عملة"
+            )
             last_heartbeat = time.time()
 
         time.sleep(CHECK_EVERY)
