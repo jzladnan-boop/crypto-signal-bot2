@@ -168,7 +168,7 @@ def run_bot():
 
     client = Client(api_key, api_secret)
     log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة")
-    send_telegram(f"🚀 <b>بوت التداول شغال!</b>\nيراقب {len(SYMBOLS)} عملة\n💵 ${TRADE_AMOUNT} لكل صفقة\n📊 MACD: {MACD_FAST},{MACD_SLOW},{MACD_SIGNAL}")
+    send_telegram(f"🚀 <b>بوت التداول شغال!</b>\nيراقب {len(SYMBOLS)} عملة\n💵 ${TRADE_AMOUNT} لكل صفقة")
 
     open_trades = {}
     last_signal = {s: False for s in SYMBOLS}
@@ -253,7 +253,7 @@ def run_bot():
                             last_signal[symbol] = True
                             send_telegram(
                                 f"🟢 <b>شراء {coin}</b>\n💰 السعر: {result['entry_price']:.4f}\n"
-                                f"📊 RSI: {rsi} | MACD crossover ✅\n"
+                                f"📊 RSI: {rsi}\n"
                                 f"🛡️ Stop Loss: {stop_loss_price:.4f} (-2.5%)\n"
                                 f"📂 الصفقات: {len(open_trades)}/{max_trades}"
                             )
