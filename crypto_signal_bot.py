@@ -45,7 +45,7 @@ BASE_SYMBOLS = [
     "DMCP", "VFY", "PIPE", "BOOM", "ASP", "SHX", "AOP", "LYN", "KGEN", "COAI",
     "AFT", "OPENX", "NETX", "XVM", "LGCT", "BLESS", "SNIFT", "GATA", "POP", "SAPIEN",
     "NUMI", "MIRA", "WMTX", "XPL", "AIO", "AVN", "SYND", "STOP", "AICELL", "ONI",
-    "AIA", "MAIGA", "TANSSI", "BARD", "ZKC", "AUKI", "PAL", "AGON", "ZTX", "QZN",
+    "AIA", "MAIGA", "TANSSI", "ZKC", "AUKI", "PAL", "AGON", "ZTX", "QZN",
     "PIP", "HOLO", "LINEA", "IDEA", "NND", "SOMI", "SDV", "STFX", "DREYAI", "OASC",
     "ZKWASM", "CAMP", "KNET", "LIVE", "NODE", "APTM", "VRSC", "NEURON", "VARA", "AKE",
     "GAME", "SHIDO", "DARK", "LIORA", "MOR", "LOT", "TALE", "GAIA", "XNY", "CROSS",
