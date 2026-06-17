@@ -42,11 +42,6 @@ TRADE_AMOUNT    = 15.0
 RESERVE_USDT    = 5.0
 CHECK_EVERY     = 60
 
-# MACD Settings - 8,17,6 أسرع من الافتراضي 12,26,9
-MACD_FAST   = 8
-MACD_SLOW   = 17
-MACD_SIGNAL = 6
-
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -87,28 +82,13 @@ def get_indicators(client, symbol):
     # RSI
     rsi = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
 
-    # MACD - إعدادات مخففة 8,17,6
-    macd_obj    = ta.trend.MACD(close=closes, window_slow=MACD_SLOW, window_fast=MACD_FAST, window_sign=MACD_SIGNAL)
-    macd_line   = macd_obj.macd()
-    signal_line = macd_obj.macd_signal()
-
     price = float(client.get_symbol_ticker(symbol=symbol)["price"])
 
     return {
-        "rsi"         : round(rsi.iloc[-1], 2),
-        "rsi_prev"    : round(rsi.iloc[-2], 2),
-        "macd"        : macd_line.iloc[-1],
-        "macd_prev"   : macd_line.iloc[-2],
-        "signal"      : signal_line.iloc[-1],
-        "signal_prev" : signal_line.iloc[-2],
-        "price"       : price,
+        "rsi"      : round(rsi.iloc[-1], 2),
+        "rsi_prev" : round(rsi.iloc[-2], 2),
+        "price"    : price,
     }
-
-def is_macd_crossover(ind):
-    """MACD قطع خط الإشارة من تحت (في المنطقة السلبية)"""
-    crossed = (ind["macd_prev"] < ind["signal_prev"]) and (ind["macd"] > ind["signal"])
-    negative_zone = ind["macd"] < 0
-    return crossed and negative_zone
 
 # ──────────────────────────────────────────────
 # تنفيذ الصفقات
@@ -187,7 +167,7 @@ def run_bot():
         raise EnvironmentError("❌ ضع BINANCE_API_KEY و BINANCE_API_SECRET في المتغيرات!")
 
     client = Client(api_key, api_secret)
-    log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة | MACD ({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})")
+    log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة")
     send_telegram(f"🚀 <b>بوت التداول شغال!</b>\nيراقب {len(SYMBOLS)} عملة\n💵 ${TRADE_AMOUNT} لكل صفقة\n📊 MACD: {MACD_FAST},{MACD_SLOW},{MACD_SIGNAL}")
 
     open_trades = {}
@@ -257,7 +237,7 @@ def run_bot():
                     rsi  = ind["rsi"]
                     coin = symbol.replace("USDT", "")
 
-                    if rsi <= RSI_BUY and is_macd_crossover(ind) and not last_signal[symbol]:
+                    if rsi <= RSI_BUY and not last_signal[symbol]:
                         log.info(f"🟢 إشارة شراء {coin} | RSI: {rsi}")
                         result = buy_market(client, symbol, TRADE_AMOUNT)
 
