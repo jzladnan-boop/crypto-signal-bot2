@@ -167,6 +167,13 @@ def run_bot():
         raise EnvironmentError("❌ ضع BINANCE_API_KEY و BINANCE_API_SECRET في المتغيرات!")
 
     client = Client(api_key, api_secret)
+
+    # فلترة العملات المتاحة فعلاً للتداول
+    log.info("🔍 جاري فحص العملات المتاحة...")
+    exchange_info = client.get_exchange_info()
+    active_symbols = {s["symbol"] for s in exchange_info["symbols"] if s["status"] == "TRADING"}
+    SYMBOLS[:] = [s for s in SYMBOLS if s in active_symbols]
+    log.info(f"✅ عملات متاحة للتداول: {len(SYMBOLS)}")
     log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة")
     send_telegram(f"🚀 <b>بوت التداول شغال!</b>\nيراقب {len(SYMBOLS)} عملة\n💵 ${TRADE_AMOUNT} لكل صفقة")
 
