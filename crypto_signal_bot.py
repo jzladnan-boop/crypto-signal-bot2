@@ -1,6 +1,11 @@
 """
-Crypto Trading Bot - RSI + MACD Auto Trader (Fixed Version)
-===========================================================
+Crypto Trading Bot - RSI Auto Trader
+=====================================
+التعديلات:
+1. احتياطي $2 بدل $5
+2. RSI Crossover - يشتري لما RSI يرتد فوق 30
+3. Trailing SL 1% بعد RSI 70
+4. تنبيه تيليغرام على أي خطأ
 """
 
 import os
@@ -76,15 +81,16 @@ BASE_SYMBOLS = [
 ]
 SYMBOLS = [f"{s}USDT" for s in BASE_SYMBOLS]
 
-INTERVAL        = Client.KLINE_INTERVAL_15MINUTE
-RSI_PERIOD      = 14
-RSI_BUY         = 30
-RSI_SELL        = 70
-STOP_LOSS_PCT   = 0.025
-TRAIL_ABOVE_PCT = 0.05
-TRADE_AMOUNT    = 15.0
-RESERVE_USDT    = 5.0
-CHECK_EVERY     = 60
+INTERVAL         = Client.KLINE_INTERVAL_15MINUTE
+RSI_PERIOD       = 14
+RSI_BUY          = 30
+RSI_SELL         = 70
+STOP_LOSS_PCT    = 0.025    # 2.5% stop loss عند الدخول
+TRAIL_PCT        = 0.01     # 1% trailing stop بعد RSI 70
+TRAIL_ABOVE_PCT  = 0.05     # بيع لو السعر ارتفع 5% فوق سعر RSI 70
+TRADE_AMOUNT     = 15.0
+RESERVE_USDT     = 2.0      # احتياطي $2 للكل
+CHECK_EVERY      = 60
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -115,89 +121,82 @@ def send_telegram(message):
     except Exception as e:
         log.error(f"❌ خطأ تيليغرام: {e}")
 
+def send_error(location, error):
+    """يرسل تنبيه خطأ على تيليغرام"""
+    log.error(f"❌ خطأ في {location}: {error}")
+    send_telegram(f"⚠️ <b>خطأ في البوت</b>\n📍 المكان: {location}\n❌ الخطأ: {error}")
+
 # ──────────────────────────────────────────────
 # جلب البيانات والمؤشرات
 # ──────────────────────────────────────────────
 def get_indicators(client, symbol):
-    """يرجع RSI، MACD، سعر الإغلاق الأخير"""
+    """يرجع RSI وسعر الإغلاق الأخير"""
     klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=100)
     closes = pd.Series([float(k[4]) for k in klines])
-
-    # RSI
-    rsi = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
-
-    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-
+    rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
+    price  = float(client.get_symbol_ticker(symbol=symbol)["price"])
     return {
         "rsi"      : round(rsi.iloc[-1], 2),
         "rsi_prev" : round(rsi.iloc[-2], 2),
         "price"    : price,
     }
 
+def is_rsi_crossover(ind):
+    """RSI كان تحت 30 وارتد فوق 30 = إشارة شراء"""
+    return ind["rsi_prev"] < RSI_BUY and ind["rsi"] >= RSI_BUY
+
 # ──────────────────────────────────────────────
 # تنفيذ الصفقات
 # ──────────────────────────────────────────────
 def get_quantity(client, symbol, usdt_amount):
-    """يحسب الكمية المناسبة حسب قواعد Binance"""
-    info = client.get_symbol_info(symbol)
-    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-
+    info      = client.get_symbol_info(symbol)
+    price     = float(client.get_symbol_ticker(symbol=symbol)["price"])
     step_size = None
     for f in info["filters"]:
         if f["filterType"] == "LOT_SIZE":
             step_size = float(f["stepSize"])
-
     qty = usdt_amount / price
-
     if step_size:
         precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
         qty = round(qty - (qty % step_size), precision)
-
     return qty, price
 
 def buy_market(client, symbol, usdt_amount):
-    """يشتري بسعر السوق"""
     try:
         qty, price = get_quantity(client, symbol, usdt_amount)
         if qty <= 0:
             log.warning(f"⚠️ {symbol}: الكمية صفر، تخطي")
             return None
-
         order = client.order_market_buy(symbol=symbol, quantity=qty)
         log.info(f"✅ شراء {symbol} | الكمية: {qty} | السعر: {price}")
         return {"qty": qty, "entry_price": price, "order_id": order["orderId"]}
     except BinanceAPIException as e:
-        log.error(f"❌ خطأ شراء {symbol}: {e}")
+        send_error(f"شراء {symbol}", e)
         return None
 
 def sell_market(client, symbol, qty):
-    """يبيع بسعر السوق - يجيب الكمية الفعلية من المحفظة"""
     try:
-        asset = symbol.replace("USDT", "")
-        balance = client.get_asset_balance(asset=asset)
+        asset      = symbol.replace("USDT", "")
+        balance    = client.get_asset_balance(asset=asset)
         actual_qty = float(balance["free"])
-
         if actual_qty <= 0:
             log.warning(f"⚠️ {symbol}: رصيد العملة صفر، تخطي البيع")
             return None
-
-        info = client.get_symbol_info(symbol)
+        info      = client.get_symbol_info(symbol)
         step_size = None
         for f in info["filters"]:
             if f["filterType"] == "LOT_SIZE":
                 step_size = float(f["stepSize"])
                 break
-
         if step_size:
-            precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+            precision  = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
             actual_qty = round(actual_qty - (actual_qty % step_size), precision)
-
         order = client.order_market_sell(symbol=symbol, quantity=actual_qty)
         price = float(client.get_symbol_ticker(symbol=symbol)["price"])
         log.info(f"✅ بيع {symbol} | الكمية: {actual_qty} | السعر: {price}")
         return price
     except BinanceAPIException as e:
-        log.error(f"❌ خطأ بيع {symbol}: {e}")
+        send_error(f"بيع {symbol}", e)
         return None
 
 # ──────────────────────────────────────────────
@@ -206,24 +205,29 @@ def sell_market(client, symbol, qty):
 def run_bot():
     api_key    = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
-
     if not api_key or not api_secret:
         raise EnvironmentError("❌ ضع BINANCE_API_KEY و BINANCE_API_SECRET في المتغيرات!")
 
     client = Client(api_key, api_secret)
 
-    # فلترة العملات المتاحة فعلاً للتداول
+    # فلترة العملات المتاحة
     log.info("🔍 جاري فحص العملات المتاحة...")
-    exchange_info = client.get_exchange_info()
+    exchange_info  = client.get_exchange_info()
     active_symbols = {s["symbol"] for s in exchange_info["symbols"] if s["status"] == "TRADING"}
-    SYMBOLS[:] = [s for s in SYMBOLS if s in active_symbols]
+    SYMBOLS[:]     = [s for s in SYMBOLS if s in active_symbols]
     log.info(f"✅ عملات متاحة للتداول: {len(SYMBOLS)}")
-    log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة")
-    send_telegram(f"🚀 <b>بوت التداول شغال!</b>\nيراقب {len(SYMBOLS)} عملة\n💵 ${TRADE_AMOUNT} لكل صفقة")
 
-    open_trades = {}
-    last_signal = {s: False for s in SYMBOLS}
-    last_heartbeat = time.time()
+    log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة")
+    send_telegram(
+        f"🚀 <b>بوت التداول شغال!</b>\n"
+        f"👁️ يراقب {len(SYMBOLS)} عملة\n"
+        f"💵 ${TRADE_AMOUNT} لكل صفقة\n"
+        f"🛡️ Trailing SL: {int(TRAIL_PCT*100)}% | احتياطي: ${RESERVE_USDT}"
+    )
+
+    open_trades        = {}
+    last_signal        = {s: False for s in SYMBOLS}
+    last_heartbeat     = time.time()
     HEARTBEAT_INTERVAL = 3600
 
     while True:
@@ -232,10 +236,10 @@ def run_bot():
             usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
             max_trades   = max(1, int((usdt_balance - RESERVE_USDT) / TRADE_AMOUNT))
         except Exception as e:
-            log.error(f"⚠️ خطأ جلب الرصيد: {e}")
+            send_error("جلب الرصيد", e)
             max_trades = len(open_trades)
 
-        # ── فحص الصفقات المفتوحة أولاً ──
+        # ── فحص الصفقات المفتوحة ──
         for symbol in list(open_trades.keys()):
             trade = open_trades[symbol]
             try:
@@ -244,20 +248,33 @@ def run_bot():
                 rsi   = ind["rsi"]
                 coin  = symbol.replace("USDT", "")
 
+                # تفعيل Trailing بعد RSI 70
                 if not trade["trailing_active"] and rsi >= RSI_SELL:
                     trade["trailing_active"] = True
-                    trade["rsi70_price"]     = price
-                    trade["stop_loss"]       = price
-                    log.info(f"🔶 {coin} وصل RSI 70 | SL انتقل لـ {price}")
-                    send_telegram(f"🔶 <b>{coin}</b> وصل RSI 70!\n💰 السعر: {price}\n🛡️ Stop Loss انتقل لـ {price}")
+                    trade["highest_price"]   = price
+                    trade["stop_loss"]       = round(price * (1 - TRAIL_PCT), 8)
+                    log.info(f"🔶 {coin} وصل RSI 70 | SL Trailing: {trade['stop_loss']}")
+                    send_telegram(
+                        f"🔶 <b>{coin}</b> وصل RSI 70!\n"
+                        f"💰 السعر: {price}\n"
+                        f"🛡️ Trailing SL: {trade['stop_loss']:.4f} (-{int(TRAIL_PCT*100)}%)"
+                    )
 
+                # تحديث Trailing SL مع الصعود
+                if trade["trailing_active"] and price > trade["highest_price"]:
+                    trade["highest_price"] = price
+                    trade["stop_loss"]     = round(price * (1 - TRAIL_PCT), 8)
+                    log.info(f"📈 {coin} SL تحدّث لـ {trade['stop_loss']}")
+
+                # شروط البيع
                 sell_reason = None
                 if price <= trade["stop_loss"]:
-                    sell_reason = f"🛑 Stop Loss عند {trade['stop_loss']:.4f}"
-                elif trade["trailing_active"] and rsi < RSI_SELL and ind["rsi_prev"] >= RSI_SELL:
-                    sell_reason = f"📉 RSI نزل تحت 70 (RSI: {rsi})"
-                elif trade["trailing_active"] and price >= trade["rsi70_price"] * (1 + TRAIL_ABOVE_PCT):
-                    sell_reason = f"🎯 السعر ارتفع 5% فوق سعر RSI 70"
+                    if trade["trailing_active"]:
+                        sell_reason = f"🛑 Trailing SL عند {trade['stop_loss']:.4f}"
+                    else:
+                        sell_reason = f"🛑 Stop Loss عند {trade['stop_loss']:.4f}"
+                elif trade["trailing_active"] and price >= trade["highest_price"] * (1 + TRAIL_ABOVE_PCT):
+                    sell_reason = f"🎯 السعر ارتفع 5% فوق أعلى سعر"
 
                 if sell_reason:
                     sell_price = sell_market(client, symbol, trade["qty"])
@@ -266,7 +283,8 @@ def run_bot():
                         pnl_pct = ((sell_price - trade["entry_price"]) / trade["entry_price"]) * 100
                         emoji   = "🟢" if pnl >= 0 else "🔴"
                         send_telegram(
-                            f"{emoji} <b>بيع {coin}</b>\n📌 السبب: {sell_reason}\n"
+                            f"{emoji} <b>بيع {coin}</b>\n"
+                            f"📌 السبب: {sell_reason}\n"
                             f"💰 دخول: {trade['entry_price']:.4f} | خروج: {sell_price:.4f}\n"
                             f"📊 P&L: {pnl:+.2f}$ ({pnl_pct:+.2f}%)"
                         )
@@ -274,7 +292,7 @@ def run_bot():
                         last_signal[symbol] = False
 
             except Exception as e:
-                log.error(f"⚠️ خطأ فحص صفقة {symbol}: {e}")
+                send_error(f"فحص صفقة {symbol}", e)
 
         # ── البحث عن صفقات جديدة ──
         if len(open_trades) < max_trades:
@@ -288,27 +306,30 @@ def run_bot():
                     rsi  = ind["rsi"]
                     coin = symbol.replace("USDT", "")
 
-                    if rsi <= RSI_BUY and not last_signal[symbol]:
-                        log.info(f"🟢 إشارة شراء {coin} | RSI: {rsi}")
+                    # شرط الدخول: RSI كان تحت 30 وارتد فوق 30
+                    if is_rsi_crossover(ind) and not last_signal[symbol]:
+                        log.info(f"🟢 إشارة شراء {coin} | RSI: {ind['rsi_prev']} → {rsi}")
                         result = buy_market(client, symbol, TRADE_AMOUNT)
-
                         if result:
                             stop_loss_price = result["entry_price"] * (1 - STOP_LOSS_PCT)
                             open_trades[symbol] = {
                                 "qty"             : result["qty"],
                                 "entry_price"     : result["entry_price"],
                                 "stop_loss"       : stop_loss_price,
-                                "rsi70_price"     : None,
+                                "highest_price"   : result["entry_price"],
                                 "trailing_active" : False,
                             }
                             last_signal[symbol] = True
                             send_telegram(
-                                f"🟢 <b>شراء {coin}</b>\n💰 السعر: {result['entry_price']:.4f}\n"
-                                f"📊 RSI: {rsi}\n"
+                                f"🟢 <b>شراء {coin}</b>\n"
+                                f"💰 السعر: {result['entry_price']:.4f}\n"
+                                f"📊 RSI: {ind['rsi_prev']} → {rsi} (ارتداد ✅)\n"
                                 f"🛡️ Stop Loss: {stop_loss_price:.4f} (-2.5%)\n"
                                 f"📂 الصفقات: {len(open_trades)}/{max_trades}"
                             )
-                    elif 35 < rsi < 65:
+
+                    # إعادة ضبط الإشارة
+                    elif rsi < RSI_BUY:
                         last_signal[symbol] = False
 
                 except BinanceAPIException:
@@ -316,7 +337,7 @@ def run_bot():
                 except Exception as e:
                     log.error(f"⚠️ {symbol}: {e}")
 
-        log.info(f"⏳ صفقات مفتوحة: {len(open_trades)}/{max_trades} | رصيد USDT: {usdt_balance:.2f}$ | استنى {CHECK_EVERY}ث")
+        log.info(f"⏳ {len(open_trades)}/{max_trades} صفقات | USDT: {usdt_balance:.2f}$ | استنى {CHECK_EVERY}ث")
 
         if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL:
             send_telegram(
