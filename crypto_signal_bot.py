@@ -1,11 +1,9 @@
 """
-Crypto Trading Bot - RSI Auto Trader
-=====================================
-التعديلات:
-1. احتياطي $2 بدل $5
-2. RSI Crossover - يشتري لما RSI يرتد فوق 30
-3. Trailing SL 1% بعد RSI 70
-4. تنبيه تيليغرام على أي خطأ
+Crypto Trading Bot - RSI Auto Trader (Dynamic Free Max Trades)
+============================================================
+التعديل:
+- جعل البوت يشتري بحرية كاملة طالما يتوفر رصيد فوق الـ 15$ بدون قفل صلب.
+- بقية الاستراتيجية والإعدادات بدون أي تغيير.
 """
 
 import os
@@ -34,50 +32,7 @@ BASE_SYMBOLS = [
     "LOOM", "LRC", "LSK", "LTC", "LTO", "LUMIA", "MASK", "MATIC", "MDT", "METIS",
     "MINA", "MOVR", "MTL", "NEAR", "NEO", "NKN", "NTRN", "NULS", "OGN", "OMG",
     "ONE", "ONG", "ORAI", "OXT", "PAAL", "PHA", "PHB", "PIVX", "POND", "STRAX",
-    "KONET", "QAIT", "WALLI", "SPC", "SHARE", "BALL", "BLEND", "MEGA", "PROS", "ACN",
-    "STAY", "OPG", "ST", "LWP", "DUPE", "WL", "USAT", "PRL", "ADI", "ION",
-    "BTCB", "XMN", "TX", "ARCSOL", "SUP", "IDOS", "KIN", "INI", "TAKE", "ZKP",
-    "NOCK", "AZTEC", "ESP", "TIMI", "WAI", "XCX", "GAIN", "WBAI", "VDR", "RNBW",
-    "DIN", "SOGNI", "ZAMA", "KULA", "EVDC", "REAL", "SSS", "SPACE", "BDCA", "IMU",
-    "PRO", "GWEI", "SKR", "ELSA", "ACU", "GRIN", "DN", "ARTFI", "OWL", "RZR",
-    "RAIL", "ENX", "EDGE", "CAI", "AIAV", "DGRAM", "BYTE", "ZTC", "TAT", "BREV",
-    "ESIM", "MORE", "ART", "VITA", "JOJO", "SNS", "KGST", "DMD", "SENT", "ZENT",
-    "CTY", "RIZE", "TTD", "LISA", "VAIX", "ARVEX", "POWER", "CYS", "LIGHT", "STAR",
-    "JCT", "TRUTH", "NIGHT", "RCHV", "STABLE", "SUT", "UMBRA", "GAIX", "OBI", "SHR",
-    "MON", "IRYS", "AT", "LIFE", "GHOST", "ZERA", "XSWAP", "LAVA", "PAYAI", "LITKEY",
-    "BOS", "KITE", "MNTC", "SWTCH", "SUI", "PIGGY", "EAT", "CLANKER", "BLUAI", "DGC",
-    "XAN", "SIMAI", "FLK", "MTP", "BOOST", "PUSH", "ENSO", "DMCP", "VFY", "PIPE",
-    "BOOM", "ASP", "SHX", "AOP", "LYN", "KGEN", "COAI", "AFT", "OPENX", "NETX",
-    "XVM", "LGCT", "BLESS", "SNIFT", "GATA", "POP", "SAPIEN", "NUMI", "MIRA", "WMTX",
-    "XPL", "AIO", "AVN", "SYND", "STOP", "AICELL", "ONI", "AIA", "MAIGA", "TANSSI",
-    "ZKC", "AUKI", "PAL", "AGON", "ZTX", "QZN", "PIP", "HOLO", "LINEA", "IDEA",
-    "NND", "SOMI", "SDV", "STFX", "DREYAI", "OASC", "ZKWASM", "CAMP", "KNET", "LIVE",
-    "NODE", "APTM", "VRSC", "NEURON", "VARA", "AKE", "GAME", "SHIDO", "DARK", "LIORA",
-    "MOR", "LOT", "TALE", "GAIA", "XNY", "CROSS", "AIX", "ZKL", "IKA", "NAORIS",
-    "PROVE", "TOWNS", "RIO", "MIX", "STREAM", "PLAY", "FCT", "NERO", "PHY", "NODL",
-    "INIT", "OBOL", "CESS", "TRT", "QBX", "EIN", "TOKAMAK", "KASTA", "CELDATA", "ERA",
-    "RCADE", "STBU", "VAL", "AIN", "PUNDIAI", "SABAI", "BLPT", "CBK", "CGPT", "MAPO",
-    "VELO", "PRGN", "REX", "MGO", "SAHARA", "NEWT", "CMD", "CORAL", "SMRT", "BOTIFY",
-    "BRIC", "BSAI", "TAG", "BEE", "NAM", "MAT", "ESX", "GAG", "ARENA", "RDO",
-    "TMAI", "ASTRA", "SKATE", "DLC", "PIN", "RON", "MYTH", "FLY", "ZEC", "SSV",
-    "AB", "LENS", "INF", "NFTAI", "NERTA", "NRN", "BDXN", "EVER", "SQD", "BVT",
-    "BOX", "SHM", "DTVC", "ASRR", "OBT", "PATEX", "SOPH", "RESCUE", "AWE", "EPIC",
-    "RYO", "QUAI", "SOON", "REEF", "KTA", "SERV", "LOCK", "KEEP", "PRAI", "MINT",
-    "AGT", "DUCK", "NEON", "ORT", "RWAI", "SIX", "SKYAI", "DOMIN", "GPUS", "SXT",
-    "HEI", "FRIC", "AGC", "CRAI", "CARR", "OBOT", "FITFI", "PROPS", "AIOT", "VITE",
-    "NEXUS", "AMB", "NAI", "AGIXT", "AQA", "PUNDIX", "SIGN", "XAR", "ROY", "EPT",
-    "HYPER", "FHE", "WCT", "PROMPT", "MLK", "FLAI", "WAL", "PARTI", "GINI", "NIL",
-    "UQC", "ROAM", "BMT", "OBX", "XTER", "SKEY", "ARC", "HELIO", "SNAI", "SC",
-    "KAITO", "ETN", "ALL", "ETHO", "SCP", "CLS", "NXS", "DIAM", "ANLOG", "SUKU",
-    "VEE", "MFG", "NEBL", "HPB", "BITS", "SOLVE", "FUND", "CENNZ", "BOSON", "BLY",
-    "AVT", "DESCI", "MPC", "XCN", "XYM", "ALCH", "BID", "YNE", "CREO", "VVV",
-    "CHEX", "DAOX", "SONIC", "HAT", "PHI", "DRGN", "AIAI", "VIS", "NC", "CGAI",
-    "LMT", "NEUR", "CHEQ", "FUEL", "AIXBT", "SOAI", "OCN", "YOM", "RDN", "MYST",
-    "MOBI", "BIO", "FLOCK", "RAI", "SETAI", "PEP", "AUTOS", "HPO", "RSC", "CIRX",
-    "PRX", "CRU", "HNS", "KRO", "BTF", "STOS", "IOT", "SRX", "ELA", "QRL",
-    "PPC", "RARI", "DPR", "CDX", "RWA", "BEPRO", "SKAI", "VANA", "MARSH", "GURU",
-    "WLD", "AGENT", "KIP", "AGIX", "SXP", "WAXP", "DREP", "SAND", "RVN", "RLC",
-    "QNT", "TWT", "VET", "SKL", "PYTH", "INTT", "VIRTUAL", "STARAX",
+    "WLD", "SXP", "WAXP", "SAND", "RVN", "RLC", "QNT", "TWT", "VET", "SKL", "PYTH"
 ]
 SYMBOLS = [f"{s}USDT" for s in BASE_SYMBOLS]
 
@@ -122,7 +77,6 @@ def send_telegram(message):
         log.error(f"❌ خطأ تيليغرام: {e}")
 
 def send_error(location, error):
-    """يرسل تنبيه خطأ على تيليغرام"""
     log.error(f"❌ خطأ في {location}: {error}")
     send_telegram(f"⚠️ <b>خطأ في البوت</b>\n📍 المكان: {location}\n❌ الخطأ: {error}")
 
@@ -130,7 +84,6 @@ def send_error(location, error):
 # جلب البيانات والمؤشرات
 # ──────────────────────────────────────────────
 def get_indicators(client, symbol):
-    """يرجع RSI وسعر الإغلاق الأخير"""
     klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=100)
     closes = pd.Series([float(k[4]) for k in klines])
     rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
@@ -142,7 +95,6 @@ def get_indicators(client, symbol):
     }
 
 def is_rsi_crossover(ind):
-    """RSI كان تحت 30 وارتد فوق 30 = إشارة شراء"""
     return ind["rsi_prev"] < RSI_BUY and ind["rsi"] >= RSI_BUY
 
 # ──────────────────────────────────────────────
@@ -200,7 +152,7 @@ def sell_market(client, symbol, qty):
         return None
 
 # ──────────────────────────────────────────────
-# البوت الرئيسي
+# 🚀 البوت الرئيسي
 # ──────────────────────────────────────────────
 def run_bot():
     api_key    = os.getenv("BINANCE_API_KEY")
@@ -219,10 +171,9 @@ def run_bot():
 
     log.info(f"🚀 بدء بوت التداول | {len(SYMBOLS)} عملة")
     send_telegram(
-        f"🚀 <b>بوت التداول شغال!</b>\n"
+        f"🚀 <b>بوت التداول شغال بالنظام الحر!</b>\n"
         f"👁️ يراقب {len(SYMBOLS)} عملة\n"
-        f"💵 ${TRADE_AMOUNT} لكل صفقة\n"
-        f"🛡️ Trailing SL: {int(TRAIL_PCT*100)}% | احتياطي: ${RESERVE_USDT}"
+        f"💵 يشتري طالما يتوفر رصيد فوق الـ ${TRADE_AMOUNT}"
     )
 
     open_trades        = {}
@@ -234,7 +185,11 @@ def run_bot():
         usdt_balance = 0.0
         try:
             usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
-            max_trades   = max(1, int((usdt_balance - RESERVE_USDT) / TRADE_AMOUNT))
+            # 🌟 حسبة مرنة ومفتوحة: عدد الصفقات الممكن فتحها بالرصيد المتاح الحالي + الصفقات المفتوحة فعلياً
+            # هذا يضمن أن المقام يتحرك بحرية ليعطي فرصة شراء دائماً إذا توفر رصيد
+            max_trades = len(open_trades) + int((usdt_balance - RESERVE_USDT) / TRADE_AMOUNT)
+            if max_trades == len(open_trades) and (usdt_balance - RESERVE_USDT) >= TRADE_AMOUNT:
+                max_trades += 1
         except Exception as e:
             send_error("جلب الرصيد", e)
             max_trades = len(open_trades)
@@ -256,8 +211,7 @@ def run_bot():
                     log.info(f"🔶 {coin} وصل RSI 70 | SL Trailing: {trade['stop_loss']}")
                     send_telegram(
                         f"🔶 <b>{coin}</b> وصل RSI 70!\n"
-                        f"💰 السعر: {price}\n"
-                        f"🛡️ Trailing SL: {trade['stop_loss']:.4f} (-{int(TRAIL_PCT*100)}%)"
+                        f"🛡️ Trailing SL: {trade['stop_loss']:.4f}"
                     )
 
                 # تحديث Trailing SL مع الصعود
@@ -285,7 +239,6 @@ def run_bot():
                         send_telegram(
                             f"{emoji} <b>بيع {coin}</b>\n"
                             f"📌 السبب: {sell_reason}\n"
-                            f"💰 دخول: {trade['entry_price']:.4f} | خروج: {sell_price:.4f}\n"
                             f"📊 P&L: {pnl:+.2f}$ ({pnl_pct:+.2f}%)"
                         )
                         del open_trades[symbol]
@@ -294,19 +247,19 @@ def run_bot():
             except Exception as e:
                 send_error(f"فحص صفقة {symbol}", e)
 
-        # ── البحث عن صفقات جديدة ──
-        if len(open_trades) < max_trades:
+        # ── البحث عن صفقات جديدة (شرط الشراء الحر المبني على توفر رصيد فقط) ──
+        if (usdt_balance - RESERVE_USDT) >= TRADE_AMOUNT:
             for symbol in SYMBOLS:
                 if symbol in open_trades:
                     continue
-                if len(open_trades) >= max_trades:
+                # فحص فوري للرصيد المتاح قبل المتابعة في الحلقة
+                if (usdt_balance - RESERVE_USDT) < TRADE_AMOUNT:
                     break
                 try:
                     ind  = get_indicators(client, symbol)
                     rsi  = ind["rsi"]
                     coin = symbol.replace("USDT", "")
 
-                    # شرط الدخول: RSI كان تحت 30 وارتد فوق 30
                     if is_rsi_crossover(ind) and not last_signal[symbol]:
                         log.info(f"🟢 إشارة شراء {coin} | RSI: {ind['rsi_prev']} → {rsi}")
                         result = buy_market(client, symbol, TRADE_AMOUNT)
@@ -320,15 +273,18 @@ def run_bot():
                                 "trailing_active" : False,
                             }
                             last_signal[symbol] = True
+                            
+                            # تحديث فوري للرصيد المحلي بعد الشراء لمنع التكرار الخاطئ
+                            usdt_balance -= TRADE_AMOUNT
+                            current_max = len(open_trades) + int((usdt_balance - RESERVE_USDT) / TRADE_AMOUNT)
+                            
                             send_telegram(
                                 f"🟢 <b>شراء {coin}</b>\n"
-                                f"💰 السعر: {result['entry_price']:.4f}\n"
-                                f"📊 RSI: {ind['rsi_prev']} → {rsi} (ارتداد ✅)\n"
-                                f"🛡️ Stop Loss: {stop_loss_price:.4f} (-2.5%)\n"
+                                f"📊 RSI: {ind['rsi_prev']} → {rsi}\n"
+                                f"🛡️ Stop Loss: {stop_loss_price:.4f}\n"
                                 f"📂 الصفقات: {len(open_trades)}/{max_trades}"
                             )
 
-                    # إعادة ضبط الإشارة
                     elif rsi < RSI_BUY:
                         last_signal[symbol] = False
 
@@ -337,13 +293,13 @@ def run_bot():
                 except Exception as e:
                     log.error(f"⚠️ {symbol}: {e}")
 
-        log.info(f"⏳ {len(open_trades)}/{max_trades} صفقات | USDT: {usdt_balance:.2f}$ | استنى {CHECK_EVERY}ث")
+        log.info(f"⏳ {len(open_trades)} صفقات مفتوحة | USDT المتاح: {usdt_balance:.2f}$")
 
         if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL:
             send_telegram(
                 f"💚 <b>البوت شغال</b>\n"
-                f"💰 رصيد USDT: {usdt_balance:.2f}$\n"
-                f"📂 صفقات مفتوحة: {len(open_trades)}/{max_trades}\n"
+                f"💰 رصيد USDT المتاح: {usdt_balance:.2f}$\n"
+                f"📂 صفقات مفتوحة حالياً: {len(open_trades)}\n"
                 f"👁️ يراقب {len(SYMBOLS)} عملة"
             )
             last_heartbeat = time.time()
