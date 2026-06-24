@@ -1,10 +1,11 @@
 """
-Crypto Trading Bot - RSI Auto Trader (100% Fixed & Immediate Telegram Startup Notification)
-========================================================================
+Crypto Trading Bot - RSI Auto Trader
+نفس الكود الأصلي + كل التحسينات المتفق عليها
 """
 
 import os
 import time
+import json
 import logging
 import requests
 import threading
@@ -14,46 +15,74 @@ from binance.exceptions import BinanceAPIException
 import ta
 
 # ──────────────────────────────────────────────
-# ⚙️ الإعدادات الأساسية
+# ⚙️ الإعدادات الأساسية — نفس الأصلي
 # ──────────────────────────────────────────────
-SYMBOLS_FILE = "symbols.txt"
+SYMBOLS_FILE   = "symbols.txt"
+TRADES_FILE    = "open_trades.json"
 
 DEFAULT_BASE_SYMBOLS = [
-    "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL", 
-    "XVG", "APE", "AMP", "ADA", "AGLD", "SCR", "POL", "KAIA", "BANANA", "ME", 
-    "ARB", "WAXP", "VANRY", "POLYX", "DOT", "GRT", "PHA", "BAND", "LINK", "ZIL", 
-    "GAS", "APT", "VET", "TWT", "FIL", "MOVR", "GMT", "OP", "RIF", "ENS", 
-    "DIA", "ROSE", "QNT", "POWR", "RLC", "ZEN", "CELR", "FIDA", "SEI", "FET", 
-    "LPT", "IOTA", "LTC", "RVN", "CTSI", "TFUEL", "THETA", "CELO", "ICP", "SAND", 
-    "SOL", "MANTRA", "XLM", "XRP", "AVAX", "ONE", "CFX", "TLM", "BTC", "IQ", 
-    "BCH", "AVA", "MEGA", "EURI", "ETC", "BAT", "HBAR", "PORTAL", "CHZ", "CKB", 
-    "CHR", "ID", "CTK", "DUSK", "ARPA", "KAITO", "ENJ", "HIVE", "GTC", "2Z", 
-    "ENSO", "KITE", "AT", "NIGHT", "EIGEN", "ZKP", "SENT", "LUMIA", "BREV", "ZAMA", 
-    "ESP", "AZTEC", "QAIT", "STRAX", "ARX", "ATOM", "SUI", "NEAR", "TRX", "DOGE", 
-    "ZEC", "TAO", "ETH", "OPG", "EDU", "DEXE", "HEI", "ALGO", "ACH", "INIT", 
-    "TOWNS", "PROVE", "GALA", "SOMI", "OPEN", "HOLO", "LINEA", "OG", "XPL", "SXT", 
-    "SOON", "SOPH", "LA", "SSV", "RONIN", "NEWT", "CGPT", "C", "ERA", "PARTI", 
+    "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL",
+    "XVG", "APE", "AMP", "ADA", "AGLD", "SCR", "POL", "KAIA", "BANANA", "ME",
+    "ARB", "WAXP", "VANRY", "POLYX", "DOT", "GRT", "PHA", "BAND", "LINK", "ZIL",
+    "GAS", "APT", "VET", "TWT", "FIL", "MOVR", "GMT", "OP", "RIF", "ENS",
+    "DIA", "ROSE", "QNT", "POWR", "RLC", "ZEN", "CELR", "FIDA", "SEI", "FET",
+    "LPT", "IOTA", "LTC", "RVN", "CTSI", "TFUEL", "THETA", "CELO", "ICP", "SAND",
+    "SOL", "MANTRA", "XLM", "XRP", "AVAX", "ONE", "CFX", "TLM", "BTC", "IQ",
+    "BCH", "AVA", "MEGA", "EURI", "ETC", "BAT", "HBAR", "PORTAL", "CHZ", "CKB",
+    "CHR", "ID", "CTK", "DUSK", "ARPA", "KAITO", "ENJ", "HIVE", "GTC", "2Z",
+    "ENSO", "KITE", "AT", "NIGHT", "EIGEN", "ZKP", "SENT", "LUMIA", "BREV", "ZAMA",
+    "ESP", "AZTEC", "QAIT", "STRAX", "ARX", "ATOM", "SUI", "NEAR", "TRX", "DOGE",
+    "ZEC", "TAO", "ETH", "OPG", "EDU", "DEXE", "HEI", "ALGO", "ACH", "INIT",
+    "TOWNS", "PROVE", "GALA", "SOMI", "OPEN", "HOLO", "LINEA", "OG", "XPL", "SXT",
+    "SOON", "SOPH", "LA", "SSV", "RONIN", "NEWT", "CGPT", "C", "ERA", "PARTI",
     "WAL", "WCT", "HYPER", "ARKM", "ANKR", "ALT", "SIGN", "PUNDIX", "MAGIC"
 ]
 
-SYMBOLS = []
+SYMBOLS            = []
 
-INTERVAL         = Client.KLINE_INTERVAL_30MINUTE  # نصف ساعة
-RSI_PERIOD       = 14
-RSI_BUY          = 30
-RSI_SELL         = 70
-STOP_LOSS_PCT    = 0.02     # ستوب لوز 2% ماركت
-TRAIL_PCT        = 0.005    # تتبع أرباح لصيق 0.5%
-TRADE_AMOUNT     = 15.0
-RESERVE_USDT     = 2.0      
-CHECK_EVERY      = 60       
-HEARTBEAT_INTERVAL = 3600   # تنبيه التليجرام الدوري كل ساعة
+INTERVAL           = Client.KLINE_INTERVAL_30MINUTE
+RSI_PERIOD         = 14
+RSI_BUY            = 30
+RSI_SELL           = 70
+STOP_LOSS_PCT      = 0.02      # ستوب لوز ثابت 2% قبل تفعيل Trailing
+TRAIL_PCT          = 0.01      # ✅ تعديل: Trailing 1% بدل 0.5%
+TRAIL_ACTIVATE_PCT = 0.01      # ✅ جديد: يشتغل Trailing بعد 1% ربح
+TRADE_AMOUNT       = 15.0
+RESERVE_USDT       = 2.0
+MAX_TRADES         = 4         # أقصى 4 صفقات
+HEARTBEAT_INTERVAL = 3600
 
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# ✅ جديد: فحص ذكي مرحلتين
+SCAN_INTERVAL      = 300       # فحص خفيف لكل العملات كل 5 دقائق
+WATCH_INTERVAL     = 10        # فحص مكثف للمرشحين كل 10 ثواني
+RSI_WATCH_LOW      = 25        # منطقة المراقبة المكثفة
+RSI_WATCH_HIGH     = 35
+
+TELEGRAM_TOKEN     = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ──────────────────────────────────────────────
-# 📂 إدارة الملف النصي (TXT)
+# متغيرات التحكم العامة
+# ──────────────────────────────────────────────
+trading_enabled = True    # يتحكم فيه /stop و /start
+watch_list      = set()   # العملات في منطقة الارتداد
+open_trades     = {}      # الصفقات المفتوحة
+
+# ──────────────────────────────────────────────
+# Logging — نفس الأصلي
+# ──────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("trading_bot.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────
+# 📂 إدارة ملف العملات — نفس الأصلي
 # ──────────────────────────────────────────────
 def load_symbols_from_txt():
     global SYMBOLS
@@ -64,7 +93,7 @@ def load_symbols_from_txt():
     else:
         with open(SYMBOLS_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip().upper() for line in f.readlines() if line.strip()]
-        lines = list(dict.fromkeys(lines))
+        lines   = list(dict.fromkeys(lines))
         SYMBOLS = [f"{s}USDT" for s in lines]
 
 def save_symbols_to_txt():
@@ -73,89 +102,216 @@ def save_symbols_to_txt():
         f.write("\n".join(base_names))
 
 # ──────────────────────────────────────────────
-# Logging & Telegram
+# ✅ جديد: حفظ وتحميل الصفقات JSON
 # ──────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("trading_bot.log", encoding="utf-8"), logging.StreamHandler()]
-)
-log = logging.getLogger(__name__)
+def save_trades():
+    try:
+        with open(TRADES_FILE, "w", encoding="utf-8") as f:
+            json.dump(open_trades, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"❌ خطأ حفظ الصفقات: {e}")
 
+def load_trades():
+    global open_trades
+    if os.path.exists(TRADES_FILE):
+        try:
+            with open(TRADES_FILE, "r", encoding="utf-8") as f:
+                open_trades = json.load(f)
+            log.info(f"✅ تم تحميل {len(open_trades)} صفقة من الذاكرة")
+        except Exception as e:
+            log.error(f"❌ خطأ تحميل الصفقات: {e}")
+            open_trades = {}
+
+# ──────────────────────────────────────────────
+# 📨 تيليغرام — نفس الأصلي + تسجيل الخطأ
+# ──────────────────────────────────────────────
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        requests.post(url, data=data, timeout=10)
+        r = requests.post(url, data=data, timeout=10)
+        if r.status_code != 200:
+            log.error(f"❌ تيليغرام: {r.status_code} | {r.text}")
     except Exception as e:
         log.error(f"❌ خطأ تيليغرام: {e}")
 
 # ──────────────────────────────────────────────
-# 💬 أوامر التليجرام الخلفية
+# ✅ أوامر تيليغرام — نفس الأصلي + /stop /start /status /help
 # ──────────────────────────────────────────────
 def telegram_command_listener(client):
+    global SYMBOLS, trading_enabled
     offset = 0
+
+    # تجاهل الرسائل القديمة
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", timeout=10).json()
+        if r.get("result"):
+            offset = r["result"][-1]["update_id"] + 1
+    except Exception as e:
+        log.error(f"❌ خطأ offset تيليغرام: {e}")
+
     while True:
         if not TELEGRAM_TOKEN:
             time.sleep(10)
             continue
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=10"
-            r = requests.get(url, timeout=15).json()
+            r   = requests.get(url, timeout=15).json()
+
             if "result" in r:
                 for update in r["result"]:
                     offset = update["update_id"] + 1
-                    if "message" in update and "text" in update["message"]:
-                        text = update["message"]["text"].strip()
-                        chat_id = str(update["message"]["chat"]["id"])
-                        if chat_id != TELEGRAM_CHAT_ID:
-                            continue
-                        
-                        global SYMBOLS
-                        if text.startswith("/add "):
-                            coin = text.replace("/add ", "").strip().upper()
-                            symbol = f"{coin}USDT"
-                            try:
-                                client.get_symbol_info(symbol)
-                                if symbol not in SYMBOLS:
-                                    SYMBOLS.append(symbol)
-                                    save_symbols_to_txt()
-                                    send_telegram(f"✅ تم إضافة {coin} بنجاح للـ TXT والمراقبة.")
-                            except:
-                                send_telegram(f"❌ {coin} غير مدعومة فوري.")
-                        elif text.startswith("/remove "):
-                            coin = text.replace("/remove ", "").strip().upper()
-                            symbol = f"{coin}USDT"
-                            if symbol in SYMBOLS:
-                                SYMBOLS.remove(symbol)
+                    if "message" not in update or "text" not in update["message"]:
+                        continue
+
+                    text    = update["message"]["text"].strip()
+                    chat_id = str(update["message"]["chat"]["id"])
+                    if chat_id != TELEGRAM_CHAT_ID:
+                        continue
+
+                    # ── /add ──────────────────────────────────
+                    if text.startswith("/add "):
+                        coin   = text.replace("/add ", "").strip().upper()
+                        symbol = f"{coin}USDT"
+                        try:
+                            info = client.get_symbol_info(symbol)
+                            if info is None:
+                                send_telegram(f"❌ {coin} غير موجودة على بينانس.")
+                            elif symbol in SYMBOLS:
+                                send_telegram(f"⚠️ {coin} موجودة أصلاً بالقائمة.")
+                            else:
+                                SYMBOLS.append(symbol)
                                 save_symbols_to_txt()
-                                send_telegram(f"❌ تم حذف {coin} تماماً.")
-                        elif text == "/list":
-                            base_names = [s.replace("USDT", "") for s in SYMBOLS]
-                            send_telegram(f"📋 القائمة الحالية المراقبة: {', '.join(base_names)}")
-        except:
-            pass
+                                send_telegram(f"✅ تم إضافة {coin} للمراقبة.")
+                        except Exception as e:
+                            log.error(f"❌ /add {coin}: {e}")
+                            send_telegram(f"❌ فشل إضافة {coin}.")
+
+                    # ── /remove ───────────────────────────────
+                    elif text.startswith("/remove "):
+                        coin   = text.replace("/remove ", "").strip().upper()
+                        symbol = f"{coin}USDT"
+                        if symbol in SYMBOLS:
+                            SYMBOLS.remove(symbol)
+                            save_symbols_to_txt()
+                            send_telegram(f"🗑️ تم حذف {coin} من القائمة.")
+                        else:
+                            send_telegram(f"⚠️ {coin} مش موجودة بالقائمة.")
+
+                    # ── /list ─────────────────────────────────
+                    elif text == "/list":
+                        base_names = [s.replace("USDT", "") for s in SYMBOLS]
+                        chunks = [base_names[i:i+30] for i in range(0, len(base_names), 30)]
+                        for chunk in chunks:
+                            send_telegram(f"📋 القائمة ({len(base_names)} عملة):\n{', '.join(chunk)}")
+
+                    # ── /stop ─────────────────────────────────
+                    elif text == "/stop":
+                        trading_enabled = False
+                        send_telegram("⏸️ <b>تم إيقاف التداول.</b>\nالصفقات المفتوحة لا تزال تحت المراقبة.")
+
+                    # ── /start ────────────────────────────────
+                    elif text == "/start":
+                        trading_enabled = True
+                        send_telegram("▶️ <b>تم استئناف التداول.</b>")
+
+                    # ── /status ───────────────────────────────
+                    elif text == "/status":
+                        try:
+                            usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
+                        except:
+                            usdt_balance = 0.0
+                        status = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
+                        msg = (
+                            f"📊 <b>حالة البوت</b>\n"
+                            f"🔘 التداول: {status}\n"
+                            f"💰 USDT المتاح: ${usdt_balance:.2f}\n"
+                            f"💼 صفقات: {len(open_trades)}/{MAX_TRADES}\n"
+                            f"👁️ يراقب: {len(SYMBOLS)} عملة\n"
+                            f"🔍 مراقبة مكثفة: {len(watch_list)} عملة\n"
+                        )
+                        if open_trades:
+                            msg += "\n<b>الصفقات المفتوحة:</b>\n"
+                            for sym, t in open_trades.items():
+                                coin  = sym.replace("USDT", "")
+                                trail = "✅" if t.get("trailing_active") else "⏳"
+                                msg  += f"  #{coin} | دخول: {t['entry_price']:.4f}$ | Trailing: {trail}\n"
+                        send_telegram(msg)
+
+                    # ── /help ─────────────────────────────────
+                    elif text == "/help":
+                        send_telegram(
+                            "📖 <b>الأوامر المتاحة:</b>\n"
+                            "/add ETH — إضافة عملة\n"
+                            "/remove ETH — حذف عملة\n"
+                            "/list — عرض القائمة\n"
+                            "/stop — إيقاف التداول\n"
+                            "/start — استئناف التداول\n"
+                            "/status — حالة البوت والصفقات\n"
+                            "/help — عرض الأوامر"
+                        )
+
+        except Exception as e:
+            log.error(f"❌ خطأ listener: {e}")
         time.sleep(1)
 
 # ──────────────────────────────────────────────
-# جلب المؤشرات وتنفيذ الصفقات
+# ✅ جديد: فحص ذكي مرحلتين
+# ──────────────────────────────────────────────
+def get_rsi_quick(client, symbol):
+    """فحص خفيف — RSI سريع"""
+    try:
+        klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=RSI_PERIOD + 2)
+        closes = pd.Series([float(k[4]) for k in klines])
+        rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
+        return round(rsi.iloc[-1], 2)
+    except Exception as e:
+        log.error(f"❌ RSI سريع {symbol}: {e}")
+        return None
+
+def scan_all_symbols(client):
+    """المرحلة 1: فحص خفيف لكل العملات كل 5 دقائق"""
+    global watch_list
+    new_watch = set()
+    log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
+    for symbol in list(SYMBOLS):
+        if symbol in open_trades:
+            continue
+        rsi = get_rsi_quick(client, symbol)
+        if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
+            new_watch.add(symbol)
+        time.sleep(0.1)
+    added = new_watch - watch_list
+    if added:
+        log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
+    watch_list = new_watch
+
+# ──────────────────────────────────────────────
+# جلب المؤشرات — نفس الأصلي + معالجة الخطأ
 # ──────────────────────────────────────────────
 def get_indicators(client, symbol):
-    klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=100)
-    closes = pd.Series([float(k[4]) for k in klines])
-    rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
-    price  = float(client.get_symbol_ticker(symbol=symbol)["price"])
-    return {
-        "rsi"      : round(rsi.iloc[-1], 2),
-        "rsi_prev" : round(rsi.iloc[-2], 2),
-        "price"    : price,
-    }
+    try:
+        klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=100)
+        closes = pd.Series([float(k[4]) for k in klines])
+        rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
+        price  = float(client.get_symbol_ticker(symbol=symbol)["price"])
+        return {
+            "rsi"     : round(rsi.iloc[-1], 2),
+            "rsi_prev": round(rsi.iloc[-2], 2),
+            "price"   : price,
+        }
+    except Exception as e:
+        log.error(f"❌ مؤشرات {symbol}: {e}")
+        return None
 
+# ──────────────────────────────────────────────
+# تنفيذ الصفقات — نفس الأصلي + إصلاح البيع
+# ──────────────────────────────────────────────
 def get_quantity(client, symbol, usdt_amount):
-    info = client.get_symbol_info(symbol)
-    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+    info      = client.get_symbol_info(symbol)
+    price     = float(client.get_symbol_ticker(symbol=symbol)["price"])
     step_size = None
     for f in info["filters"]:
         if f["filterType"] == "LOT_SIZE":
@@ -169,33 +325,42 @@ def get_quantity(client, symbol, usdt_amount):
 def buy_market(client, symbol, usdt_amount):
     try:
         qty, price = get_quantity(client, symbol, usdt_amount)
-        if qty <= 0: return None
+        if qty <= 0:
+            return None
         order = client.order_market_buy(symbol=symbol, quantity=qty)
-        log.info(f"✅ شراء سوقي {symbol} | السعر: {price} | الكمية: {qty}")
+        log.info(f"✅ شراء {symbol} | السعر: {price} | الكمية: {qty}")
         return {"qty": qty, "entry_price": price, "order_id": order["orderId"]}
-    except:
+    except BinanceAPIException as e:
+        log.error(f"❌ شراء {symbol}: {e.status_code} | {e.message}")
+        return None
+    except Exception as e:
+        log.error(f"❌ شراء {symbol}: {e}")
         return None
 
 def sell_market(client, symbol, qty):
+    """✅ إصلاح: يبيع الكمية المحددة فقط مش كل الرصيد"""
     try:
-        asset = symbol.replace("USDT", "")
-        balance = client.get_asset_balance(asset=asset)
-        actual_qty = float(balance["free"])
-        if actual_qty <= 0: return None
-        info = client.get_symbol_info(symbol)
+        info      = client.get_symbol_info(symbol)
         step_size = None
         for f in info["filters"]:
             if f["filterType"] == "LOT_SIZE":
                 step_size = float(f["stepSize"])
                 break
+        sell_qty = qty * (1 - 0.001)  # طرح 0.1% عمولة
         if step_size:
             precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
-            actual_qty = round(actual_qty - (actual_qty % step_size), precision)
-        client.order_market_sell(symbol=symbol, quantity=actual_qty)
+            sell_qty  = round(sell_qty - (sell_qty % step_size), precision)
+        if sell_qty <= 0:
+            return None
+        client.order_market_sell(symbol=symbol, quantity=sell_qty)
         price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        log.info(f"✅ بيع سوقي {symbol} | السعر: {price}")
+        log.info(f"✅ بيع {symbol} | السعر: {price} | الكمية: {sell_qty}")
         return price
-    except:
+    except BinanceAPIException as e:
+        log.error(f"❌ بيع {symbol}: {e.status_code} | {e.message}")
+        return None
+    except Exception as e:
+        log.error(f"❌ بيع {symbol}: {e}")
         return None
 
 # ──────────────────────────────────────────────
@@ -207,7 +372,8 @@ def run_bot():
     client     = Client(api_key, api_secret)
 
     load_symbols_from_txt()
-    
+    load_trades()   # ✅ جديد: تحميل الصفقات من JSON
+
     try:
         log.info("🔍 جاري مطابقة وتصفية القائمة مع أسواق الـ Spot الرسمية...")
         exchange_info  = client.get_exchange_info()
@@ -217,109 +383,158 @@ def run_bot():
         save_symbols_to_txt()
         log.info("✅ تم فلترة وتأكيد العملات النشطة بنجاح.")
     except Exception as e:
-        log.warning(f"⚠️ تأخر رد بينانس بسبب قيود الشبكة السحابية. تم تخطي الانتظار واعتماد القائمة كاملة فوراً للأمان.")
+        log.warning(f"⚠️ تأخر رد بينانس. تم اعتماد القائمة كاملة: {e}")
 
     telegram_thread = threading.Thread(target=telegram_command_listener, args=(client,), daemon=True)
     telegram_thread.start()
 
-    open_trades = {}
     last_heartbeat = time.time()
+    last_scan      = 0
 
-    log.info(f"🚀 تم بدء تشغيل البوت بنجاح ومراقبة {len(SYMBOLS)} عملة فوري.")
-    
-    # ✨ التعديل: إرسال الرسالة الترحيبية الفورية للتليجرام أول ما يشتغل السيرفر بنجاح
+    log.info(f"🚀 البوت انطلق | {len(SYMBOLS)} عملة | {len(open_trades)} صفقة محملة")
     send_telegram(
         f"🚀 <b>تم تشغيل البوت بنجاح!</b>\n"
-        f"⏱️ فريم الفحص الحالي: 30 دقيقة\n"
-        f"👁️ يراقب حالياً {len(SYMBOLS)} عملة صافية من التكسات."
+        f"⏱️ فريم الفحص: 30 دقيقة\n"
+        f"👁️ يراقب {len(SYMBOLS)} عملة\n"
+        f"💼 صفقات محملة من الذاكرة: {len(open_trades)}\n"
+        f"📖 اكتب /help لعرض الأوامر"
     )
 
     while True:
-        log.info(f"🔄 جاري الفحص الدوري المستمر... عدد الصفقات الحالية: {len(open_trades)}")
+        try:
+            now = time.time()
+            log.info(f"🔄 فحص دوري | صفقات: {len(open_trades)}/{MAX_TRADES} | مراقبة مكثفة: {len(watch_list)}")
 
-        # التنبيه الدوري كل ساعة (البوت شغال 💚)
-        if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL:
-            try:
-                usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
-            except:
-                usdt_balance = 0.0
-            total_slots = len(open_trades)
-            heartbeat_msg = (
-                f"💚 البوت شغال\n"
-                f"💰 رصيد USDT المتاح: ${usdt_balance:.2f}\n"
-                f"💼 صفقات مفتوحة حالياً: {total_slots}\n"
-                f"👁️ يراقب {len(SYMBOLS)} عملة"
-            )
-            send_telegram(heartbeat_msg)
-            last_heartbeat = time.time()
+            # ── Heartbeat كل ساعة — نفس الأصلي ─────────
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                try:
+                    usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
+                except:
+                    usdt_balance = 0.0
+                status = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
+                send_telegram(
+                    f"💚 <b>البوت شغال</b>\n"
+                    f"🔘 التداول: {status}\n"
+                    f"💰 رصيد USDT: ${usdt_balance:.2f}\n"
+                    f"💼 صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES}\n"
+                    f"👁️ يراقب {len(SYMBOLS)} عملة"
+                )
+                last_heartbeat = now
 
-        # 1. ── إدارة الصفقات المفتوحة ──
-        for symbol in list(open_trades.keys()):
-            trade = open_trades[symbol]
-            try:
-                ind   = get_indicators(client, symbol)
-                price = ind["price"]
-                rsi   = ind["rsi"]
-                coin  = symbol.replace("USDT", "")
-
-                if not trade["trailing_active"] and rsi >= RSI_SELL:
-                    trade["trailing_active"] = True
-                    trade["highest_price"]   = price
-                    trade["stop_loss"]       = round(price * (1 - TRAIL_PCT), 8)
-
-                if trade["trailing_active"]:
-                    if price > trade["highest_price"]:
-                        trade["highest_price"] = price
-                        trade["stop_loss"]     = round(price * (1 - TRAIL_PCT), 8)
-                    elif price <= trade["stop_loss"]:
-                        sell_market(client, symbol, trade["qty"])
-                        send_telegram(f"🔴 بيع {coin}\n📉 RSI: {rsi}\n💰 السعر: {price}")
-                        del open_trades[symbol]
+            # ── 1. إدارة الصفقات المفتوحة — نفس الأصلي + Trailing محسّن ──
+            for symbol in list(open_trades.keys()):
+                trade = open_trades[symbol]
+                try:
+                    ind   = get_indicators(client, symbol)
+                    if not ind:
                         continue
-                else:
-                    entry_sl = round(trade["entry_price"] * (1 - STOP_LOSS_PCT), 8)
-                    if price <= entry_sl:
-                        sell_market(client, symbol, trade["qty"])
-                        send_telegram(f"🚨 ضرب ستوب لوز {coin}\n📉 السعر: {price}")
-                        del open_trades[symbol]
+                    price = ind["price"]
+                    rsi   = ind["rsi"]
+                    coin  = symbol.replace("USDT", "")
+
+                    # ✅ تعديل: Trailing يشتغل بعد 1% ربح بدل انتظار RSI 70
+                    if not trade["trailing_active"]:
+                        if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
+                            trade["trailing_active"] = True
+                            trade["highest_price"]   = price
+                            trade["stop_loss"]       = round(price * (1 - TRAIL_PCT), 8)
+                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']}")
+                            save_trades()
+
+                    # ✅ Trailing يتبع الصعود
+                    if trade["trailing_active"]:
+                        if price > trade["highest_price"]:
+                            trade["highest_price"] = price
+                            trade["stop_loss"]     = round(price * (1 - TRAIL_PCT), 8)
+                            save_trades()
+                        elif price <= trade["stop_loss"]:
+                            sell_price = sell_market(client, symbol, trade["qty"])
+                            if sell_price:
+                                profit = round((sell_price - trade["entry_price"]) * trade["qty"], 4)
+                                send_telegram(
+                                    f"💰 <b>جني أرباح - {coin}</b>\n"
+                                    f"📉 RSI: {rsi}\n"
+                                    f"💵 دخول: {trade['entry_price']:.4f}$ → خروج: {sell_price:.4f}$\n"
+                                    f"💹 PnL: {profit:+.4f} USDT"
+                                )
+                                del open_trades[symbol]
+                                save_trades()
+                                continue
+                    else:
+                        # ستوب لوز ثابت قبل تفعيل Trailing
+                        entry_sl = round(trade["entry_price"] * (1 - STOP_LOSS_PCT), 8)
+                        if price <= entry_sl:
+                            sell_price = sell_market(client, symbol, trade["qty"])
+                            if sell_price:
+                                loss = round((sell_price - trade["entry_price"]) * trade["qty"], 4)
+                                send_telegram(
+                                    f"🚨 <b>ستوب لوز - {coin}</b>\n"
+                                    f"📉 السعر: {sell_price:.4f}$\n"
+                                    f"💸 خسارة: {loss:.4f} USDT"
+                                )
+                                del open_trades[symbol]
+                                save_trades()
+                                continue
+
+                except Exception as e:
+                    log.error(f"❌ إدارة {symbol}: {e}")
+
+            # ── 2. فحص خفيف لكل العملات كل 5 دقائق ──────
+            if now - last_scan >= SCAN_INTERVAL:
+                scan_all_symbols(client)
+                last_scan = now
+
+            # ── 3. فحص مكثف للمرشحين — يصطاد الارتداد ───
+            if watch_list and trading_enabled and len(open_trades) < MAX_TRADES:
+                for symbol in list(watch_list):
+                    if symbol in open_trades:
+                        watch_list.discard(symbol)
                         continue
-            except:
-                pass
+                    if len(open_trades) >= MAX_TRADES:
+                        break
 
-        # 2. ── فحص إشارات الشراء للعملات الفورية ──
-        for symbol in list(SYMBOLS):
-            if symbol in open_trades:
-                continue
-            try:
-                ind = get_indicators(client, symbol)
-                if ind["rsi_prev"] < RSI_BUY and ind["rsi"] >= RSI_BUY:
-                    try:
-                        usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
-                    except:
-                        usdt_balance = 0.0
+                    ind = get_indicators(client, symbol)
+                    if not ind:
+                        continue
 
-                    if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):
-                        res = buy_market(client, symbol, TRADE_AMOUNT)
-                        if res:
-                            res["trailing_active"] = False
-                            res["highest_price"]   = res["entry_price"]
-                            open_trades[symbol]    = res
-                            
-                            coin_name = symbol.replace("USDT", "")
-                            sl_value = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 4)
-                            total_slots = len(open_trades)
-                            
-                            notification = (
-                                f"🟢 شراء {coin_name}\n"
-                                f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}\n"
-                                f"🛡️ Stop Loss: {sl_value}\n"
-                                f"💼 صفقات مفتوحة: {total_slots}"
-                            )
-                            send_telegram(notification)
-            except:
-                continue
+                    # ✅ نفس شرط الشراء الأصلي: تقاطع RSI من تحت 30 لفوق
+                    if ind["rsi_prev"] < RSI_BUY and ind["rsi"] >= RSI_BUY:
+                        try:
+                            usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
+                        except Exception as e:
+                            log.error(f"❌ رصيد USDT: {e}")
+                            continue
 
-        time.sleep(CHECK_EVERY)
+                        if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):
+                            res = buy_market(client, symbol, TRADE_AMOUNT)
+                            if res:
+                                res["trailing_active"] = False
+                                res["highest_price"]   = res["entry_price"]
+                                res["stop_loss"]       = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 8)
+                                open_trades[symbol]    = res
+                                save_trades()
+                                watch_list.discard(symbol)
+
+                                coin_name = symbol.replace("USDT", "")
+                                sl_value  = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 4)
+                                send_telegram(
+                                    f"🟢 <b>شراء {coin_name}</b>\n"
+                                    f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}\n"
+                                    f"💵 السعر: {res['entry_price']}\n"
+                                    f"🛡️ Stop Loss: {sl_value}\n"
+                                    f"💼 صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES}"
+                                )
+                        else:
+                            log.warning(f"⚠️ رصيد غير كافٍ: {usdt_balance:.2f} USDT")
+
+                    time.sleep(0.2)
+
+        except BinanceAPIException as e:
+            log.error(f"❌ بينانس: {e.status_code} | {e.message}")
+        except Exception as e:
+            log.error(f"❌ خطأ عام: {e}")
+
+        time.sleep(WATCH_INTERVAL)
 
 if __name__ == "__main__":
     run_bot()
