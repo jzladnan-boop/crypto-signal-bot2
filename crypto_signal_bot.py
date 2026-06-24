@@ -117,7 +117,31 @@ def load_trades():
         try:
             with open(TRADES_FILE, "r", encoding="utf-8") as f:
                 open_trades = json.load(f)
+
+            # ✅ تحقق من كل صفقة وأصلح الحقول الناقصة
+            for symbol, trade in open_trades.items():
+                coin = symbol.replace("USDT", "")
+
+                # لو ما في stop_loss احسبه من جديد
+                if "stop_loss" not in trade or not trade["stop_loss"]:
+                    trade["stop_loss"] = round(trade["entry_price"] * (1 - STOP_LOSS_PCT), 8)
+
+                # لو ما في trailing_active
+                if "trailing_active" not in trade:
+                    trade["trailing_active"] = False
+
+                # لو ما في highest_price
+                if "highest_price" not in trade:
+                    trade["highest_price"] = trade["entry_price"]
+
+                log.info(
+                    f"📂 صفقة محملة: {coin} | دخول: {trade['entry_price']:.4f}$ | "
+                    f"ستوب: {trade['stop_loss']:.4f}$ | Trailing: {trade['trailing_active']}"
+                )
+
             log.info(f"✅ تم تحميل {len(open_trades)} صفقة من الذاكرة")
+            save_trades()  # حفظ فوري بعد الإصلاح
+
         except Exception as e:
             log.error(f"❌ خطأ تحميل الصفقات: {e}")
             open_trades = {}
