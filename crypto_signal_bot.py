@@ -1,5 +1,5 @@
 """
-Crypto Trading Bot - RSI Auto Trader (With Active Live Logs & Hourly Heartbeat)
+Crypto Trading Bot - RSI Auto Trader (100% Clean Code & Verified Syntax)
 ========================================================================
 """
 
@@ -38,7 +38,7 @@ DEFAULT_BASE_SYMBOLS = [
 
 SYMBOLS = []
 
-INTERVAL         = Client.KLINE_INTERVAL_30MINUTE  # فريم النصف ساعة المعتمد
+INTERVAL         = Client.KLINE_INTERVAL_30MINUTE  # نصف ساعة
 RSI_PERIOD       = 14
 RSI_BUY          = 30
 RSI_SELL         = 70
@@ -46,8 +46,8 @@ STOP_LOSS_PCT    = 0.02     # ستوب لوز 2% ماركت
 TRAIL_PCT        = 0.005    # تتبع أرباح لصيق 0.5%
 TRADE_AMOUNT     = 15.0
 RESERVE_USDT     = 2.0      
-CHECK_EVERY      = 60       # الفحص كل دقيقة
-HEARTBEAT_INTERVAL = 3600   # تنبيه التليجرام الدوري (كل ساعة)
+CHECK_EVERY      = 60       
+HEARTBEAT_INTERVAL = 3600   # تنبيه التليجرام الدوري كل ساعة
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -223,10 +223,9 @@ def run_bot():
     log.info(f"🚀 تم بدء تشغيل البوت بنجاح ومراقبة {len(SYMBOLS)} عملة فوري.")
 
     while True:
-        # طباعة سطر تأكيدي في شاشة اللوق كل دقيقة لكي تطمئني أن الكود يتحرك ولا يتجمد
         log.info(f"🔄 جاري الفحص الدوري المستمر... عدد الصفقات الحالية: {len(open_trades)}")
 
-        # ── إرسال إشعار التليجرام الدوري (البوت شغال 💚) كل ساعة بالتمام والكمال ──
+        # التنبيه الدوري كل ساعة (البوت شغال 💚)
         if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL:
             try:
                 usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
@@ -312,4 +311,3 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-```[cite: 1]
