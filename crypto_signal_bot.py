@@ -41,16 +41,19 @@ DEFAULT_BASE_SYMBOLS = [
 SYMBOLS            = []
 
 INTERVAL           = Client.KLINE_INTERVAL_30MINUTE
+current_interval   = INTERVAL  # متغير قابل للتعديل
+
 RSI_PERIOD         = 14
 RSI_BUY            = 30
 RSI_SELL           = 70
-STOP_LOSS_PCT      = 0.02      # ستوب لوز ثابت 2% قبل تفعيل Trailing
-TRAIL_PCT          = 0.01      # ✅ تعديل: Trailing 1% بدل 0.5%
-TRAIL_ACTIVATE_PCT = 0.01      # ✅ جديد: يشتغل Trailing بعد 1% ربح
+STOP_LOSS_PCT      = 0.02
+TRAIL_PCT          = 0.01
+TRAIL_ACTIVATE_PCT = 0.01
 TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 2.0
-MAX_TRADES         = 4         # أقصى 4 صفقات
+MAX_TRADES         = 4
 HEARTBEAT_INTERVAL = 3600
+MA_PERIOD          = 20  # ✅ جديد: المتوسط المتحرك 20 شمعة
 
 # ✅ جديد: فحص ذكي مرحلتين
 SCAN_INTERVAL      = 120       # فحص خفيف لكل العملات كل دقيقتين
@@ -283,16 +286,48 @@ def telegram_command_listener(client):
                                 msg  += f"  #{coin} | دخول: {t['entry_price']:.4f}$ | Trailing: {trail}\n"
                         send_admin(msg)
 
+                    # ── /set_interval ────────────────────────
+                    elif text.startswith("/set_interval "):
+                        try:
+                            minutes = int(text.replace("/set_interval ", ""))
+                            global current_interval
+                            # تحويل الدقائق لفريم بينانس
+                            intervals = {
+                                15: Client.KLINE_INTERVAL_15MINUTE,
+                                30: Client.KLINE_INTERVAL_30MINUTE,
+                                60: Client.KLINE_INTERVAL_1HOUR,
+                                240: Client.KLINE_INTERVAL_4HOUR,
+                            }
+                            if minutes in intervals:
+                                current_interval = intervals[minutes]
+                                send_admin(f"✅ تم تغيير الفريم إلى {minutes} دقيقة")
+                                log.info(f"📊 الفريم الجديد: {minutes} دقيقة")
+                            else:
+                                send_admin(f"❌ الفريم المسموح: 15, 30, 60, 240 دقيقة")
+                        except Exception as e:
+                            send_admin(f"❌ خطأ: {e}")
+
                     # ── /help ─────────────────────────────────
                     elif text == "/help":
                         send_admin(
-                            "📖 <b>الأوامر المتاحة:</b>\n"
+                            "📖 <b>الأوامر المتاحة (17 أمر):</b>\n\n"
+                            "<b>إدارة العملات:</b>\n"
                             "/add ETH — إضافة عملة\n"
                             "/remove ETH — حذف عملة\n"
-                            "/list — عرض القائمة\n"
+                            "/list — عرض القائمة\n\n"
+                            "<b>التحكم بالتداول:</b>\n"
                             "/stop — إيقاف التداول\n"
                             "/start — استئناف التداول\n"
-                            "/status — حالة البوت والصفقات\n"
+                            "/status — حالة البوت\n\n"
+                            "<b>تعديل الإعدادات:</b>\n"
+                            "/set_trade_amount 20 — حجم الصفقة\n"
+                            "/set_max_trades 5 — أقصى صفقات\n"
+                            "/set_trail 1.5 — Trailing Stop\n"
+                            "/set_rsi_range 20 38 — منطقة RSI\n"
+                            "/set_interval 30 — الفريم (15/30/60/240)\n\n"
+                            "<b>التقارير:</b>\n"
+                            "/profit today — أرباح اليوم\n"
+                            "/summary — ملخص الأداء\n"
                             "/help — عرض الأوامر"
                         )
 
@@ -336,14 +371,19 @@ def scan_all_symbols(client):
 # ──────────────────────────────────────────────
 def get_indicators(client, symbol):
     try:
-        klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=100)
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
         closes = pd.Series([float(k[4]) for k in klines])
         rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
+        
+        # ✅ جديد: حساب MA20
+        ma20   = closes.rolling(window=MA_PERIOD).mean().iloc[-1]
+        
         price  = float(client.get_symbol_ticker(symbol=symbol)["price"])
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
             "price"   : price,
+            "ma20"    : round(ma20, 8),  # ✅ جديد
         }
     except Exception as e:
         log.error(f"❌ مؤشرات {symbol}: {e}")
@@ -540,8 +580,8 @@ def run_bot():
                     if not ind:
                         continue
 
-                    # ✅ شرط الشراء: تقاطع RSI من تحت 32 لفوق 30
-                    if ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY:
+                    # ✅ شرط الشراء: تقاطع RSI + فيلتر MA20
+                    if ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY and ind["price"] > ind["ma20"]:
                         try:
                             usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
                         except Exception as e:
