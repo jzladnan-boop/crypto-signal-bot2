@@ -71,6 +71,7 @@ TELEGRAM_ADMIN_ID  = os.getenv("TELEGRAM_ADMIN_ID", "")   # ID شاتك — ال
 trading_enabled = True    # يتحكم فيه /stop و /start
 watch_list      = set()   # العملات في منطقة الارتداد
 open_trades     = {}      # الصفقات المفتوحة
+ma20_enabled    = True    # ✅ جديد: تفعيل/تعطيل MA20
 
 # ──────────────────────────────────────────────
 # Logging — نفس الأصلي
@@ -307,10 +308,24 @@ def telegram_command_listener(client):
                         except Exception as e:
                             send_admin(f"❌ خطأ: {e}")
 
+                    # ── /enable_ma20 ─────────────────────────
+                    elif text == "/enable_ma20":
+                        global ma20_enabled
+                        ma20_enabled = True
+                        send_admin("✅ تم تفعيل فيلتر MA20")
+                        log.info("✅ MA20 مفعّل الآن")
+
+                    # ── /disable_ma20 ────────────────────────
+                    elif text == "/disable_ma20":
+                        global ma20_enabled
+                        ma20_enabled = False
+                        send_admin("❌ تم تعطيل فيلتر MA20 — الشراء بناءً على RSI فقط")
+                        log.info("❌ MA20 معطّل الآن")
+
                     # ── /help ─────────────────────────────────
                     elif text == "/help":
                         send_admin(
-                            "📖 <b>الأوامر المتاحة (17 أمر):</b>\n\n"
+                            "📖 <b>الأوامر المتاحة (18 أمر):</b>\n\n"
                             "<b>إدارة العملات:</b>\n"
                             "/add ETH — إضافة عملة\n"
                             "/remove ETH — حذف عملة\n"
@@ -325,6 +340,9 @@ def telegram_command_listener(client):
                             "/set_trail 1.5 — Trailing Stop\n"
                             "/set_rsi_range 20 38 — منطقة RSI\n"
                             "/set_interval 30 — الفريم (15/30/60/240)\n\n"
+                            "<b>الموشرات:</b>\n"
+                            "/enable_ma20 — تشغيل MA20\n"
+                            "/disable_ma20 — تعطيل MA20\n\n"
                             "<b>التقارير:</b>\n"
                             "/profit today — أرباح اليوم\n"
                             "/summary — ملخص الأداء\n"
@@ -580,8 +598,9 @@ def run_bot():
                     if not ind:
                         continue
 
-                    # ✅ شرط الشراء: تقاطع RSI + فيلتر MA20
-                    if ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY and ind["price"] > ind["ma20"]:
+                    # ✅ شرط الشراء: تقاطع RSI + فيلتر MA20 (إن كان مفعّل)
+                    ma20_condition = (ind["price"] > ind["ma20"]) if ma20_enabled else True
+                    if ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY and ma20_condition:
                         try:
                             usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
                         except Exception as e:
