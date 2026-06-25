@@ -53,13 +53,14 @@ MAX_TRADES         = 4         # أقصى 4 صفقات
 HEARTBEAT_INTERVAL = 3600
 
 # ✅ جديد: فحص ذكي مرحلتين
-SCAN_INTERVAL      = 300       # فحص خفيف لكل العملات كل 5 دقائق
+SCAN_INTERVAL      = 120       # فحص خفيف لكل العملات كل دقيقتين
 WATCH_INTERVAL     = 10        # فحص مكثف للمرشحين كل 10 ثواني
-RSI_WATCH_LOW      = 25        # منطقة المراقبة المكثفة
-RSI_WATCH_HIGH     = 35
+RSI_WATCH_LOW      = 20        # توسيع منطقة المراقبة
+RSI_WATCH_HIGH     = 38        # توسيع منطقة المراقبة
 
 TELEGRAM_TOKEN     = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")    # ID القناة — التنبيهات
+TELEGRAM_ADMIN_ID  = os.getenv("TELEGRAM_ADMIN_ID", "")   # ID شاتك — الأوامر
 
 # ──────────────────────────────────────────────
 # متغيرات التحكم العامة
@@ -150,6 +151,7 @@ def load_trades():
 # 📨 تيليغرام — نفس الأصلي + تسجيل الخطأ
 # ──────────────────────────────────────────────
 def send_telegram(message):
+    """يرسل التنبيهات للقناة"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -160,6 +162,20 @@ def send_telegram(message):
             log.error(f"❌ تيليغرام: {r.status_code} | {r.text}")
     except Exception as e:
         log.error(f"❌ خطأ تيليغرام: {e}")
+
+def send_admin(message):
+    """يرسل ردود الأوامر لشاتك الشخصي"""
+    chat = TELEGRAM_ADMIN_ID or TELEGRAM_CHAT_ID  # لو ما في admin يرسل للقناة
+    if not TELEGRAM_TOKEN or not chat:
+        return
+    url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": chat, "text": message, "parse_mode": "HTML"}
+    try:
+        r = requests.post(url, data=data, timeout=10)
+        if r.status_code != 200:
+            log.error(f"❌ تيليغرام admin: {r.status_code} | {r.text}")
+    except Exception as e:
+        log.error(f"❌ خطأ تيليغرام admin: {e}")
 
 # ──────────────────────────────────────────────
 # ✅ أوامر تيليغرام — نفس الأصلي + /stop /start /status /help
@@ -192,7 +208,10 @@ def telegram_command_listener(client):
 
                     text    = update["message"]["text"].strip()
                     chat_id = str(update["message"]["chat"]["id"])
-                    if chat_id != TELEGRAM_CHAT_ID:
+
+                    # ✅ يقبل أوامر من ADMIN_ID فقط — لو ما محدد يقبل من CHAT_ID
+                    allowed_id = TELEGRAM_ADMIN_ID if TELEGRAM_ADMIN_ID else TELEGRAM_CHAT_ID
+                    if chat_id != allowed_id:
                         continue
 
                     # ── /add ──────────────────────────────────
@@ -202,16 +221,16 @@ def telegram_command_listener(client):
                         try:
                             info = client.get_symbol_info(symbol)
                             if info is None:
-                                send_telegram(f"❌ {coin} غير موجودة على بينانس.")
+                                send_admin(f"❌ {coin} غير موجودة على بينانس.")
                             elif symbol in SYMBOLS:
-                                send_telegram(f"⚠️ {coin} موجودة أصلاً بالقائمة.")
+                                send_admin(f"⚠️ {coin} موجودة أصلاً بالقائمة.")
                             else:
                                 SYMBOLS.append(symbol)
                                 save_symbols_to_txt()
-                                send_telegram(f"✅ تم إضافة {coin} للمراقبة.")
+                                send_admin(f"✅ تم إضافة {coin} للمراقبة.")
                         except Exception as e:
                             log.error(f"❌ /add {coin}: {e}")
-                            send_telegram(f"❌ فشل إضافة {coin}.")
+                            send_admin(f"❌ فشل إضافة {coin}.")
 
                     # ── /remove ───────────────────────────────
                     elif text.startswith("/remove "):
@@ -220,26 +239,26 @@ def telegram_command_listener(client):
                         if symbol in SYMBOLS:
                             SYMBOLS.remove(symbol)
                             save_symbols_to_txt()
-                            send_telegram(f"🗑️ تم حذف {coin} من القائمة.")
+                            send_admin(f"🗑️ تم حذف {coin} من القائمة.")
                         else:
-                            send_telegram(f"⚠️ {coin} مش موجودة بالقائمة.")
+                            send_admin(f"⚠️ {coin} مش موجودة بالقائمة.")
 
                     # ── /list ─────────────────────────────────
                     elif text == "/list":
                         base_names = [s.replace("USDT", "") for s in SYMBOLS]
                         chunks = [base_names[i:i+30] for i in range(0, len(base_names), 30)]
                         for chunk in chunks:
-                            send_telegram(f"📋 القائمة ({len(base_names)} عملة):\n{', '.join(chunk)}")
+                            send_admin(f"📋 القائمة ({len(base_names)} عملة):\n{', '.join(chunk)}")
 
                     # ── /stop ─────────────────────────────────
                     elif text == "/stop":
                         trading_enabled = False
-                        send_telegram("⏸️ <b>تم إيقاف التداول.</b>\nالصفقات المفتوحة لا تزال تحت المراقبة.")
+                        send_admin("⏸️ <b>تم إيقاف التداول.</b>\nالصفقات المفتوحة لا تزال تحت المراقبة.")
 
                     # ── /start ────────────────────────────────
                     elif text == "/start":
                         trading_enabled = True
-                        send_telegram("▶️ <b>تم استئناف التداول.</b>")
+                        send_admin("▶️ <b>تم استئناف التداول.</b>")
 
                     # ── /status ───────────────────────────────
                     elif text == "/status":
@@ -262,11 +281,11 @@ def telegram_command_listener(client):
                                 coin  = sym.replace("USDT", "")
                                 trail = "✅" if t.get("trailing_active") else "⏳"
                                 msg  += f"  #{coin} | دخول: {t['entry_price']:.4f}$ | Trailing: {trail}\n"
-                        send_telegram(msg)
+                        send_admin(msg)
 
                     # ── /help ─────────────────────────────────
                     elif text == "/help":
-                        send_telegram(
+                        send_admin(
                             "📖 <b>الأوامر المتاحة:</b>\n"
                             "/add ETH — إضافة عملة\n"
                             "/remove ETH — حذف عملة\n"
@@ -521,8 +540,8 @@ def run_bot():
                     if not ind:
                         continue
 
-                    # ✅ نفس شرط الشراء الأصلي: تقاطع RSI من تحت 30 لفوق
-                    if ind["rsi_prev"] < RSI_BUY and ind["rsi"] >= RSI_BUY:
+                    # ✅ شرط الشراء: تقاطع RSI من تحت 32 لفوق 30
+                    if ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY:
                         try:
                             usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
                         except Exception as e:
