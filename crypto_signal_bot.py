@@ -20,14 +20,11 @@ from functools import wraps
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات الأساسية — نفس الأصلي
 # ──────────────────────────────────────────────
-# ──────────────────────────────────────────────
-# 📁 مسارات الملفات — Volume ثابت على Railway
-# ──────────────────────────────────────────────
-DATA_DIR     = os.getenv("DATA_DIR", "/app/data")   # Railway Volume
-SYMBOLS_FILE = os.path.join(DATA_DIR, "symbols.txt")
-TRADES_FILE  = os.path.join(DATA_DIR, "open_trades.json")
-PROFIT_FILE  = os.path.join(DATA_DIR, "profit_log.json")
-CIRCUIT_FILE = os.path.join(DATA_DIR, "circuit_breaker.json")
+DATA_DIR       = os.getenv("DATA_DIR", "/app/data")   # 📁 مجلد دائم (Volume) على Railway
+SYMBOLS_FILE   = os.path.join(DATA_DIR, "symbols.txt")
+TRADES_FILE    = os.path.join(DATA_DIR, "open_trades.json")
+PROFIT_FILE    = os.path.join(DATA_DIR, "profit_log.json")   # ✅ إصلاح #3: ملف لتتبع الأرباح
+CIRCUIT_FILE   = os.path.join(DATA_DIR, "circuit_breaker.json")   # 🛑 ملف لحفظ حالة التوقف التلقائي
 
 DEFAULT_BASE_SYMBOLS = [
     "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL",
@@ -198,7 +195,6 @@ def load_circuit_state():
                 save_circuit_state()
         except Exception as e:
             log.error(f"❌ خطأ تحميل حالة التوقف التلقائي: {e}")
-            open_trades = {}
 
 # ──────────────────────────────────────────────
 # ✅ إصلاح #3: ملف تتبع الأرباح
@@ -604,7 +600,7 @@ def scan_all_symbols(client):
 # جلب المؤشرات
 # ──────────────────────────────────────────────
 def get_current_price(client, symbol):
-    """سعر لحظي فقط — طلب واحد خفيف لتتبع الصفقات المفتوحة"""
+    """سعر لحظي فقط — طلب واحد خفيف لتتبع الصفقات المفتوحة (بدون RSI/MA20)"""
     try:
         return float(client.get_symbol_ticker(symbol=symbol)["price"])
     except Exception as e:
@@ -617,7 +613,7 @@ def get_indicators(client, symbol):
         closes = pd.Series([float(k[4]) for k in klines])
         rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
         ma20   = closes.rolling(window=MA_PERIOD).mean().iloc[-1]
-        price  = float(closes.iloc[-1])   # ← من الـ klines مباشرة، بدون طلب API ثاني
+        price  = float(closes.iloc[-1])   # من الـ klines مباشرة، بدون طلب API ثاني
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
@@ -935,8 +931,7 @@ def run_bot():
     global consecutive_losses, pause_until, trading_enabled
     global _binance_client
 
-    # ── تأكد إن مجلد البيانات موجود (Railway Volume) ──
-    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)   # 📁 تأكد إن مجلد البيانات (Volume) موجود
     log.info(f"📁 مجلد البيانات: {DATA_DIR}")
     api_key    = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
@@ -1013,10 +1008,10 @@ def run_bot():
             for symbol in list(open_trades.keys()):
                 trade = open_trades[symbol]
                 try:
-                    price = get_current_price(client, symbol)   # ← طلب واحد خفيف
+                    price = get_current_price(client, symbol)   # ← طلب واحد خفيف (تحسين)
                     if not price:
                         continue
-                    coin = symbol.replace("USDT", "")
+                    coin  = symbol.replace("USDT", "")
 
                     if not trade["trailing_active"]:
                         if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
