@@ -76,6 +76,7 @@ PAUSE_DURATION_SECONDS = 2 * 60 * 60  # مدة التوقف (ساعتين)
 # ✅ إصلاح #1: threading.Lock بدل Global مباشر
 # ──────────────────────────────────────────────
 _lock           = threading.Lock()
+_scan_lock      = threading.Lock()   # 🔒 حماية watch_list من التعديل المتزامن
 trading_enabled = True
 watch_list      = set()
 open_trades     = {}
@@ -453,15 +454,30 @@ def telegram_command_listener(client):
 
                     # ── /enable_ma20 ─────────────────────────
                     elif text == "/enable_ma20":
-                        with _lock:   # ✅ إصلاح #1
+                        with _lock:
                             ma20_enabled = True
-                        send_admin("✅ تم تفعيل فيلتر MA20")
+                        log.info("✅ [MA20] تم تفعيل فيلتر MA20 عبر تيليغرام")
+                        send_admin(
+                            "✅ <b>تم تفعيل فيلتر MA20</b>\n"
+                            "🔒 البوت الآن يشتري فقط إذا كان السعر فوق MA20 + RSI مناسب"
+                        )
 
                     # ── /disable_ma20 ────────────────────────
                     elif text == "/disable_ma20":
-                        with _lock:   # ✅ إصلاح #1
+                        with _lock:
                             ma20_enabled = False
-                        send_admin("❌ تم تعطيل فيلتر MA20 — الشراء بناءً على RSI فقط")
+                        log.info("⚠️ [MA20] تم تعطيل فيلتر MA20 عبر تيليغرام")
+                        send_admin(
+                            "⚠️ <b>تم تعطيل فيلتر MA20</b>\n"
+                            "📊 البوت الآن يشتري بناءً على RSI فقط بدون شرط MA20"
+                        )
+
+                    # ── /ma20_status ──────────────────────────
+                    elif text == "/ma20_status":
+                        with _lock:
+                            current_ma20 = ma20_enabled
+                        status_text = "✅ مفعّل" if current_ma20 else "❌ معطّل"
+                        send_admin(f"📊 <b>حالة فيلتر MA20:</b> {status_text}")
 
                     # ── /profit ──────────────────────────────
                     # ✅ إصلاح #3: أمر /profit مكوّد الآن
@@ -541,7 +557,8 @@ def telegram_command_listener(client):
                             "/set_interval 30 — الفريم (15/30/60/240)\n\n"
                             "<b>الموشرات:</b>\n"
                             "/enable_ma20 — تشغيل MA20\n"
-                            "/disable_ma20 — تعطيل MA20\n\n"
+                            "/disable_ma20 — تعطيل MA20\n"
+                            "/ma20_status — عرض حالة MA20 الحالية\n\n"
                             "<b>التقارير:</b>\n"
                             "/profit today — أرباح اليوم\n"
                             "/profit — كل الأرباح\n"
@@ -568,21 +585,36 @@ def get_rsi_quick(client, symbol):
         return None
 
 def scan_all_symbols(client):
-    """المرحلة 1: فحص خفيف لكل العملات"""
+    """المرحلة 1: فحص خفيف لكل العملات — يشتغل في Thread منفصل"""
     global watch_list
     new_watch = set()
     log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
     for symbol in list(SYMBOLS):
-        if symbol in open_trades:
+        with _lock:
+            already_open = symbol in open_trades
+        if already_open:
             continue
         rsi = get_rsi_quick(client, symbol)
         if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
             new_watch.add(symbol)
-        time.sleep(0.15)  # ✅ إصلاح #5: تأخير أكبر لتجنب Rate Limit
-    added = new_watch - watch_list
-    if added:
-        log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
-    watch_list = new_watch
+        time.sleep(0.15)  # تأخير آمن لتجنب Rate Limit بينانس
+    with _scan_lock:
+        added = new_watch - watch_list
+        if added:
+            log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
+        watch_list = new_watch
+    log.info(f"✅ انتهى الفحص الخفيف | مرشحون: {len(watch_list)}")
+
+
+def scan_worker(client):
+    """🧵 Thread منفصل — يشغّل الفحص الخفيف كل SCAN_INTERVAL ثانية بدون توقيف الحلقة الرئيسية"""
+    time.sleep(5)  # انتظار قصير حتى يكتمل تهيئة البوت
+    while True:
+        try:
+            scan_all_symbols(client)
+        except Exception as e:
+            log.error(f"❌ خطأ scan_worker: {e}")
+        time.sleep(SCAN_INTERVAL)
 
 # ──────────────────────────────────────────────
 # جلب المؤشرات
@@ -688,8 +720,11 @@ def run_bot():
     telegram_thread = threading.Thread(target=telegram_command_listener, args=(client,), daemon=True)
     telegram_thread.start()
 
+    # 🧵 Thread منفصل للفحص الخفيف — لا يوقف الحلقة الرئيسية أبداً
+    scan_thread = threading.Thread(target=scan_worker, args=(client,), daemon=True)
+    scan_thread.start()
+
     last_heartbeat = time.time()
-    last_scan      = 0
 
     log.info(f"🚀 البوت انطلق | {len(SYMBOLS)} عملة | {len(open_trades)} صفقة محملة")
     send_telegram(
@@ -810,19 +845,17 @@ def run_bot():
                 except Exception as e:
                     log.error(f"❌ إدارة {symbol}: {e}")
 
-            # ── 2. فحص خفيف لكل العملات ──────
-            if now - last_scan >= SCAN_INTERVAL:
-                scan_all_symbols(client)
-                last_scan = now
-
-            # ── 3. فحص مكثف للمرشحين ───
+            # ── 2. فحص مكثف للمرشحين ───
             with _lock:
                 is_trading = trading_enabled
+            with _scan_lock:
+                current_watch = set(watch_list)   # نسخة آمنة — الـ scan_worker يعدّل الأصل في Thread منفصل
 
-            if watch_list and is_trading and len(open_trades) < MAX_TRADES:
-                for symbol in list(watch_list):
+            if current_watch and is_trading and len(open_trades) < MAX_TRADES:
+                for symbol in current_watch:
                     if symbol in open_trades:
-                        watch_list.discard(symbol)
+                        with _scan_lock:
+                            watch_list.discard(symbol)
                         continue
                     if len(open_trades) >= MAX_TRADES:
                         break
@@ -848,9 +881,11 @@ def run_bot():
                                 res["trailing_active"] = False
                                 res["highest_price"]   = res["entry_price"]
                                 res["stop_loss"]       = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 8)
-                                open_trades[symbol]    = res
+                                with _lock:
+                                    open_trades[symbol] = res
                                 save_trades()
-                                watch_list.discard(symbol)
+                                with _scan_lock:
+                                    watch_list.discard(symbol)
 
                                 coin_name = symbol.replace("USDT", "")
                                 sl_value  = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 4)
