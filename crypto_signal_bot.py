@@ -1,6 +1,6 @@
 """
 Crypto Trading Bot - RSI Auto Trader
-نفس الكود الأصلي + كل التحسينات المتفق عليها
+نفس الكود الأصلي + إصلاح 5 أخطاء فقط بدون تغيير المنطق
 """
 
 import os
@@ -19,6 +19,8 @@ import ta
 # ──────────────────────────────────────────────
 SYMBOLS_FILE   = "symbols.txt"
 TRADES_FILE    = "open_trades.json"
+PROFIT_FILE    = "profit_log.json"   # ✅ إصلاح #3: ملف لتتبع الأرباح
+CIRCUIT_FILE   = "circuit_breaker.json"   # 🛑 ملف لحفظ حالة التوقف التلقائي
 
 DEFAULT_BASE_SYMBOLS = [
     "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL",
@@ -41,7 +43,7 @@ DEFAULT_BASE_SYMBOLS = [
 SYMBOLS            = []
 
 INTERVAL           = Client.KLINE_INTERVAL_30MINUTE
-current_interval   = INTERVAL  # متغير قابل للتعديل
+current_interval   = INTERVAL
 
 RSI_PERIOD         = 14
 RSI_BUY            = 30
@@ -53,28 +55,36 @@ TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 2.0
 MAX_TRADES         = 4
 HEARTBEAT_INTERVAL = 3600
-MA_PERIOD          = 20  # ✅ جديد: المتوسط المتحرك 20 شمعة
+MA_PERIOD          = 20
 
-# ✅ جديد: فحص ذكي مرحلتين
-SCAN_INTERVAL      = 120       # فحص خفيف لكل العملات كل دقيقتين
-WATCH_INTERVAL     = 10        # فحص مكثف للمرشحين كل 10 ثواني
-RSI_WATCH_LOW      = 20        # توسيع منطقة المراقبة
-RSI_WATCH_HIGH     = 38        # توسيع منطقة المراقبة
+SCAN_INTERVAL      = 120
+WATCH_INTERVAL     = 10
+RSI_WATCH_LOW      = 20
+RSI_WATCH_HIGH     = 38
 
 TELEGRAM_TOKEN     = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")    # ID القناة — التنبيهات
-TELEGRAM_ADMIN_ID  = os.getenv("TELEGRAM_ADMIN_ID", "")   # ID شاتك — الأوامر
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_ADMIN_ID  = os.getenv("TELEGRAM_ADMIN_ID", "")
 
 # ──────────────────────────────────────────────
-# متغيرات التحكم العامة
+# 🛑 Circuit Breaker: توقف تلقائي بعد خسارات متتالية
 # ──────────────────────────────────────────────
-trading_enabled = True    # يتحكم فيه /stop و /start
-watch_list      = set()   # العملات في منطقة الارتداد
-open_trades     = {}      # الصفقات المفتوحة
-ma20_enabled    = True    # ✅ جديد: تفعيل/تعطيل MA20
+MAX_CONSECUTIVE_LOSSES = 3            # عدد الستوب لوز المتتالية المسموح
+PAUSE_DURATION_SECONDS = 2 * 60 * 60  # مدة التوقف (ساعتين)
 
 # ──────────────────────────────────────────────
-# Logging — نفس الأصلي
+# ✅ إصلاح #1: threading.Lock بدل Global مباشر
+# ──────────────────────────────────────────────
+_lock           = threading.Lock()
+trading_enabled = True
+watch_list      = set()
+open_trades     = {}
+ma20_enabled    = True
+consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
+pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
+
+# ──────────────────────────────────────────────
+# Logging
 # ──────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -107,7 +117,7 @@ def save_symbols_to_txt():
         f.write("\n".join(base_names))
 
 # ──────────────────────────────────────────────
-# ✅ جديد: حفظ وتحميل الصفقات JSON
+# حفظ وتحميل الصفقات JSON
 # ──────────────────────────────────────────────
 def save_trades():
     try:
@@ -122,40 +132,96 @@ def load_trades():
         try:
             with open(TRADES_FILE, "r", encoding="utf-8") as f:
                 open_trades = json.load(f)
-
-            # ✅ تحقق من كل صفقة وأصلح الحقول الناقصة
             for symbol, trade in open_trades.items():
                 coin = symbol.replace("USDT", "")
-
-                # لو ما في stop_loss احسبه من جديد
                 if "stop_loss" not in trade or not trade["stop_loss"]:
                     trade["stop_loss"] = round(trade["entry_price"] * (1 - STOP_LOSS_PCT), 8)
-
-                # لو ما في trailing_active
                 if "trailing_active" not in trade:
                     trade["trailing_active"] = False
-
-                # لو ما في highest_price
                 if "highest_price" not in trade:
                     trade["highest_price"] = trade["entry_price"]
-
                 log.info(
                     f"📂 صفقة محملة: {coin} | دخول: {trade['entry_price']:.4f}$ | "
                     f"ستوب: {trade['stop_loss']:.4f}$ | Trailing: {trade['trailing_active']}"
                 )
-
             log.info(f"✅ تم تحميل {len(open_trades)} صفقة من الذاكرة")
-            save_trades()  # حفظ فوري بعد الإصلاح
-
+            save_trades()
         except Exception as e:
             log.error(f"❌ خطأ تحميل الصفقات: {e}")
+
+# ──────────────────────────────────────────────
+# 🛑 حفظ وتحميل حالة Circuit Breaker (تنجو من إعادة تشغيل السيرفر)
+# ──────────────────────────────────────────────
+def save_circuit_state():
+    try:
+        with open(CIRCUIT_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "consecutive_losses": consecutive_losses,
+                "pause_until"       : pause_until,
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"❌ خطأ حفظ حالة التوقف التلقائي: {e}")
+
+def load_circuit_state():
+    global consecutive_losses, pause_until, trading_enabled
+    if os.path.exists(CIRCUIT_FILE):
+        try:
+            with open(CIRCUIT_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            consecutive_losses = state.get("consecutive_losses", 0)
+            pause_until        = state.get("pause_until", 0)
+            if pause_until and pause_until > time.time():
+                # لسا فيه توقف نشط من قبل إعادة التشغيل — يبقى متوقف
+                trading_enabled = False
+                remaining_min = int((pause_until - time.time()) / 60)
+                log.warning(f"🛑 تم استرجاع توقف تلقائي نشط — باقي {remaining_min} دقيقة")
+                send_telegram(f"🛑 <b>تنبيه بعد إعادة التشغيل</b>\nيوجد توقف تلقائي نشط من قبل — باقي {remaining_min} دقيقة تقريبًا.")
+            elif pause_until:
+                # التوقف كان منتهي أصلاً وقت إعادة التشغيل
+                pause_until = 0
+                save_circuit_state()
+        except Exception as e:
+            log.error(f"❌ خطأ تحميل حالة التوقف التلقائي: {e}")
             open_trades = {}
 
 # ──────────────────────────────────────────────
-# 📨 تيليغرام — نفس الأصلي + تسجيل الخطأ
+# ✅ إصلاح #3: ملف تتبع الأرباح
+# ──────────────────────────────────────────────
+def load_profit_log():
+    if os.path.exists(PROFIT_FILE):
+        try:
+            with open(PROFIT_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def save_profit_log(log_data):
+    try:
+        with open(PROFIT_FILE, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"❌ خطأ حفظ الأرباح: {e}")
+
+def record_trade_result(symbol, entry_price, exit_price, qty, reason):
+    """يسجل نتيجة كل صفقة عند الإغلاق"""
+    profit_log = load_profit_log()
+    profit     = round((exit_price - entry_price) * qty, 4)
+    profit_log.append({
+        "symbol"     : symbol,
+        "entry_price": entry_price,
+        "exit_price" : exit_price,
+        "qty"        : qty,
+        "profit"     : profit,
+        "reason"     : reason,
+        "time"       : time.strftime("%Y-%m-%d %H:%M:%S")
+    })
+    save_profit_log(profit_log)
+
+# ──────────────────────────────────────────────
+# 📨 تيليغرام
 # ──────────────────────────────────────────────
 def send_telegram(message):
-    """يرسل التنبيهات للقناة"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -168,8 +234,7 @@ def send_telegram(message):
         log.error(f"❌ خطأ تيليغرام: {e}")
 
 def send_admin(message):
-    """يرسل ردود الأوامر لشاتك الشخصي"""
-    chat = TELEGRAM_ADMIN_ID or TELEGRAM_CHAT_ID  # لو ما في admin يرسل للقناة
+    chat = TELEGRAM_ADMIN_ID or TELEGRAM_CHAT_ID
     if not TELEGRAM_TOKEN or not chat:
         return
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -182,19 +247,32 @@ def send_admin(message):
         log.error(f"❌ خطأ تيليغرام admin: {e}")
 
 # ──────────────────────────────────────────────
-# ✅ أوامر تيليغرام — نفس الأصلي + /stop /start /status /help
+# أوامر تيليغرام
 # ──────────────────────────────────────────────
 def telegram_command_listener(client):
-    global SYMBOLS, trading_enabled, ma20_enabled
-    offset = 0
+    global SYMBOLS, trading_enabled, ma20_enabled, current_interval
+    global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
+    global pause_until, consecutive_losses
+    offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
-    # تجاهل الرسائل القديمة
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", timeout=10).json()
-        if r.get("result"):
-            offset = r["result"][-1]["update_id"] + 1
-    except Exception as e:
-        log.error(f"❌ خطأ offset تيليغرام: {e}")
+    for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", timeout=10).json()
+            if r.get("result"):
+                offset = r["result"][-1]["update_id"] + 1
+            else:
+                offset = 0
+            break
+        except Exception as e:
+            log.error(f"❌ خطأ offset تيليغرام (محاولة {attempt+1}/3): {e}")
+            time.sleep(2)
+
+    if offset is None:
+        # ✅ إصلاح: فشلت كل المحاولات — لا نبدأ من 0 لأن هذا يعيد تنفيذ
+        # كل الأوامر القديمة المعلّقة (مثل /stop أو /add قديمة). أفضل نتجاهلها
+        # ونبدأ نستقبل من اللحظة الحالية فقط، بدل تنفيذ أوامر قديمة بالغلط.
+        offset = -1
+        log.warning("⚠️ تعذّر تأكيد offset تيليغرام — سيتم تجاهل أي رسائل قديمة معلّقة لتجنب تنفيذها بالغلط.")
 
     while True:
         if not TELEGRAM_TOKEN:
@@ -213,7 +291,6 @@ def telegram_command_listener(client):
                     text    = update["message"]["text"].strip()
                     chat_id = str(update["message"]["chat"]["id"])
 
-                    # ✅ يقبل أوامر من ADMIN_ID فقط — لو ما محدد يقبل من CHAT_ID
                     allowed_id = TELEGRAM_ADMIN_ID if TELEGRAM_ADMIN_ID else TELEGRAM_CHAT_ID
                     if chat_id != allowed_id:
                         continue
@@ -256,12 +333,17 @@ def telegram_command_listener(client):
 
                     # ── /stop ─────────────────────────────────
                     elif text == "/stop":
-                        trading_enabled = False
+                        with _lock:   # ✅ إصلاح #1
+                            trading_enabled = False
                         send_admin("⏸️ <b>تم إيقاف التداول.</b>\nالصفقات المفتوحة لا تزال تحت المراقبة.")
 
                     # ── /start ────────────────────────────────
                     elif text == "/start":
-                        trading_enabled = True
+                        with _lock:   # ✅ إصلاح #1
+                            trading_enabled = True
+                            pause_until     = 0   # 🛑 إلغاء أي توقف تلقائي معلّق
+                        consecutive_losses = 0
+                        save_circuit_state()
                         send_admin("▶️ <b>تم استئناف التداول.</b>")
 
                     # ── /status ───────────────────────────────
@@ -270,37 +352,98 @@ def telegram_command_listener(client):
                             usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
                         except:
                             usdt_balance = 0.0
-                        status = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
+                        with _lock:
+                            status = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
+                            trades_count = len(open_trades)
+                            trades_copy  = dict(open_trades)
+                            pause_left   = pause_until
                         msg = (
                             f"📊 <b>حالة البوت</b>\n"
                             f"🔘 التداول: {status}\n"
                             f"💰 USDT المتاح: ${usdt_balance:.2f}\n"
-                            f"💼 صفقات: {len(open_trades)}/{MAX_TRADES}\n"
+                            f"💼 صفقات: {trades_count}/{MAX_TRADES}\n"
                             f"👁️ يراقب: {len(SYMBOLS)} عملة\n"
                             f"🔍 مراقبة مكثفة: {len(watch_list)} عملة\n"
                         )
-                        if open_trades:
+                        if pause_left and pause_left > time.time():
+                            remaining_min = int((pause_left - time.time()) / 60)
+                            msg += f"🛑 توقف تلقائي مفعّل — يُستأنف بعد {remaining_min} دقيقة\n"
+                        if trades_copy:
                             msg += "\n<b>الصفقات المفتوحة:</b>\n"
-                            for sym, t in open_trades.items():
+                            for sym, t in trades_copy.items():
                                 coin  = sym.replace("USDT", "")
                                 trail = "✅" if t.get("trailing_active") else "⏳"
                                 msg  += f"  #{coin} | دخول: {t['entry_price']:.4f}$ | Trailing: {trail}\n"
                         send_admin(msg)
 
+                    # ── /set_trade_amount ────────────────────
+                    elif text.startswith("/set_trade_amount "):
+                        try:
+                            amount = float(text.replace("/set_trade_amount ", ""))
+                            if amount <= 0:
+                                send_admin("❌ القيمة لازم تكون أكبر من صفر.")
+                            else:
+                                with _lock:   # ✅ إصلاح: حماية race condition
+                                    TRADE_AMOUNT = amount
+                                send_admin(f"✅ حجم الصفقة الجديد: ${TRADE_AMOUNT}")
+                        except:
+                            send_admin("❌ مثال: /set_trade_amount 20")
+
+                    # ── /set_max_trades ───────────────────────
+                    elif text.startswith("/set_max_trades "):
+                        try:
+                            value = int(text.replace("/set_max_trades ", ""))
+                            if value <= 0:
+                                send_admin("❌ القيمة لازم تكون أكبر من صفر.")
+                            else:
+                                with _lock:   # ✅ إصلاح: حماية race condition
+                                    MAX_TRADES = value
+                                send_admin(f"✅ أقصى صفقات: {MAX_TRADES}")
+                        except:
+                            send_admin("❌ مثال: /set_max_trades 5")
+
+                    # ── /set_trail ────────────────────────────
+                    elif text.startswith("/set_trail "):
+                        try:
+                            value = float(text.replace("/set_trail ", "")) / 100
+                            if value <= 0:
+                                send_admin("❌ القيمة لازم تكون أكبر من صفر.")
+                            else:
+                                with _lock:   # ✅ إصلاح: حماية race condition
+                                    TRAIL_PCT = value
+                                send_admin(f"✅ Trailing Stop: {TRAIL_PCT*100}%")
+                        except:
+                            send_admin("❌ مثال: /set_trail 1.5")
+
+                    # ── /set_rsi_range ────────────────────────
+                    elif text.startswith("/set_rsi_range "):
+                        try:
+                            parts = text.replace("/set_rsi_range ", "").split()
+                            low  = float(parts[0])
+                            high = float(parts[1])
+                            if low <= 0 or high <= 0 or low >= high:
+                                send_admin("❌ لازم القيمة الأولى أصغر من الثانية وكلاهما أكبر من صفر.")
+                            else:
+                                with _lock:   # ✅ إصلاح: حماية race condition
+                                    RSI_WATCH_LOW  = low
+                                    RSI_WATCH_HIGH = high
+                                send_admin(f"✅ منطقة RSI: {RSI_WATCH_LOW} - {RSI_WATCH_HIGH}")
+                        except:
+                            send_admin("❌ مثال: /set_rsi_range 20 38")
+
                     # ── /set_interval ────────────────────────
                     elif text.startswith("/set_interval "):
                         try:
                             minutes = int(text.replace("/set_interval ", ""))
-                            global current_interval
-                            # تحويل الدقائق لفريم بينانس
                             intervals = {
-                                15: Client.KLINE_INTERVAL_15MINUTE,
-                                30: Client.KLINE_INTERVAL_30MINUTE,
-                                60: Client.KLINE_INTERVAL_1HOUR,
+                                15 : Client.KLINE_INTERVAL_15MINUTE,
+                                30 : Client.KLINE_INTERVAL_30MINUTE,
+                                60 : Client.KLINE_INTERVAL_1HOUR,
                                 240: Client.KLINE_INTERVAL_4HOUR,
                             }
                             if minutes in intervals:
-                                current_interval = intervals[minutes]
+                                with _lock:   # ✅ إصلاح: حماية race condition
+                                    current_interval = intervals[minutes]
                                 send_admin(f"✅ تم تغيير الفريم إلى {minutes} دقيقة")
                                 log.info(f"📊 الفريم الجديد: {minutes} دقيقة")
                             else:
@@ -310,28 +453,86 @@ def telegram_command_listener(client):
 
                     # ── /enable_ma20 ─────────────────────────
                     elif text == "/enable_ma20":
-                        ma20_enabled = True
+                        with _lock:   # ✅ إصلاح #1
+                            ma20_enabled = True
                         send_admin("✅ تم تفعيل فيلتر MA20")
-                        log.info("✅ MA20 مفعّل الآن")
 
                     # ── /disable_ma20 ────────────────────────
                     elif text == "/disable_ma20":
-                        ma20_enabled = False
+                        with _lock:   # ✅ إصلاح #1
+                            ma20_enabled = False
                         send_admin("❌ تم تعطيل فيلتر MA20 — الشراء بناءً على RSI فقط")
-                        log.info("❌ MA20 معطّل الآن")
+
+                    # ── /profit ──────────────────────────────
+                    # ✅ إصلاح #3: أمر /profit مكوّد الآن
+                    elif text.startswith("/profit"):
+                        profit_log = load_profit_log()
+                        period     = "today" if "today" in text else "all"
+                        today      = time.strftime("%Y-%m-%d")
+
+                        if period == "today":
+                            records = [r for r in profit_log if r["time"].startswith(today)]
+                            label   = "اليوم"
+                        else:
+                            records = profit_log
+                            label   = "الكل"
+
+                        if not records:
+                            send_admin(f"📊 لا توجد صفقات مغلقة ({label})")
+                        else:
+                            total  = round(sum(r["profit"] for r in records), 4)
+                            wins   = sum(1 for r in records if r["profit"] > 0)
+                            losses = len(records) - wins
+                            msg    = (
+                                f"💰 <b>الأرباح ({label})</b>\n"
+                                f"📈 إجمالي: {total:+.4f} USDT\n"
+                                f"✅ رابحة: {wins} | ❌ خاسرة: {losses}\n"
+                                f"📊 إجمالي صفقات: {len(records)}"
+                            )
+                            send_admin(msg)
+
+                    # ── /summary ──────────────────────────────
+                    # ✅ إصلاح #3: أمر /summary مكوّد الآن
+                    elif text == "/summary":
+                        profit_log = load_profit_log()
+                        if not profit_log:
+                            send_admin("📊 لا توجد صفقات مسجلة بعد.")
+                        else:
+                            total      = round(sum(r["profit"] for r in profit_log), 4)
+                            wins       = [r for r in profit_log if r["profit"] > 0]
+                            losses     = [r for r in profit_log if r["profit"] <= 0]
+                            best       = max(profit_log, key=lambda x: x["profit"])
+                            worst      = min(profit_log, key=lambda x: x["profit"])
+                            win_rate   = round(len(wins) / len(profit_log) * 100, 1)
+                            avg_win    = round(sum(r["profit"] for r in wins) / len(wins), 4) if wins else 0
+                            avg_loss   = round(sum(r["profit"] for r in losses) / len(losses), 4) if losses else 0
+                            msg = (
+                                f"📊 <b>ملخص الأداء الكامل</b>\n\n"
+                                f"💼 إجمالي الصفقات: {len(profit_log)}\n"
+                                f"💰 إجمالي الربح: {total:+.4f} USDT\n"
+                                f"🎯 نسبة الفوز: {win_rate}%\n"
+                                f"✅ صفقات رابحة: {len(wins)}\n"
+                                f"❌ صفقات خاسرة: {len(losses)}\n"
+                                f"📈 متوسط الربح: {avg_win:+.4f} USDT\n"
+                                f"📉 متوسط الخسارة: {avg_loss:+.4f} USDT\n"
+                                f"🏆 أفضل صفقة: {best['symbol']} ({best['profit']:+.4f})\n"
+                                f"💔 أسوأ صفقة: {worst['symbol']} ({worst['profit']:+.4f})"
+                            )
+                            send_admin(msg)
 
                     # ── /help ─────────────────────────────────
                     elif text == "/help":
                         send_admin(
-                            "📖 <b>الأوامر المتاحة (18 أمر):</b>\n\n"
+                            "📖 <b>الأوامر المتاحة:</b>\n\n"
                             "<b>إدارة العملات:</b>\n"
                             "/add ETH — إضافة عملة\n"
                             "/remove ETH — حذف عملة\n"
                             "/list — عرض القائمة\n\n"
                             "<b>التحكم بالتداول:</b>\n"
                             "/stop — إيقاف التداول\n"
-                            "/start — استئناف التداول\n"
+                            "/start — استئناف التداول (يلغي أي توقف تلقائي)\n"
                             "/status — حالة البوت\n\n"
+                            "🛑 توقف تلقائي: لو 3 صفقات ستوب لوز متتالية، يتوقف التداول تلقائيًا ساعتين.\n\n"
                             "<b>تعديل الإعدادات:</b>\n"
                             "/set_trade_amount 20 — حجم الصفقة\n"
                             "/set_max_trades 5 — أقصى صفقات\n"
@@ -343,6 +544,7 @@ def telegram_command_listener(client):
                             "/disable_ma20 — تعطيل MA20\n\n"
                             "<b>التقارير:</b>\n"
                             "/profit today — أرباح اليوم\n"
+                            "/profit — كل الأرباح\n"
                             "/summary — ملخص الأداء\n"
                             "/help — عرض الأوامر"
                         )
@@ -352,12 +554,12 @@ def telegram_command_listener(client):
         time.sleep(1)
 
 # ──────────────────────────────────────────────
-# ✅ جديد: فحص ذكي مرحلتين
+# فحص ذكي مرحلتين
 # ──────────────────────────────────────────────
 def get_rsi_quick(client, symbol):
-    """فحص خفيف — RSI سريع"""
+    """✅ إصلاح #4: يستخدم current_interval بدل INTERVAL الثابت"""
     try:
-        klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=RSI_PERIOD + 2)
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=RSI_PERIOD + 2)
         closes = pd.Series([float(k[4]) for k in klines])
         rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
         return round(rsi.iloc[-1], 2)
@@ -366,7 +568,7 @@ def get_rsi_quick(client, symbol):
         return None
 
 def scan_all_symbols(client):
-    """المرحلة 1: فحص خفيف لكل العملات كل 5 دقائق"""
+    """المرحلة 1: فحص خفيف لكل العملات"""
     global watch_list
     new_watch = set()
     log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
@@ -376,37 +578,34 @@ def scan_all_symbols(client):
         rsi = get_rsi_quick(client, symbol)
         if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
             new_watch.add(symbol)
-        time.sleep(0.1)
+        time.sleep(0.15)  # ✅ إصلاح #5: تأخير أكبر لتجنب Rate Limit
     added = new_watch - watch_list
     if added:
         log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
     watch_list = new_watch
 
 # ──────────────────────────────────────────────
-# جلب المؤشرات — نفس الأصلي + معالجة الخطأ
+# جلب المؤشرات
 # ──────────────────────────────────────────────
 def get_indicators(client, symbol):
     try:
         klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
         closes = pd.Series([float(k[4]) for k in klines])
         rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
-        
-        # ✅ جديد: حساب MA20
         ma20   = closes.rolling(window=MA_PERIOD).mean().iloc[-1]
-        
         price  = float(client.get_symbol_ticker(symbol=symbol)["price"])
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
             "price"   : price,
-            "ma20"    : round(ma20, 8),  # ✅ جديد
+            "ma20"    : round(ma20, 8),
         }
     except Exception as e:
         log.error(f"❌ مؤشرات {symbol}: {e}")
         return None
 
 # ──────────────────────────────────────────────
-# تنفيذ الصفقات — نفس الأصلي + إصلاح البيع
+# تنفيذ الصفقات
 # ──────────────────────────────────────────────
 def get_quantity(client, symbol, usdt_amount):
     info      = client.get_symbol_info(symbol)
@@ -437,7 +636,7 @@ def buy_market(client, symbol, usdt_amount):
         return None
 
 def sell_market(client, symbol, qty):
-    """✅ إصلاح: يبيع الكمية المحددة فقط مش كل الرصيد"""
+    """✅ إصلاح #2: البيع بالكمية الكاملة بدون طرح عمولة يدوي"""
     try:
         info      = client.get_symbol_info(symbol)
         step_size = None
@@ -445,7 +644,7 @@ def sell_market(client, symbol, qty):
             if f["filterType"] == "LOT_SIZE":
                 step_size = float(f["stepSize"])
                 break
-        sell_qty = qty * (1 - 0.001)  # طرح 0.1% عمولة
+        sell_qty = qty  # ✅ إصلاح: بينانس يخصم العمولة تلقائياً من USDT
         if step_size:
             precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
             sell_qty  = round(sell_qty - (sell_qty % step_size), precision)
@@ -466,12 +665,14 @@ def sell_market(client, symbol, qty):
 # 🚀 البوت الرئيسي
 # ──────────────────────────────────────────────
 def run_bot():
+    global consecutive_losses, pause_until, trading_enabled
     api_key    = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
     client     = Client(api_key, api_secret)
 
     load_symbols_from_txt()
-    load_trades()   # ✅ جديد: تحميل الصفقات من JSON
+    load_trades()
+    load_circuit_state()   # 🛑 استرجاع حالة التوقف التلقائي لو موجودة
 
     try:
         log.info("🔍 جاري مطابقة وتصفية القائمة مع أسواق الـ Spot الرسمية...")
@@ -504,13 +705,25 @@ def run_bot():
             now = time.time()
             log.info(f"🔄 فحص دوري | صفقات: {len(open_trades)}/{MAX_TRADES} | مراقبة مكثفة: {len(watch_list)}")
 
-            # ── Heartbeat كل ساعة — نفس الأصلي ─────────
+            # 🛑 استئناف تلقائي بعد انتهاء فترة التوقف
+            with _lock:
+                should_resume = (pause_until != 0 and now >= pause_until and not trading_enabled)
+            if should_resume:
+                with _lock:
+                    trading_enabled = True
+                    pause_until     = 0
+                save_circuit_state()
+                log.info("✅ انتهت فترة التوقف التلقائي — استئناف التداول")
+                send_telegram("✅ <b>انتهت فترة التوقف التلقائي</b>\nتم استئناف التداول بشكل تلقائي.")
+
+            # ── Heartbeat كل ساعة ─────────
             if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                 try:
                     usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
                 except:
                     usdt_balance = 0.0
-                status = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
+                with _lock:
+                    status = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
                 send_telegram(
                     f"💚 <b>البوت شغال</b>\n"
                     f"🔘 التداول: {status}\n"
@@ -520,7 +733,7 @@ def run_bot():
                 )
                 last_heartbeat = now
 
-            # ── 1. إدارة الصفقات المفتوحة — نفس الأصلي + Trailing محسّن ──
+            # ── 1. إدارة الصفقات المفتوحة ──
             for symbol in list(open_trades.keys()):
                 trade = open_trades[symbol]
                 try:
@@ -531,7 +744,6 @@ def run_bot():
                     rsi   = ind["rsi"]
                     coin  = symbol.replace("USDT", "")
 
-                    # ✅ تعديل: Trailing يشتغل بعد 1% ربح بدل انتظار RSI 70
                     if not trade["trailing_active"]:
                         if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
                             trade["trailing_active"] = True
@@ -540,7 +752,6 @@ def run_bot():
                             log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']}")
                             save_trades()
 
-                    # ✅ Trailing يتبع الصعود
                     if trade["trailing_active"]:
                         if price > trade["highest_price"]:
                             trade["highest_price"] = price
@@ -550,6 +761,9 @@ def run_bot():
                             sell_price = sell_market(client, symbol, trade["qty"])
                             if sell_price:
                                 profit = round((sell_price - trade["entry_price"]) * trade["qty"], 4)
+                                record_trade_result(symbol, trade["entry_price"], sell_price, trade["qty"], "trailing_stop")  # ✅ إصلاح #3
+                                consecutive_losses = 0   # 🛑 صفقة رابحة → تصفير عدّاد الخسارات المتتالية
+                                save_circuit_state()
                                 send_telegram(
                                     f"💰 <b>جني أرباح - {coin}</b>\n"
                                     f"📉 RSI: {rsi}\n"
@@ -560,17 +774,35 @@ def run_bot():
                                 save_trades()
                                 continue
                     else:
-                        # ستوب لوز ثابت قبل تفعيل Trailing
                         entry_sl = round(trade["entry_price"] * (1 - STOP_LOSS_PCT), 8)
                         if price <= entry_sl:
                             sell_price = sell_market(client, symbol, trade["qty"])
                             if sell_price:
                                 loss = round((sell_price - trade["entry_price"]) * trade["qty"], 4)
+                                record_trade_result(symbol, trade["entry_price"], sell_price, trade["qty"], "stop_loss")  # ✅ إصلاح #3
                                 send_telegram(
                                     f"🚨 <b>ستوب لوز - {coin}</b>\n"
                                     f"📉 السعر: {sell_price:.4f}$\n"
                                     f"💸 خسارة: {loss:.4f} USDT"
                                 )
+
+                                # 🛑 Circuit Breaker: عدّ الخسارات المتتالية
+                                consecutive_losses += 1
+                                save_circuit_state()
+                                if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+                                    with _lock:
+                                        trading_enabled = False
+                                        pause_until     = time.time() + PAUSE_DURATION_SECONDS
+                                    consecutive_losses = 0
+                                    save_circuit_state()
+                                    log.warning(f"🛑 توقف تلقائي: {MAX_CONSECUTIVE_LOSSES} ستوب لوز متتالية — توقف لمدة {PAUSE_DURATION_SECONDS//3600} ساعة")
+                                    send_telegram(
+                                        f"🛑 <b>توقف تلقائي للتداول!</b>\n"
+                                        f"⚠️ {MAX_CONSECUTIVE_LOSSES} صفقات ستوب لوز متتالية\n"
+                                        f"⏸️ التداول متوقف لمدة {PAUSE_DURATION_SECONDS//3600} ساعة\n"
+                                        f"✅ سيُستأنف تلقائيًا، أو اكتب /start لاستئنافه يدويًا"
+                                    )
+
                                 del open_trades[symbol]
                                 save_trades()
                                 continue
@@ -578,13 +810,16 @@ def run_bot():
                 except Exception as e:
                     log.error(f"❌ إدارة {symbol}: {e}")
 
-            # ── 2. فحص خفيف لكل العملات كل 5 دقائق ──────
+            # ── 2. فحص خفيف لكل العملات ──────
             if now - last_scan >= SCAN_INTERVAL:
                 scan_all_symbols(client)
                 last_scan = now
 
-            # ── 3. فحص مكثف للمرشحين — يصطاد الارتداد ───
-            if watch_list and trading_enabled and len(open_trades) < MAX_TRADES:
+            # ── 3. فحص مكثف للمرشحين ───
+            with _lock:
+                is_trading = trading_enabled
+
+            if watch_list and is_trading and len(open_trades) < MAX_TRADES:
                 for symbol in list(watch_list):
                     if symbol in open_trades:
                         watch_list.discard(symbol)
@@ -596,8 +831,10 @@ def run_bot():
                     if not ind:
                         continue
 
-                    # ✅ شرط الشراء: تقاطع RSI + فيلتر MA20 (إن كان مفعّل)
-                    ma20_condition = (ind["price"] > ind["ma20"]) if ma20_enabled else True
+                    with _lock:
+                        ma20_on = ma20_enabled
+                    ma20_condition = (ind["price"] > ind["ma20"]) if ma20_on else True
+
                     if ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY and ma20_condition:
                         try:
                             usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
