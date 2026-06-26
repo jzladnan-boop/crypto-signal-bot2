@@ -9,18 +9,25 @@ import json
 import logging
 import requests
 import threading
+import secrets
 import pandas as pd
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import ta
+from flask import Flask, request, jsonify, session, send_from_directory
+from functools import wraps
 
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات الأساسية — نفس الأصلي
 # ──────────────────────────────────────────────
-SYMBOLS_FILE   = "symbols.txt"
-TRADES_FILE    = "open_trades.json"
-PROFIT_FILE    = "profit_log.json"   # ✅ إصلاح #3: ملف لتتبع الأرباح
-CIRCUIT_FILE   = "circuit_breaker.json"   # 🛑 ملف لحفظ حالة التوقف التلقائي
+# ──────────────────────────────────────────────
+# 📁 مسارات الملفات — Volume ثابت على Railway
+# ──────────────────────────────────────────────
+DATA_DIR     = os.getenv("DATA_DIR", "/app/data")   # Railway Volume
+SYMBOLS_FILE = os.path.join(DATA_DIR, "symbols.txt")
+TRADES_FILE  = os.path.join(DATA_DIR, "open_trades.json")
+PROFIT_FILE  = os.path.join(DATA_DIR, "profit_log.json")
+CIRCUIT_FILE = os.path.join(DATA_DIR, "circuit_breaker.json")
 
 DEFAULT_BASE_SYMBOLS = [
     "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL",
@@ -67,6 +74,14 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ADMIN_ID  = os.getenv("TELEGRAM_ADMIN_ID", "")
 
 # ──────────────────────────────────────────────
+# 📊 لوحة التحكم (Dashboard) — إعدادات
+# ──────────────────────────────────────────────
+DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "")   # ⚠️ لازم تحددهم، وإلا اللوحة ما بتشتغل
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+DASHBOARD_SECRET    = os.getenv("DASHBOARD_SECRET", secrets.token_hex(16))
+DASHBOARD_PORT      = int(os.getenv("DASHBOARD_PORT", "5000"))
+
+# ──────────────────────────────────────────────
 # 🛑 Circuit Breaker: توقف تلقائي بعد خسارات متتالية
 # ──────────────────────────────────────────────
 MAX_CONSECUTIVE_LOSSES = 3            # عدد الستوب لوز المتتالية المسموح
@@ -76,13 +91,13 @@ PAUSE_DURATION_SECONDS = 2 * 60 * 60  # مدة التوقف (ساعتين)
 # ✅ إصلاح #1: threading.Lock بدل Global مباشر
 # ──────────────────────────────────────────────
 _lock           = threading.Lock()
-_scan_lock      = threading.Lock()   # 🔒 حماية watch_list من التعديل المتزامن
 trading_enabled = True
 watch_list      = set()
 open_trades     = {}
 ma20_enabled    = True
 consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
 pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
+_binance_client     = None   # 📊 مرجع لعميل بينانس، تستخدمه لوحة التحكم
 
 # ──────────────────────────────────────────────
 # Logging
@@ -454,30 +469,15 @@ def telegram_command_listener(client):
 
                     # ── /enable_ma20 ─────────────────────────
                     elif text == "/enable_ma20":
-                        with _lock:
+                        with _lock:   # ✅ إصلاح #1
                             ma20_enabled = True
-                        log.info("✅ [MA20] تم تفعيل فيلتر MA20 عبر تيليغرام")
-                        send_admin(
-                            "✅ <b>تم تفعيل فيلتر MA20</b>\n"
-                            "🔒 البوت الآن يشتري فقط إذا كان السعر فوق MA20 + RSI مناسب"
-                        )
+                        send_admin("✅ تم تفعيل فيلتر MA20")
 
                     # ── /disable_ma20 ────────────────────────
                     elif text == "/disable_ma20":
-                        with _lock:
+                        with _lock:   # ✅ إصلاح #1
                             ma20_enabled = False
-                        log.info("⚠️ [MA20] تم تعطيل فيلتر MA20 عبر تيليغرام")
-                        send_admin(
-                            "⚠️ <b>تم تعطيل فيلتر MA20</b>\n"
-                            "📊 البوت الآن يشتري بناءً على RSI فقط بدون شرط MA20"
-                        )
-
-                    # ── /ma20_status ──────────────────────────
-                    elif text == "/ma20_status":
-                        with _lock:
-                            current_ma20 = ma20_enabled
-                        status_text = "✅ مفعّل" if current_ma20 else "❌ معطّل"
-                        send_admin(f"📊 <b>حالة فيلتر MA20:</b> {status_text}")
+                        send_admin("❌ تم تعطيل فيلتر MA20 — الشراء بناءً على RSI فقط")
 
                     # ── /profit ──────────────────────────────
                     # ✅ إصلاح #3: أمر /profit مكوّد الآن
@@ -557,8 +557,7 @@ def telegram_command_listener(client):
                             "/set_interval 30 — الفريم (15/30/60/240)\n\n"
                             "<b>الموشرات:</b>\n"
                             "/enable_ma20 — تشغيل MA20\n"
-                            "/disable_ma20 — تعطيل MA20\n"
-                            "/ma20_status — عرض حالة MA20 الحالية\n\n"
+                            "/disable_ma20 — تعطيل MA20\n\n"
                             "<b>التقارير:</b>\n"
                             "/profit today — أرباح اليوم\n"
                             "/profit — كل الأرباح\n"
@@ -585,47 +584,40 @@ def get_rsi_quick(client, symbol):
         return None
 
 def scan_all_symbols(client):
-    """المرحلة 1: فحص خفيف لكل العملات — يشتغل في Thread منفصل"""
+    """المرحلة 1: فحص خفيف لكل العملات"""
     global watch_list
     new_watch = set()
     log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
     for symbol in list(SYMBOLS):
-        with _lock:
-            already_open = symbol in open_trades
-        if already_open:
+        if symbol in open_trades:
             continue
         rsi = get_rsi_quick(client, symbol)
         if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
             new_watch.add(symbol)
-        time.sleep(0.15)  # تأخير آمن لتجنب Rate Limit بينانس
-    with _scan_lock:
-        added = new_watch - watch_list
-        if added:
-            log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
-        watch_list = new_watch
-    log.info(f"✅ انتهى الفحص الخفيف | مرشحون: {len(watch_list)}")
-
-
-def scan_worker(client):
-    """🧵 Thread منفصل — يشغّل الفحص الخفيف كل SCAN_INTERVAL ثانية بدون توقيف الحلقة الرئيسية"""
-    time.sleep(5)  # انتظار قصير حتى يكتمل تهيئة البوت
-    while True:
-        try:
-            scan_all_symbols(client)
-        except Exception as e:
-            log.error(f"❌ خطأ scan_worker: {e}")
-        time.sleep(SCAN_INTERVAL)
+        time.sleep(0.15)  # ✅ إصلاح #5: تأخير أكبر لتجنب Rate Limit
+    added = new_watch - watch_list
+    if added:
+        log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
+    watch_list = new_watch
 
 # ──────────────────────────────────────────────
 # جلب المؤشرات
 # ──────────────────────────────────────────────
+def get_current_price(client, symbol):
+    """سعر لحظي فقط — طلب واحد خفيف لتتبع الصفقات المفتوحة"""
+    try:
+        return float(client.get_symbol_ticker(symbol=symbol)["price"])
+    except Exception as e:
+        log.error(f"❌ سعر {symbol}: {e}")
+        return None
+
 def get_indicators(client, symbol):
     try:
         klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
         closes = pd.Series([float(k[4]) for k in klines])
         rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
         ma20   = closes.rolling(window=MA_PERIOD).mean().iloc[-1]
-        price  = float(client.get_symbol_ticker(symbol=symbol)["price"])
+        price  = float(closes.iloc[-1])   # ← من الـ klines مباشرة، بدون طلب API ثاني
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
@@ -694,13 +686,262 @@ def sell_market(client, symbol, qty):
         return None
 
 # ──────────────────────────────────────────────
+# 📊 لوحة التحكم (Dashboard) — Flask API
+# ──────────────────────────────────────────────
+DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard")
+
+app = Flask(__name__)
+app.secret_key = DASHBOARD_SECRET
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_HTTPONLY=True,
+)
+
+INTERVAL_TO_MINUTES = {
+    Client.KLINE_INTERVAL_15MINUTE: 15,
+    Client.KLINE_INTERVAL_30MINUTE: 30,
+    Client.KLINE_INTERVAL_1HOUR   : 60,
+    Client.KLINE_INTERVAL_4HOUR   : 240,
+}
+MINUTES_TO_INTERVAL = {v: k for k, v in INTERVAL_TO_MINUTES.items()}
+
+
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("logged_in"):
+            return jsonify({"error": "unauthorized"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# ── تقديم ملفات الواجهة ─────────────────────────
+@app.route("/")
+def dashboard_index():
+    return send_from_directory(DASHBOARD_DIR, "index.html")
+
+
+@app.route("/<path:filename>")
+def dashboard_static(filename):
+    return send_from_directory(DASHBOARD_DIR, filename)
+
+
+# ── تسجيل الدخول ─────────────────────────────────
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "")
+    password = data.get("password", "")
+    if not DASHBOARD_USERNAME or not DASHBOARD_PASSWORD:
+        return jsonify({"error": "الوحة غير مفعّلة على السيرفر"}), 503
+    if username == DASHBOARD_USERNAME and password == DASHBOARD_PASSWORD:
+        session.permanent = True
+        session["logged_in"] = True
+        return jsonify({"ok": True})
+    return jsonify({"error": "بيانات الدخول غير صحيحة"}), 401
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/me")
+def api_me():
+    return jsonify({"logged_in": bool(session.get("logged_in"))})
+
+
+# ── الحالة العامة ────────────────────────────────
+@app.route("/api/status")
+@login_required
+def api_status():
+    with _lock:
+        is_trading   = trading_enabled
+        cb_pause     = pause_until
+        max_trades   = MAX_TRADES
+    now = time.time()
+    cb_active = bool(cb_pause and cb_pause > now)
+
+    balance = 0.0
+    if _binance_client:
+        try:
+            balance = float(_binance_client.get_asset_balance(asset="USDT")["free"])
+        except Exception as e:
+            log.error(f"❌ API رصيد: {e}")
+
+    profit_log = load_profit_log()
+    total_pnl  = round(sum(r["profit"] for r in profit_log), 4)
+    wins       = sum(1 for r in profit_log if r["profit"] > 0)
+    win_rate   = round(wins / len(profit_log) * 100, 1) if profit_log else 0.0
+
+    return jsonify({
+        "trading_enabled": is_trading,
+        "circuit_breaker": {
+            "active": cb_active,
+            "resume_in_minutes": int((cb_pause - now) / 60) if cb_active else 0,
+        },
+        "balance_usdt": round(balance, 2),
+        "open_trades_count": len(open_trades),
+        "max_trades": max_trades,
+        "watch_count": len(watch_list),
+        "symbols_count": len(SYMBOLS),
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+    })
+
+
+# ── الصفقات المفتوحة ─────────────────────────────
+@app.route("/api/trades")
+@login_required
+def api_trades():
+    result = []
+    for symbol, t in dict(open_trades).items():
+        current_price = t["entry_price"]
+        if _binance_client:
+            try:
+                current_price = float(_binance_client.get_symbol_ticker(symbol=symbol)["price"])
+            except Exception:
+                pass
+        pnl_pct = round((current_price - t["entry_price"]) / t["entry_price"] * 100, 2)
+        result.append({
+            "symbol": symbol,
+            "entry_price": t["entry_price"],
+            "current_price": current_price,
+            "trailing_active": t.get("trailing_active", False),
+            "stop_loss": t.get("stop_loss"),
+            "pnl_pct": pnl_pct,
+        })
+    return jsonify(result)
+
+
+# ── سجل الصفقات المغلقة ──────────────────────────
+@app.route("/api/history")
+@login_required
+def api_history():
+    period = request.args.get("period", "all")
+    profit_log = load_profit_log()
+    now = time.strftime("%Y-%m-%d")
+    if period == "today":
+        records = [r for r in profit_log if r["time"].startswith(now)]
+    elif period == "week":
+        cutoff = time.time() - 7 * 86400
+        records = [r for r in profit_log
+                   if time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S")) >= cutoff]
+    else:
+        records = profit_log
+    records = sorted(records, key=lambda r: r["time"], reverse=True)
+    return jsonify(records)
+
+
+# ── الإعدادات ─────────────────────────────────────
+@app.route("/api/settings", methods=["GET"])
+@login_required
+def api_get_settings():
+    with _lock:
+        return jsonify({
+            "trade_amount": TRADE_AMOUNT,
+            "max_trades": MAX_TRADES,
+            "trail_pct": round(TRAIL_PCT * 100, 4),
+            "interval_minutes": INTERVAL_TO_MINUTES.get(current_interval, 30),
+            "rsi_low": RSI_WATCH_LOW,
+            "rsi_high": RSI_WATCH_HIGH,
+            "ma20_enabled": ma20_enabled,
+        })
+
+
+@app.route("/api/settings", methods=["POST"])
+@login_required
+def api_set_settings():
+    global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
+    global current_interval, ma20_enabled
+    data = request.get_json(silent=True) or {}
+    errors = []
+
+    with _lock:
+        if "trade_amount" in data:
+            v = float(data["trade_amount"])
+            if v <= 0: errors.append("trade_amount لازم أكبر من صفر")
+            else: TRADE_AMOUNT = v
+
+        if "max_trades" in data:
+            v = int(data["max_trades"])
+            if v <= 0: errors.append("max_trades لازم أكبر من صفر")
+            else: MAX_TRADES = v
+
+        if "trail_pct" in data:
+            v = float(data["trail_pct"]) / 100
+            if v <= 0: errors.append("trail_pct لازم أكبر من صفر")
+            else: TRAIL_PCT = v
+
+        if "rsi_low" in data and "rsi_high" in data:
+            low, high = float(data["rsi_low"]), float(data["rsi_high"])
+            if low <= 0 or high <= 0 or low >= high:
+                errors.append("منطقة RSI غير صحيحة")
+            else:
+                RSI_WATCH_LOW, RSI_WATCH_HIGH = low, high
+
+        if "interval_minutes" in data:
+            minutes = int(data["interval_minutes"])
+            if minutes in MINUTES_TO_INTERVAL:
+                current_interval = MINUTES_TO_INTERVAL[minutes]
+            else:
+                errors.append("الفريم المسموح: 15, 30, 60, 240")
+
+        if "ma20_enabled" in data:
+            ma20_enabled = bool(data["ma20_enabled"])
+
+    if errors:
+        return jsonify({"error": "؛ ".join(errors)}), 400
+    return jsonify({"ok": True})
+
+
+# ── التحكم بالتداول ───────────────────────────────
+@app.route("/api/control", methods=["POST"])
+@login_required
+def api_control():
+    global trading_enabled, pause_until, consecutive_losses
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    if action == "stop":
+        with _lock:
+            trading_enabled = False
+        return jsonify({"ok": True})
+    elif action == "start":
+        with _lock:
+            trading_enabled = True
+            pause_until = 0
+        consecutive_losses = 0
+        save_circuit_state()
+        return jsonify({"ok": True})
+    return jsonify({"error": "action لازم تكون start أو stop"}), 400
+
+
+def start_dashboard():
+    if not DASHBOARD_USERNAME or not DASHBOARD_PASSWORD:
+        log.warning("⚠️ لوحة التحكم معطّلة: حدّد DASHBOARD_USERNAME و DASHBOARD_PASSWORD بمتغيرات البيئة لتفعيلها")
+        return
+    try:
+        log.info(f"📊 لوحة التحكم شغالة على المنفذ {DASHBOARD_PORT}")
+        app.run(host="0.0.0.0", port=DASHBOARD_PORT, debug=False, use_reloader=False)
+    except Exception as e:
+        log.error(f"❌ خطأ تشغيل لوحة التحكم: {e}")
+
+
+# ──────────────────────────────────────────────
 # 🚀 البوت الرئيسي
 # ──────────────────────────────────────────────
 def run_bot():
     global consecutive_losses, pause_until, trading_enabled
+    global _binance_client
+
+    # ── تأكد إن مجلد البيانات موجود (Railway Volume) ──
+    os.makedirs(DATA_DIR, exist_ok=True)
+    log.info(f"📁 مجلد البيانات: {DATA_DIR}")
     api_key    = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
     client     = Client(api_key, api_secret)
+    _binance_client = client   # 📊 يخلي لوحة التحكم تقدر تستخدم نفس العميل
 
     load_symbols_from_txt()
     load_trades()
@@ -720,11 +961,11 @@ def run_bot():
     telegram_thread = threading.Thread(target=telegram_command_listener, args=(client,), daemon=True)
     telegram_thread.start()
 
-    # 🧵 Thread منفصل للفحص الخفيف — لا يوقف الحلقة الرئيسية أبداً
-    scan_thread = threading.Thread(target=scan_worker, args=(client,), daemon=True)
-    scan_thread.start()
+    dashboard_thread = threading.Thread(target=start_dashboard, daemon=True)
+    dashboard_thread.start()
 
     last_heartbeat = time.time()
+    last_scan      = 0
 
     log.info(f"🚀 البوت انطلق | {len(SYMBOLS)} عملة | {len(open_trades)} صفقة محملة")
     send_telegram(
@@ -772,12 +1013,10 @@ def run_bot():
             for symbol in list(open_trades.keys()):
                 trade = open_trades[symbol]
                 try:
-                    ind   = get_indicators(client, symbol)
-                    if not ind:
+                    price = get_current_price(client, symbol)   # ← طلب واحد خفيف
+                    if not price:
                         continue
-                    price = ind["price"]
-                    rsi   = ind["rsi"]
-                    coin  = symbol.replace("USDT", "")
+                    coin = symbol.replace("USDT", "")
 
                     if not trade["trailing_active"]:
                         if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
@@ -801,7 +1040,6 @@ def run_bot():
                                 save_circuit_state()
                                 send_telegram(
                                     f"💰 <b>جني أرباح - {coin}</b>\n"
-                                    f"📉 RSI: {rsi}\n"
                                     f"💵 دخول: {trade['entry_price']:.4f}$ → خروج: {sell_price:.4f}$\n"
                                     f"💹 PnL: {profit:+.4f} USDT"
                                 )
@@ -845,17 +1083,19 @@ def run_bot():
                 except Exception as e:
                     log.error(f"❌ إدارة {symbol}: {e}")
 
-            # ── 2. فحص مكثف للمرشحين ───
+            # ── 2. فحص خفيف لكل العملات ──────
+            if now - last_scan >= SCAN_INTERVAL:
+                scan_all_symbols(client)
+                last_scan = now
+
+            # ── 3. فحص مكثف للمرشحين ───
             with _lock:
                 is_trading = trading_enabled
-            with _scan_lock:
-                current_watch = set(watch_list)   # نسخة آمنة — الـ scan_worker يعدّل الأصل في Thread منفصل
 
-            if current_watch and is_trading and len(open_trades) < MAX_TRADES:
-                for symbol in current_watch:
+            if watch_list and is_trading and len(open_trades) < MAX_TRADES:
+                for symbol in list(watch_list):
                     if symbol in open_trades:
-                        with _scan_lock:
-                            watch_list.discard(symbol)
+                        watch_list.discard(symbol)
                         continue
                     if len(open_trades) >= MAX_TRADES:
                         break
@@ -881,11 +1121,9 @@ def run_bot():
                                 res["trailing_active"] = False
                                 res["highest_price"]   = res["entry_price"]
                                 res["stop_loss"]       = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 8)
-                                with _lock:
-                                    open_trades[symbol] = res
+                                open_trades[symbol]    = res
                                 save_trades()
-                                with _scan_lock:
-                                    watch_list.discard(symbol)
+                                watch_list.discard(symbol)
 
                                 coin_name = symbol.replace("USDT", "")
                                 sl_value  = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 4)
