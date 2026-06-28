@@ -23,7 +23,7 @@ from functools import wraps
 DATA_DIR       = os.getenv("DATA_DIR", "/app/data")   # 📁 مجلد دائم (Volume) على Railway
 SYMBOLS_FILE   = os.path.join(DATA_DIR, "symbols.txt")
 TRADES_FILE    = os.path.join(DATA_DIR, "open_trades.json")
-PROFIT_FILE    = os.path.join(DATA_DIR, "profit_log.json")   # ✅ إصلاح #3: ملف لتتبع الأرباح
+PROFIT_FILE    = os.path.join(DATA_DIR, f"profit_{time.strftime('%Y_%m')}.json")   # ✅ إصلاح #4: ملف شهري منفصل
 CIRCUIT_FILE   = os.path.join(DATA_DIR, "circuit_breaker.json")   # 🛑 ملف لحفظ حالة التوقف التلقائي
 
 DEFAULT_BASE_SYMBOLS = [
@@ -92,6 +92,7 @@ trading_enabled = True
 watch_list      = set()
 open_trades     = {}
 ma20_enabled    = True
+current_strategy   = "rsi"   # 🎯 الاستراتيجية الحالية: "rsi" أو "stoch_rsi"
 consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
 pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
 _binance_client     = None   # 📊 مرجع لعميل بينانس، تستخدمه لوحة التحكم
@@ -197,27 +198,51 @@ def load_circuit_state():
             log.error(f"❌ خطأ تحميل حالة التوقف التلقائي: {e}")
 
 # ──────────────────────────────────────────────
-# ✅ إصلاح #3: ملف تتبع الأرباح
+# ✅ إصلاح #3+#4: ملف تتبع الأرباح — شهري
 # ──────────────────────────────────────────────
-def load_profit_log():
-    if os.path.exists(PROFIT_FILE):
+def get_profit_file(month=None):
+    """يعيد مسار ملف الأرباح للشهر المطلوب (الحالي افتراضياً)"""
+    label = month or time.strftime("%Y_%m")
+    return os.path.join(DATA_DIR, f"profit_{label}.json")
+
+def load_profit_log(month=None):
+    path = get_profit_file(month)
+    if os.path.exists(path):
         try:
-            with open(PROFIT_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except:
             pass
     return []
 
-def save_profit_log(log_data):
+def load_all_profit_log():
+    """يحمّل كل الملفات الشهرية ويدمجها — للأوامر اللي بتحتاج كل السجلات"""
+    all_records = []
     try:
-        with open(PROFIT_FILE, "w", encoding="utf-8") as f:
+        for fname in sorted(os.listdir(DATA_DIR)):
+            if fname.startswith("profit_") and fname.endswith(".json"):
+                fpath = os.path.join(DATA_DIR, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        all_records.extend(json.load(f))
+                except:
+                    pass
+    except Exception as e:
+        log.error(f"❌ خطأ تحميل كل الأرباح: {e}")
+    return all_records
+
+def save_profit_log(log_data, month=None):
+    path = get_profit_file(month)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(log_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الأرباح: {e}")
 
 def record_trade_result(symbol, entry_price, exit_price, qty, reason):
-    """يسجل نتيجة كل صفقة عند الإغلاق"""
-    profit_log = load_profit_log()
+    """يسجل نتيجة كل صفقة في ملف الشهر الحالي"""
+    month      = time.strftime("%Y_%m")
+    profit_log = load_profit_log(month)
     profit     = round((exit_price - entry_price) * qty, 4)
     profit_log.append({
         "symbol"     : symbol,
@@ -228,7 +253,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason):
         "reason"     : reason,
         "time"       : time.strftime("%Y-%m-%d %H:%M:%S")
     })
-    save_profit_log(profit_log)
+    save_profit_log(profit_log, month)
 
 # ──────────────────────────────────────────────
 # 📨 تيليغرام
@@ -262,9 +287,9 @@ def send_admin(message):
 # أوامر تيليغرام
 # ──────────────────────────────────────────────
 def telegram_command_listener(client):
-    global SYMBOLS, trading_enabled, ma20_enabled, current_interval
+    global SYMBOLS, trading_enabled, ma20_enabled, current_interval, current_strategy
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
-    global pause_until, consecutive_losses
+    global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -365,10 +390,13 @@ def telegram_command_listener(client):
                         except:
                             usdt_balance = 0.0
                         with _lock:
-                            status = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
-                            trades_count = len(open_trades)
-                            trades_copy  = dict(open_trades)
-                            pause_left   = pause_until
+                            status           = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
+                            trades_count     = len(open_trades)
+                            trades_copy      = dict(open_trades)
+                            pause_left       = pause_until
+                            strategy_label   = "RSI العادي" if current_strategy == "rsi" else "Stochastic RSI"
+                            interval_minutes = INTERVAL_TO_MINUTES.get(current_interval, 30)
+                            ma20_status      = "✅ مفعّل" if ma20_enabled else "❌ مطفي"
                         msg = (
                             f"📊 <b>حالة البوت</b>\n"
                             f"🔘 التداول: {status}\n"
@@ -376,6 +404,9 @@ def telegram_command_listener(client):
                             f"💼 صفقات: {trades_count}/{MAX_TRADES}\n"
                             f"👁️ يراقب: {len(SYMBOLS)} عملة\n"
                             f"🔍 مراقبة مكثفة: {len(watch_list)} عملة\n"
+                            f"📊 الاستراتيجية: {strategy_label}\n"
+                            f"🕯️ الفريم: {interval_minutes} دقيقة\n"
+                            f"📈 MA20: {ma20_status}\n"
                         )
                         if pause_left and pause_left > time.time():
                             remaining_min = int((pause_left - time.time()) / 60)
@@ -427,6 +458,32 @@ def telegram_command_listener(client):
                         except:
                             send_admin("❌ مثال: /set_trail 1.5")
 
+                    # ── /set_stoploss ─────────────────────────
+                    elif text.startswith("/set_stoploss "):
+                        try:
+                            value = float(text.replace("/set_stoploss ", "")) / 100
+                            if value <= 0:
+                                send_admin("❌ القيمة لازم تكون أكبر من صفر.")
+                            else:
+                                with _lock:
+                                    STOP_LOSS_PCT = value
+                                send_admin(f"✅ حد الخسارة الثابت (Stop Loss): {STOP_LOSS_PCT*100}%\nيعني لو السعر نزل {STOP_LOSS_PCT*100}% من سعر الدخول، البوت يبيع تلقائياً.")
+                        except:
+                            send_admin("❌ مثال: /set_stoploss 1.5")
+
+                    # ── /set_activate ─────────────────────────
+                    elif text.startswith("/set_activate "):
+                        try:
+                            value = float(text.replace("/set_activate ", "")) / 100
+                            if value <= 0:
+                                send_admin("❌ القيمة لازم تكون أكبر من صفر.")
+                            else:
+                                with _lock:
+                                    TRAIL_ACTIVATE_PCT = value
+                                send_admin(f"✅ نقطة تفعيل Trailing: {TRAIL_ACTIVATE_PCT*100}%\nيعني البوت ما يبدأ يتتبع السعر إلا لما يربح {TRAIL_ACTIVATE_PCT*100}% أول.")
+                        except:
+                            send_admin("❌ مثال: /set_activate 0.5")
+
                     # ── /set_rsi_range ────────────────────────
                     elif text.startswith("/set_rsi_range "):
                         try:
@@ -476,17 +533,15 @@ def telegram_command_listener(client):
                         send_admin("❌ تم تعطيل فيلتر MA20 — الشراء بناءً على RSI فقط")
 
                     # ── /profit ──────────────────────────────
-                    # ✅ إصلاح #3: أمر /profit مكوّد الآن
                     elif text.startswith("/profit"):
-                        profit_log = load_profit_log()
-                        period     = "today" if "today" in text else "all"
-                        today      = time.strftime("%Y-%m-%d")
+                        period = "today" if "today" in text else "all"
+                        today  = time.strftime("%Y-%m-%d")
 
                         if period == "today":
-                            records = [r for r in profit_log if r["time"].startswith(today)]
+                            records = [r for r in load_profit_log() if r["time"].startswith(today)]
                             label   = "اليوم"
                         else:
-                            records = profit_log
+                            records = load_all_profit_log()   # ✅ كل الشهور
                             label   = "الكل"
 
                         if not records:
@@ -504,9 +559,8 @@ def telegram_command_listener(client):
                             send_admin(msg)
 
                     # ── /summary ──────────────────────────────
-                    # ✅ إصلاح #3: أمر /summary مكوّد الآن
                     elif text == "/summary":
-                        profit_log = load_profit_log()
+                        profit_log = load_all_profit_log()   # ✅ كل الشهور
                         if not profit_log:
                             send_admin("📊 لا توجد صفقات مسجلة بعد.")
                         else:
@@ -532,33 +586,95 @@ def telegram_command_listener(client):
                             )
                             send_admin(msg)
 
+                    # ── /close ───────────────────────────────
+                    elif text.startswith("/close "):
+                        coin   = text.replace("/close ", "").strip().upper()
+                        symbol = f"{coin}USDT"
+                        sell_price, status = close_trade(client, symbol)
+                        if status == "not_found":
+                            send_admin(f"⚠️ مافي صفقة مفتوحة لـ {coin}.")
+                        elif status == "sell_failed":
+                            send_admin(f"❌ فشل إغلاق صفقة {coin}. تحقق من اللوق.")
+                        else:
+                            trade_entry = open_trades.get(symbol, {}).get("entry_price", 0)
+                            # ملاحظة: السعر جُلب بعد الحذف، نحسب PnL من السجل
+                            profit_log = load_profit_log()
+                            last       = next((r for r in reversed(profit_log) if r["symbol"] == symbol), None)
+                            pnl        = f"{last['profit']:+.4f} USDT" if last else "—"
+                            send_admin(
+                                f"🔴 <b>إغلاق يدوي - {coin}</b>\n"
+                                f"💵 سعر البيع: {sell_price:.4f}$\n"
+                                f"💹 PnL: {pnl}"
+                            )
+
+                    # ── /set_strategy ─────────────────────────
+                    elif text.startswith("/set_strategy "):
+                        strategy = text.replace("/set_strategy ", "").strip().lower()
+                        if strategy in ("rsi", "stoch_rsi"):
+                            with _lock:
+                                current_strategy = strategy
+                            labels = {"rsi": "RSI العادي (ارتداد فوق 30)", "stoch_rsi": "Stochastic RSI (تقاطع K فوق D واختراق 20)"}
+                            send_admin(f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}")
+                        else:
+                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi")
+
+                    # ── /config ───────────────────────────────
+                    elif text == "/config":
+                        with _lock:
+                            strategy_label   = "RSI العادي" if current_strategy == "rsi" else "Stochastic RSI"
+                            interval_minutes = INTERVAL_TO_MINUTES.get(current_interval, 30)
+                            ma20_status      = "✅ مفعّل" if ma20_enabled else "❌ مطفي"
+                            trade_amt        = TRADE_AMOUNT
+                            max_tr           = MAX_TRADES
+                            trail            = TRAIL_PCT * 100
+                            stoploss         = STOP_LOSS_PCT * 100
+                            activate         = TRAIL_ACTIVATE_PCT * 100
+                        send_admin(
+                            f"⚙️ <b>الإعدادات الحالية</b>\n\n"
+                            f"📊 الاستراتيجية: {strategy_label}\n"
+                            f"🕯️ الفريم: {interval_minutes} دقيقة\n"
+                            f"📈 MA20: {ma20_status}\n"
+                            f"💰 حجم الصفقة: ${trade_amt}\n"
+                            f"💼 أقصى صفقات: {max_tr}\n"
+                            f"🛑 حد الخسارة (Stop Loss): {stoploss}%\n"
+                            f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
+                            f"🔍 مساحة Trailing Stop: {trail}%"
+                        )
+
                     # ── /help ─────────────────────────────────
                     elif text == "/help":
                         send_admin(
                             "📖 <b>الأوامر المتاحة:</b>\n\n"
                             "<b>إدارة العملات:</b>\n"
-                            "/add ETH — إضافة عملة\n"
-                            "/remove ETH — حذف عملة\n"
-                            "/list — عرض القائمة\n\n"
+                            "/add ETH — إضافة عملة للمراقبة\n"
+                            "/remove ETH — حذف عملة من القائمة\n"
+                            "/list — عرض كل العملات المراقبة\n\n"
                             "<b>التحكم بالتداول:</b>\n"
                             "/stop — إيقاف التداول\n"
                             "/start — استئناف التداول (يلغي أي توقف تلقائي)\n"
-                            "/status — حالة البوت\n\n"
+                            "/status — حالة البوت مع الفريم والاستراتيجية وMA20\n"
+                            "/close AVAX — إغلاق صفقة يدوياً فوراً بسعر السوق\n\n"
                             "🛑 توقف تلقائي: لو 3 صفقات ستوب لوز متتالية، يتوقف التداول تلقائيًا ساعتين.\n\n"
                             "<b>تعديل الإعدادات:</b>\n"
-                            "/set_trade_amount 20 — حجم الصفقة\n"
-                            "/set_max_trades 5 — أقصى صفقات\n"
-                            "/set_trail 1.5 — Trailing Stop\n"
-                            "/set_rsi_range 20 38 — منطقة RSI\n"
-                            "/set_interval 30 — الفريم (15/30/60/240)\n\n"
-                            "<b>الموشرات:</b>\n"
-                            "/enable_ma20 — تشغيل MA20\n"
-                            "/disable_ma20 — تعطيل MA20\n\n"
+                            "/set_trade_amount 20 — حجم كل صفقة بالدولار\n"
+                            "/set_max_trades 5 — أقصى عدد صفقات مفتوحة في نفس الوقت\n"
+                            "/set_trail 1.5 — مساحة تنفس Trailing Stop (كلما كبرت، أعطيت العملة مجال أكبر)\n"
+                            "/set_stoploss 1.5 — حد الخسارة الثابت قبل تفعيل Trailing\n"
+                            "/set_activate 0.5 — نسبة الربح المطلوبة لتفعيل Trailing Stop\n"
+                            "/set_rsi_range 20 38 — نطاق RSI للمراقبة المكثفة\n"
+                            "/set_interval 30 — الفريم الزمني للشموع (15/30/60/240 دقيقة)\n\n"
+                            "<b>الاستراتيجية:</b>\n"
+                            "/set_strategy rsi — شراء عند ارتداد RSI فوق 30\n"
+                            "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n\n"
+                            "<b>المؤشرات:</b>\n"
+                            "/enable_ma20 — تشغيل فيلتر MA20 (مستقل عن الاستراتيجية)\n"
+                            "/disable_ma20 — تعطيل فيلتر MA20\n\n"
                             "<b>التقارير:</b>\n"
+                            "/config — عرض كل الإعدادات الحالية\n"
                             "/profit today — أرباح اليوم\n"
-                            "/profit — كل الأرباح\n"
-                            "/summary — ملخص الأداء\n"
-                            "/help — عرض الأوامر"
+                            "/profit — كل الأرباح من البداية\n"
+                            "/summary — ملخص كامل للأداء\n"
+                            "/help — عرض هذه القائمة"
                         )
 
         except Exception as e:
@@ -594,7 +710,8 @@ def scan_all_symbols(client):
     added = new_watch - watch_list
     if added:
         log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
-    watch_list = new_watch
+    with _lock:   # ✅ إصلاح #3: حماية watch_list من التعديل المتزامن
+        watch_list = new_watch
 
 # ──────────────────────────────────────────────
 # جلب المؤشرات
@@ -625,6 +742,55 @@ def get_indicators(client, symbol):
         return None
 
 # ──────────────────────────────────────────────
+# 🎯 Stochastic RSI — إشارة الارتداد الصاعد المؤكد
+# ──────────────────────────────────────────────
+def check_stoch_rsi(client, symbol):
+    """
+    إشارة الشراء:
+    - K و D كانوا تحت 20 (تشبع بيعي)
+    - K قطع D لأعلى (تقاطع إيجابي)
+    - K اخترق مستوى 20 من تحت لفوق
+    يعيد dict بالقيم أو None لو مافي إشارة
+    """
+    try:
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
+        closes = pd.Series([float(k[4]) for k in klines])
+
+        # حساب Stochastic RSI بالإعدادات الافتراضية: period=14, K=3, D=3
+        stoch  = ta.momentum.StochRSIIndicator(close=closes, window=14, smooth1=3, smooth2=3)
+        k_line = stoch.stochrsi_k() * 100   # تحويل لنطاق 0-100
+        d_line = stoch.stochrsi_d() * 100
+
+        k_curr = round(k_line.iloc[-1], 2)
+        k_prev = round(k_line.iloc[-2], 2)
+        d_curr = round(d_line.iloc[-1], 2)
+        d_prev = round(d_line.iloc[-2], 2)
+        price  = float(closes.iloc[-1])
+        ma20   = round(closes.rolling(window=MA_PERIOD).mean().iloc[-1], 8)
+
+        # شرط الإشارة: كانوا تحت 20 + K قطع D لأعلى + K اخترق 20
+        signal = (
+            k_prev < 20 and d_prev < 20 and   # كانوا في منطقة التشبع البيعي
+            k_curr >= 20 and                   # K اخترق الـ 20 لأعلى
+            k_prev < d_prev and                # قبل: K تحت D
+            k_curr > d_curr                    # بعد: K فوق D (تقاطع إيجابي)
+        )
+
+        if signal:
+            return {
+                "k_curr": k_curr,
+                "k_prev": k_prev,
+                "d_curr": d_curr,
+                "d_prev": d_prev,
+                "price" : price,
+                "ma20"  : ma20,
+            }
+        return None
+    except Exception as e:
+        log.error(f"❌ Stoch RSI {symbol}: {e}")
+        return None
+
+# ──────────────────────────────────────────────
 # تنفيذ الصفقات
 # ──────────────────────────────────────────────
 def get_quantity(client, symbol, usdt_amount):
@@ -639,6 +805,25 @@ def get_quantity(client, symbol, usdt_amount):
         precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
         qty = round(qty - (qty % step_size), precision)
     return qty, price
+
+# ──────────────────────────────────────────────
+# 🔴 إغلاق صفقة يدوياً
+# ──────────────────────────────────────────────
+def close_trade(client, symbol):
+    """يغلق صفقة مفتوحة يدوياً بأمر من المستخدم"""
+    with _lock:
+        if symbol not in open_trades:
+            return None, "not_found"
+        trade = open_trades[symbol]
+    sell_price = sell_market(client, symbol, trade["qty"])
+    if sell_price:
+        record_trade_result(symbol, trade["entry_price"], sell_price, trade["qty"], "manual_close")
+        with _lock:
+            if symbol in open_trades:
+                del open_trades[symbol]
+        save_trades()
+        return sell_price, "ok"
+    return None, "sell_failed"
 
 def buy_market(client, symbol, usdt_amount):
     try:
@@ -670,9 +855,15 @@ def sell_market(client, symbol, qty):
             sell_qty  = round(sell_qty - (sell_qty % step_size), precision)
         if sell_qty <= 0:
             return None
-        client.order_market_sell(symbol=symbol, quantity=sell_qty)
-        price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        log.info(f"✅ بيع {symbol} | السعر: {price} | الكمية: {sell_qty}")
+        order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
+        # ✅ إصلاح #1: سعر التنفيذ الفعلي من الأوردر مباشرة (weighted average)
+        fills = order.get("fills", [])
+        if fills:
+            total_qty = sum(float(f["qty"]) for f in fills)
+            price     = sum(float(f["price"]) * float(f["qty"]) for f in fills) / total_qty
+        else:
+            price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+        log.info(f"✅ بيع {symbol} | السعر: {price:.6f} | الكمية: {sell_qty}")
         return price
     except BinanceAPIException as e:
         log.error(f"❌ بيع {symbol}: {e.status_code} | {e.message}")
@@ -766,7 +957,7 @@ def api_status():
         except Exception as e:
             log.error(f"❌ API رصيد: {e}")
 
-    profit_log = load_profit_log()
+    profit_log = load_all_profit_log()   # ✅ كل الشهور
     total_pnl  = round(sum(r["profit"] for r in profit_log), 4)
     wins       = sum(1 for r in profit_log if r["profit"] > 0)
     win_rate   = round(wins / len(profit_log) * 100, 1) if profit_log else 0.0
@@ -816,16 +1007,15 @@ def api_trades():
 @login_required
 def api_history():
     period = request.args.get("period", "all")
-    profit_log = load_profit_log()
-    now = time.strftime("%Y-%m-%d")
+    now    = time.strftime("%Y-%m-%d")
     if period == "today":
-        records = [r for r in profit_log if r["time"].startswith(now)]
+        records = [r for r in load_profit_log() if r["time"].startswith(now)]
     elif period == "week":
-        cutoff = time.time() - 7 * 86400
-        records = [r for r in profit_log
+        cutoff  = time.time() - 7 * 86400
+        records = [r for r in load_all_profit_log()
                    if time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S")) >= cutoff]
     else:
-        records = profit_log
+        records = load_all_profit_log()   # ✅ كل الشهور
     records = sorted(records, key=lambda r: r["time"], reverse=True)
     return jsonify(records)
 
@@ -1095,15 +1285,38 @@ def run_bot():
                     if len(open_trades) >= MAX_TRADES:
                         break
 
-                    ind = get_indicators(client, symbol)
-                    if not ind:
+                    with _lock:
+                        ma20_on  = ma20_enabled
+                        strategy = current_strategy
+
+                    # ── استراتيجية RSI العادي ──────────────────
+                    if strategy == "rsi":
+                        ind = get_indicators(client, symbol)
+                        if not ind:
+                            continue
+                        ma20_condition = (ind["price"] > ind["ma20"]) if ma20_on else True
+                        buy_signal     = ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY and ma20_condition
+                        signal_info    = f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}" if buy_signal else None
+                        price          = ind["price"] if buy_signal else None
+
+                    # ── استراتيجية Stochastic RSI ──────────────
+                    elif strategy == "stoch_rsi":
+                        stoch = check_stoch_rsi(client, symbol)
+                        if not stoch:
+                            time.sleep(0.2)
+                            continue
+                        ma20_condition = (stoch["price"] > stoch["ma20"]) if ma20_on else True
+                        buy_signal     = ma20_condition
+                        signal_info    = (
+                            f"📊 Stoch K: {stoch['k_prev']} → {stoch['k_curr']} | D: {stoch['d_prev']} → {stoch['d_curr']}"
+                        ) if buy_signal else None
+                        price = stoch["price"] if buy_signal else None
+
+                    else:
+                        time.sleep(0.2)
                         continue
 
-                    with _lock:
-                        ma20_on = ma20_enabled
-                    ma20_condition = (ind["price"] > ind["ma20"]) if ma20_on else True
-
-                    if ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY and ma20_condition:
+                    if buy_signal:
                         try:
                             usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
                         except Exception as e:
@@ -1124,7 +1337,7 @@ def run_bot():
                                 sl_value  = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 4)
                                 send_telegram(
                                     f"🟢 <b>شراء {coin_name}</b>\n"
-                                    f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}\n"
+                                    f"{signal_info}\n"
                                     f"💵 السعر: {res['entry_price']}\n"
                                     f"🛡️ Stop Loss: {sl_value}\n"
                                     f"💼 صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES}"
