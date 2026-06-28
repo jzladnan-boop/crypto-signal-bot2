@@ -9,9 +9,20 @@ A production-ready, fully automated trading bot designed to execute buy and sell
 * **Robust Integration:** Uses the official Binance API for fast and secure execution.
 
 ## 🛠️ Tech Stack
-* **Language:** Python 3
-* **Containerization:** Docker
+* **Language:** Python 3 + React Native (Dashboard)
+* **Containerization:** Docker & Docker Compose
 * **API Integration:** Python-Binance
+* **Frontend:** Expo, React Native, NativeWind (Tailwind CSS)
+
+## 🎛️ لوحة التحكم (Dashboard)
+
+تطبيق جوال احترافي للتحكم بالبوت:
+- عرض حالة البوت والصفقات المفتوحة
+- تتبع الأرباح والخسائر
+- تعديل إعدادات التداول
+- تشغيل/إيقاف البوت
+
+**الوصول:** http://your-server:3000
 
 ## 📋 Requirements & Deployment
 1. A verified **Binance Account**.
