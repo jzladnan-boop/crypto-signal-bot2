@@ -46,7 +46,6 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
     credentials: "include",
   });
 
-  // حفظ الـ session cookie من الاستجابة
   const setCookie = response.headers.get("set-cookie");
   if (setCookie) {
     const sessionMatch = setCookie.match(/session=[^;]+/);
@@ -148,9 +147,13 @@ export interface BotSettings {
   trade_amount: number;
   max_trades: number;
   trail_pct: number;
+  stoploss_pct: number;
+  activate_pct: number;
   interval_minutes: number;
   rsi_low: number;
   rsi_high: number;
+  rsi_enabled: boolean;
+  stoch_rsi_enabled: boolean;
   ma20_enabled: boolean;
 }
 
@@ -185,6 +188,63 @@ export async function controlBot(action: "start" | "stop"): Promise<{ ok: boolea
     const data = await res.json();
     if (res.ok && data.ok) return { ok: true };
     return { ok: false, error: data.error || "فشل التحكم بالبوت" };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// ── Symbols ───────────────────────────────────────────
+
+export async function getSymbols(): Promise<string[]> {
+  try {
+    const res = await apiFetch("/api/symbols");
+    if (!res.ok) throw new Error("فشل جلب العملات");
+    const data = await res.json();
+    return data.symbols || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function addSymbol(symbol: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch("/api/symbols/add", {
+      method: "POST",
+      body: JSON.stringify({ symbol: symbol.toUpperCase() }),
+    });
+    const data = await res.json();
+    if (res.ok && data.ok) return { ok: true };
+    return { ok: false, error: data.error || "فشل إضافة العملة" };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+export async function removeSymbol(symbol: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch("/api/symbols/remove", {
+      method: "POST",
+      body: JSON.stringify({ symbol: symbol.toUpperCase() }),
+    });
+    const data = await res.json();
+    if (res.ok && data.ok) return { ok: true };
+    return { ok: false, error: data.error || "فشل حذف العملة" };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// ── Close Trade ───────────────────────────────────────
+
+export async function closeTrade(symbol: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch("/api/close", {
+      method: "POST",
+      body: JSON.stringify({ symbol: symbol.toUpperCase() }),
+    });
+    const data = await res.json();
+    if (res.ok && data.ok) return { ok: true };
+    return { ok: false, error: data.error || "فشل إغلاق الصفقة" };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
