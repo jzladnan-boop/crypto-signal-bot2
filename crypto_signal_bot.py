@@ -1,6 +1,7 @@
 """
 Crypto Trading Bot - RSI Auto Trader
 نفس الكود الأصلي + إصلاح 5 أخطاء فقط بدون تغيير المنطق
++ إصلاح إضافي: التحقق من الرصيد الفعلي قبل البيع لتجنب خطأ "insufficient balance"
 """
 
 import os
@@ -595,6 +596,9 @@ def telegram_command_listener(client):
                             send_admin(f"⚠️ مافي صفقة مفتوحة لـ {coin}.")
                         elif status == "sell_failed":
                             send_admin(f"❌ فشل إغلاق صفقة {coin}. تحقق من اللوق.")
+                        elif status == "no_balance_removed":
+                            # ✅ إصلاح: ما كان فيه رصيد فعلي للعملة، تم تنظيف الصفقة من السجل فقط
+                            send_admin(f"⚠️ {coin}: لا يوجد رصيد فعلي لهذي العملة في المحفظة.\nتم حذف الصفقة من سجل البوت لتجنب التعليق.")
                         else:
                             trade_entry = open_trades.get(symbol, {}).get("entry_price", 0)
                             # ملاحظة: السعر جُلب بعد الحذف، نحسب PnL من السجل
@@ -815,6 +819,7 @@ def close_trade(client, symbol):
         if symbol not in open_trades:
             return None, "not_found"
         trade = open_trades[symbol]
+
     sell_price = sell_market(client, symbol, trade["qty"])
     if sell_price:
         record_trade_result(symbol, trade["entry_price"], sell_price, trade["qty"], "manual_close")
@@ -823,6 +828,22 @@ def close_trade(client, symbol):
                 del open_trades[symbol]
         save_trades()
         return sell_price, "ok"
+
+    # ✅ إصلاح: لو فشل البيع لأنه لا يوجد رصيد فعلي للعملة في المحفظة،
+    # ننظف الصفقة من السجل لتجنب تكرار محاولة البيع كل دقيقة (مشكلة TLM)
+    asset = symbol.replace("USDT", "")
+    try:
+        balance = client.get_asset_balance(asset=asset)
+        if float(balance["free"]) <= 0:
+            with _lock:
+                if symbol in open_trades:
+                    del open_trades[symbol]
+            save_trades()
+            log.warning(f"⚠️ {symbol}: لا يوجد رصيد فعلي، تم حذف الصفقة من السجل")
+            return None, "no_balance_removed"
+    except Exception as e:
+        log.error(f"❌ فحص رصيد {symbol} بعد فشل البيع: {e}")
+
     return None, "sell_failed"
 
 def buy_market(client, symbol, usdt_amount):
@@ -841,20 +862,35 @@ def buy_market(client, symbol, usdt_amount):
         return None
 
 def sell_market(client, symbol, qty):
-    """✅ إصلاح #2: البيع بالكمية الكاملة بدون طرح عمولة يدوي"""
+    """
+    ✅ إصلاح #2: البيع بالكمية الكاملة بدون طرح عمولة يدوي
+    ✅ إصلاح إضافي: التحقق من الرصيد الفعلي في المحفظة قبل البيع،
+       واستخدام أصغر قيمة بين الكمية المسجلة في الذاكرة والكمية الفعلية،
+       لتجنب خطأ "Account has insufficient balance" (مشكلة TLM المتكررة)
+    """
     try:
+        asset      = symbol.replace("USDT", "")
+        balance    = client.get_asset_balance(asset=asset)
+        actual_qty = float(balance["free"])
+
         info      = client.get_symbol_info(symbol)
         step_size = None
         for f in info["filters"]:
             if f["filterType"] == "LOT_SIZE":
                 step_size = float(f["stepSize"])
                 break
-        sell_qty = qty  # ✅ إصلاح: بينانس يخصم العمولة تلقائياً من USDT
+
+        # ✅ نستخدم أصغر قيمة بين المسجل بالذاكرة والمتاح فعلياً بالمحفظة
+        sell_qty = min(qty, actual_qty)
+
         if step_size:
             precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
             sell_qty  = round(sell_qty - (sell_qty % step_size), precision)
+
         if sell_qty <= 0:
+            log.warning(f"⚠️ {symbol}: لا يوجد رصيد كافٍ للبيع (مسجل: {qty}, فعلي: {actual_qty})")
             return None
+
         order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
         # ✅ إصلاح #1: سعر التنفيذ الفعلي من الأوردر مباشرة (weighted average)
         fills = order.get("fills", [])
