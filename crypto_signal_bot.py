@@ -77,6 +77,7 @@ DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "")   # ⚠️ لازم ت�
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 DASHBOARD_SECRET    = os.getenv("DASHBOARD_SECRET", secrets.token_hex(16))
 DASHBOARD_PORT      = int(os.getenv("DASHBOARD_PORT", "5000"))
+PUSH_TOKENS_FILE    = os.path.join(DATA_DIR, "push_tokens.json")
 
 # ──────────────────────────────────────────────
 # 🛑 Circuit Breaker: توقف تلقائي بعد خسارات متتالية
@@ -166,6 +167,37 @@ def load_trades():
 # ──────────────────────────────────────────────
 # 🛑 حفظ وتحميل حالة Circuit Breaker (تنجو من إعادة تشغيل السيرفر)
 # ──────────────────────────────────────────────
+def load_push_tokens():
+    if os.path.exists(PUSH_TOKENS_FILE):
+        try:
+            with open(PUSH_TOKENS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def save_push_token(token):
+    tokens = load_push_tokens()
+    if token not in tokens:
+        tokens.append(token)
+        with open(PUSH_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(tokens, f, ensure_ascii=False, indent=2)
+
+def send_push_notification(title, body):
+    tokens = load_push_tokens()
+    if not tokens:
+        return
+    for token in tokens:
+        try:
+            requests.post(
+                "https://exp.host/--/api/v2/push/send",
+                json={"to": token, "title": title, "body": body, "sound": "default"},
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+        except Exception as e:
+            log.error(f"❌ خطأ إرسال إشعار: {e}")
+
 def save_circuit_state():
     try:
         with open(CIRCUIT_FILE, "w", encoding="utf-8") as f:
@@ -259,6 +291,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason):
 # 📨 تيليغرام
 # ──────────────────────────────────────────────
 def send_telegram(message):
+    send_push_notification("Crypto Bot", message.replace("<b>", "").replace("</b>", ""))
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -1033,8 +1066,9 @@ def api_get_settings():
             "rsi_low": RSI_WATCH_LOW,
             "rsi_high": RSI_WATCH_HIGH,
             "ma20_enabled": ma20_enabled,
+            "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
+            "trail_activate_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
         })
-
 
 @app.route("/api/settings", methods=["POST"])
 @login_required
@@ -1083,6 +1117,17 @@ def api_set_settings():
 
 
 # ── التحكم بالتداول ───────────────────────────────
+@app.route("/api/register_push", methods=["POST"])
+@login_required
+def api_register_push():
+    data = request.get_json(silent=True) or {}
+    token = data.get("token", "")
+    if not token:
+        return jsonify({"error": "token مفقود"}), 400
+    save_push_token(token)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/control", methods=["POST"])
 @login_required
 def api_control():
@@ -1356,3 +1401,6 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+
+
+
