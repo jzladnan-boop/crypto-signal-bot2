@@ -1069,6 +1069,10 @@ def api_get_settings():
             "rsi_low": RSI_WATCH_LOW,
             "rsi_high": RSI_WATCH_HIGH,
             "ma20_enabled": ma20_enabled,
+            "rsi_enabled": current_strategy == "rsi",
+            "stochastic_enabled": current_strategy == "stoch_rsi",
+            "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
+            "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
         })
 
 
@@ -1112,6 +1116,17 @@ def api_set_settings():
 
         if "ma20_enabled" in data:
             ma20_enabled = bool(data["ma20_enabled"])
+
+        if "rsi_enabled" in data and data["rsi_enabled"]:
+            current_strategy = "rsi"
+        if "stochastic_enabled" in data and data["stochastic_enabled"]:
+            current_strategy = "stoch_rsi"
+        if "stop_loss_pct" in data:
+            v = float(data["stop_loss_pct"]) / 100
+            if v > 0: STOP_LOSS_PCT = v
+        if "activate_trailing_pct" in data:
+            v = float(data["activate_trailing_pct"]) / 100
+            if v >= 0: TRAIL_ACTIVATE_PCT = v
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
