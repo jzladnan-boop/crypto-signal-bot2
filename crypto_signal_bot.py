@@ -1080,7 +1080,7 @@ def api_get_settings():
 @login_required
 def api_set_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
-    global current_interval, ma20_enabled
+    global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     data = request.get_json(silent=True) or {}
     errors = []
 
