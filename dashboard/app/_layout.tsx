@@ -23,6 +23,9 @@ function RootLayoutNav() {
       router.replace("/login");
     } else if (isAuthenticated && !inTabsGroup) {
       router.replace("/(tabs)");
+      import("@/lib/bot-api").then(({ registerPushToken }) => {
+        registerPushToken();
+      });
     }
   }, [isAuthenticated, isLoading, segments]);
 

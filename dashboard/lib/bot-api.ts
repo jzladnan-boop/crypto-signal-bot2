@@ -46,6 +46,7 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
     credentials: "include",
   });
 
+  // حفظ الـ session cookie من الاستجابة
   const setCookie = response.headers.get("set-cookie");
   if (setCookie) {
     const sessionMatch = setCookie.match(/session=[^;]+/);
@@ -147,14 +148,16 @@ export interface BotSettings {
   trade_amount: number;
   max_trades: number;
   trail_pct: number;
-  stoploss_pct: number;
-  activate_pct: number;
   interval_minutes: number;
   rsi_low: number;
   rsi_high: number;
   rsi_enabled: boolean;
-  stoch_rsi_enabled: boolean;
+  stochastic_enabled: boolean;
   ma20_enabled: boolean;
+  stop_loss_pct?: number;
+  activate_trailing_pct?: number;
+  trading_pairs?: string[];
+  close_position?: string;
 }
 
 export async function getSettings(): Promise<BotSettings> {
@@ -192,59 +195,38 @@ export async function controlBot(action: "start" | "stop"): Promise<{ ok: boolea
     return { ok: false, error: e.message };
   }
 }
+// ── Push Notifications ───────────────────────────
 
-// ── Symbols ───────────────────────────────────────────
-
-export async function getSymbols(): Promise<string[]> {
+export async function registerPushToken(): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await apiFetch("/api/symbols");
-    if (!res.ok) throw new Error("فشل جلب العملات");
-    const data = await res.json();
-    return data.symbols || [];
-  } catch {
-    return [];
-  }
-}
+    const Notifications = await import("expo-notifications");
+    const Device = await import("expo-device");
 
-export async function addSymbol(symbol: string): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const res = await apiFetch("/api/symbols/add", {
+    if (!Device.isDevice) {
+      return { ok: false, error: "يعمل فقط على جهاز حقيقي" };
+    }
+
+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+    if (existingStatus !== "granted") {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+    if (finalStatus !== "granted") {
+      return { ok: false, error: "لم يتم منح إذن الإشعارات" };
+    }
+
+    const projectId = "67ee0e3a-26b8-4969-a2b0-d566f875e6a7";
+    const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
+    const token = tokenData.data;
+
+    const result = await apiFetch("/api/register_push", {
       method: "POST",
-      body: JSON.stringify({ symbol: symbol.toUpperCase() }),
+      body: JSON.stringify({ token }),
     });
-    const data = await res.json();
-    if (res.ok && data.ok) return { ok: true };
-    return { ok: false, error: data.error || "فشل إضافة العملة" };
-  } catch (e: any) {
-    return { ok: false, error: e.message };
-  }
-}
-
-export async function removeSymbol(symbol: string): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const res = await apiFetch("/api/symbols/remove", {
-      method: "POST",
-      body: JSON.stringify({ symbol: symbol.toUpperCase() }),
-    });
-    const data = await res.json();
-    if (res.ok && data.ok) return { ok: true };
-    return { ok: false, error: data.error || "فشل حذف العملة" };
-  } catch (e: any) {
-    return { ok: false, error: e.message };
-  }
-}
-
-// ── Close Trade ───────────────────────────────────────
-
-export async function closeTrade(symbol: string): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const res = await apiFetch("/api/close", {
-      method: "POST",
-      body: JSON.stringify({ symbol: symbol.toUpperCase() }),
-    });
-    const data = await res.json();
-    if (res.ok && data.ok) return { ok: true };
-    return { ok: false, error: data.error || "فشل إغلاق الصفقة" };
+    const data = await result.json();
+    if (result.ok && data.ok) return { ok: true };
+    return { ok: false, error: data.error || "فشل تسجيل الإشعارات" };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }

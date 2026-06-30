@@ -9,17 +9,10 @@ import {
   ActivityIndicator,
   Alert,
   Switch,
+  FlatList,
 } from "react-native";
 import { ScreenContainer } from "@/components/screen-container";
-import {
-  getSettings,
-  updateSettings,
-  BotSettings,
-  getSymbols,
-  addSymbol,
-  removeSymbol,
-  closeTrade,
-} from "@/lib/bot-api";
+import { getSettings, updateSettings, BotSettings } from "@/lib/bot-api";
 import { useAuth } from "@/lib/auth-context";
 
 const INTERVAL_OPTIONS = [15, 30, 60, 240];
@@ -30,20 +23,14 @@ export default function SettingsScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [edited, setEdited] = useState<Partial<BotSettings>>({});
-
-  // Symbols
-  const [symbols, setSymbols] = useState<string[]>([]);
-  const [symbolInput, setSymbolInput] = useState("");
-  const [symbolLoading, setSymbolLoading] = useState(false);
-
-  // Close Trade
-  const [closeInput, setCloseInput] = useState("");
-  const [closeLoading, setCloseLoading] = useState(false);
+  const [newCurrency, setNewCurrency] = useState("");
+  const [currencies, setCurrencies] = useState<string[]>([]);
 
   const fetchSettings = useCallback(async () => {
     try {
       const data = await getSettings();
       setSettings(data);
+      setCurrencies(data.trading_pairs || []);
       setEdited({});
     } catch (e: any) {
       if (e.message?.includes("unauthorized")) logout();
@@ -52,23 +39,21 @@ export default function SettingsScreen() {
     }
   }, [logout]);
 
-  const fetchSymbols = useCallback(async () => {
-    const list = await getSymbols();
-    setSymbols(list);
-  }, []);
-
   useEffect(() => {
     fetchSettings();
-    fetchSymbols();
-  }, [fetchSettings, fetchSymbols]);
+  }, [fetchSettings]);
 
   const handleSave = async () => {
-    if (Object.keys(edited).length === 0) {
+    if (Object.keys(edited).length === 0 && currencies === settings?.trading_pairs) {
       Alert.alert("تنبيه", "لم تقم بتعديل أي إعداد");
       return;
     }
     setSaving(true);
-    const result = await updateSettings(edited);
+    const toSave = { ...edited };
+    if (currencies !== settings?.trading_pairs) {
+      toSave.trading_pairs = currencies;
+    }
+    const result = await updateSettings(toSave);
     if (result.ok) {
       Alert.alert("✅ تم الحفظ", "تم تحديث الإعدادات بنجاح");
       fetchSettings();
@@ -78,58 +63,45 @@ export default function SettingsScreen() {
     setSaving(false);
   };
 
-  const handleAddSymbol = async () => {
-    if (!symbolInput.trim()) return;
-    setSymbolLoading(true);
-    const result = await addSymbol(symbolInput.trim());
-    if (result.ok) {
-      Alert.alert("✅ تمت الإضافة", `تم إضافة ${symbolInput.toUpperCase()}`);
-      setSymbolInput("");
-      fetchSymbols();
-    } else {
-      Alert.alert("خطأ", result.error || "فشل إضافة العملة");
+  const handleAddCurrency = () => {
+    if (!newCurrency.trim()) {
+      Alert.alert("خطأ", "أدخل اسم العملة");
+      return;
     }
-    setSymbolLoading(false);
+    if (currencies.includes(newCurrency.toUpperCase())) {
+      Alert.alert("خطأ", "العملة موجودة بالفعل");
+      return;
+    }
+    setCurrencies([...currencies, newCurrency.toUpperCase()]);
+    setNewCurrency("");
   };
 
-  const handleRemoveSymbol = async (sym: string) => {
-    Alert.alert("تأكيد", `هل تريد حذف ${sym}؟`, [
-      { text: "إلغاء", style: "cancel" },
-      {
-        text: "حذف",
-        style: "destructive",
-        onPress: async () => {
-          const result = await removeSymbol(sym);
-          if (result.ok) {
-            fetchSymbols();
-          } else {
-            Alert.alert("خطأ", result.error || "فشل حذف العملة");
-          }
-        },
-      },
-    ]);
+  const handleRemoveCurrency = (currency: string) => {
+    setCurrencies(currencies.filter((c) => c !== currency));
   };
 
-  const handleCloseTrade = async () => {
-    if (!closeInput.trim()) return;
-    Alert.alert("تأكيد إغلاق", `هل تريد إغلاق صفقة ${closeInput.toUpperCase()}؟`, [
-      { text: "إلغاء", style: "cancel" },
-      {
-        text: "إغلاق",
-        style: "destructive",
-        onPress: async () => {
-          setCloseLoading(true);
-          const result = await closeTrade(closeInput.trim());
-          if (result.ok) {
-            Alert.alert("✅ تم الإغلاق", `تم إغلاق صفقة ${closeInput.toUpperCase()}`);
-            setCloseInput("");
-          } else {
-            Alert.alert("خطأ", result.error || "فشل إغلاق الصفقة");
-          }
-          setCloseLoading(false);
+  const handleClosePosition = async (symbol: string) => {
+    Alert.alert(
+      "تأكيد",
+      `هل تريد إغلاق الصفقة ${symbol}؟`,
+      [
+        { text: "إلغاء", onPress: () => {}, style: "cancel" },
+        {
+          text: "إغلاق",
+          onPress: async () => {
+            setSaving(true);
+            const result = await updateSettings({ close_position: symbol });
+            if (result.ok) {
+              Alert.alert("✅ تم", `تم إغلاق الصفقة ${symbol}`);
+            } else {
+              Alert.alert("خطأ", result.error || "فشل إغلاق الصفقة");
+            }
+            setSaving(false);
+          },
+          style: "destructive",
         },
-      },
-    ]);
+      ]
+    );
   };
 
   const current = { ...settings, ...edited } as BotSettings;
@@ -157,8 +129,9 @@ export default function SettingsScreen() {
       >
         <Text style={styles.pageTitle}>الإعدادات</Text>
 
-        {/* ── معاملات التداول ── */}
+        {/* Trading Parameters */}
         <SectionHeader title="⚙️ معاملات التداول" />
+
         <View style={styles.card}>
           <NumberRow
             label="حجم الصفقة ($)"
@@ -184,113 +157,66 @@ export default function SettingsScreen() {
           <Divider />
           <NumberRow
             label="Stop Loss (%)"
-            value={current.stoploss_pct}
-            onChange={(v) => updateField("stoploss_pct", v)}
+            value={current.stop_loss_pct || 0}
+            onChange={(v) => updateField("stop_loss_pct", v)}
             hint="حد الخسارة الثابت قبل تفعيل Trailing"
             decimal
           />
           <Divider />
           <NumberRow
             label="Activate Trailing (%)"
-            value={current.activate_pct}
-            onChange={(v) => updateField("activate_pct", v)}
+            value={current.activate_trailing_pct || 0}
+            onChange={(v) => updateField("activate_trailing_pct", v)}
             hint="نسبة الربح المطلوبة لتفعيل Trailing Stop"
             decimal
           />
         </View>
 
-        {/* ── إغلاق صفقة ── */}
-        <SectionHeader title="🔴 إغلاق صفقة" />
-        <View style={styles.card}>
-          <View style={styles.row}>
-            <TextInput
-              style={[styles.symbolInput, { flex: 1 }]}
-              placeholder="اسم العملة (مثال: BTC)"
-              placeholderTextColor="#8B949E"
-              value={closeInput}
-              onChangeText={setCloseInput}
-              autoCapitalize="characters"
-            />
-            <TouchableOpacity
-              style={[styles.actionBtn, { backgroundColor: "#FF4444" }]}
-              onPress={handleCloseTrade}
-              disabled={closeLoading}
-            >
-              {closeLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.actionBtnText}>إغلاق</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* ── إعدادات RSI ── */}
+        {/* RSI Settings */}
         <SectionHeader title="📊 إعدادات RSI" />
+
         <View style={styles.card}>
-          {/* RSI Enable/Disable + Range */}
           <View style={styles.row}>
             <View style={{ flex: 1 }}>
               <Text style={styles.rowLabel}>RSI العادي</Text>
               <Text style={styles.rowHint}>شراء عند ارتداد RSI فوق 30</Text>
             </View>
             <Switch
-              value={current.rsi_enabled ?? true}
+              value={current.rsi_enabled}
               onValueChange={(v) => updateField("rsi_enabled", v)}
               trackColor={{ false: "#30363D", true: "#F0B90B44" }}
               thumbColor={current.rsi_enabled ? "#F0B90B" : "#8B949E"}
             />
           </View>
-          {/* RSI Low & High في سطر واحد */}
           <Divider />
-          <View style={styles.row}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.rowLabel}>نطاق RSI</Text>
-              <Text style={styles.rowHint}>Low / High للمراقبة</Text>
-            </View>
-            <View style={styles.dualInput}>
-              <TextInput
-                style={styles.dualField}
-                value={edited.rsi_low?.toString() ?? current.rsi_low?.toString() ?? ""}
-                onChangeText={(t) => {
-                  const n = parseFloat(t);
-                  if (!isNaN(n)) updateField("rsi_low", n);
-                }}
-                keyboardType="decimal-pad"
-                placeholder="Low"
-                placeholderTextColor="#8B949E"
-              />
-              <Text style={styles.dualSep}>/</Text>
-              <TextInput
-                style={styles.dualField}
-                value={edited.rsi_high?.toString() ?? current.rsi_high?.toString() ?? ""}
-                onChangeText={(t) => {
-                  const n = parseFloat(t);
-                  if (!isNaN(n)) updateField("rsi_high", n);
-                }}
-                keyboardType="decimal-pad"
-                placeholder="High"
-                placeholderTextColor="#8B949E"
-              />
-            </View>
-          </View>
-
-          {/* Stochastic RSI */}
+          <NumberRow
+            label="نطاق RSI - Low"
+            value={current.rsi_low}
+            onChange={(v) => updateField("rsi_low", v)}
+            hint="الحد الأدنى لمنطقة المراقبة"
+            decimal
+          />
+          <Divider />
+          <NumberRow
+            label="نطاق RSI - High"
+            value={current.rsi_high}
+            onChange={(v) => updateField("rsi_high", v)}
+            hint="الحد الأعلى لمنطقة المراقبة"
+            decimal
+          />
           <Divider />
           <View style={styles.row}>
             <View style={{ flex: 1 }}>
               <Text style={styles.rowLabel}>Stochastic RSI</Text>
-              <Text style={styles.rowHint}>شراء عند تقاطع واختراق مستوى 20</Text>
+              <Text style={styles.rowHint}>عند نقاط واختراق مستويات 20</Text>
             </View>
             <Switch
-              value={current.stoch_rsi_enabled ?? false}
-              onValueChange={(v) => updateField("stoch_rsi_enabled", v)}
+              value={current.stochastic_enabled}
+              onValueChange={(v) => updateField("stochastic_enabled", v)}
               trackColor={{ false: "#30363D", true: "#F0B90B44" }}
-              thumbColor={current.stoch_rsi_enabled ? "#F0B90B" : "#8B949E"}
+              thumbColor={current.stochastic_enabled ? "#F0B90B" : "#8B949E"}
             />
           </View>
-
-          {/* MA20 */}
           <Divider />
           <View style={styles.row}>
             <View style={{ flex: 1 }}>
@@ -306,10 +232,10 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* ── الفريم الزمني ── */}
+        {/* Interval */}
         <SectionHeader title="🕯️ الفريم الزمني" />
         <View style={styles.card}>
-          <Text style={[styles.rowLabel, { padding: 14, paddingBottom: 0 }]}>الفريم الزمني للشموع</Text>
+          <Text style={styles.rowLabel}>الفريم الزمني للشموع</Text>
           <View style={styles.intervalRow}>
             {INTERVAL_OPTIONS.map((min) => (
               <TouchableOpacity
@@ -333,59 +259,52 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* ── إدارة العملات ── */}
-        <SectionHeader title="🪙 إدارة العملات" />
+        {/* Currency Management */}
+        <SectionHeader title="💱 إدارة العملات" />
         <View style={styles.card}>
-          <View style={[styles.row, { gap: 8 }]}>
+          <View style={styles.currencyInput}>
             <TextInput
-              style={[styles.symbolInput, { flex: 1 }]}
-              placeholder="اسم العملة (مثال: ETH)"
+              style={styles.currencyTextInput}
+              placeholder="مثال: ETH"
               placeholderTextColor="#8B949E"
-              value={symbolInput}
-              onChangeText={setSymbolInput}
+              value={newCurrency}
+              onChangeText={setNewCurrency}
               autoCapitalize="characters"
             />
-            <TouchableOpacity
-              style={[styles.actionBtn, { backgroundColor: "#238636" }]}
-              onPress={handleAddSymbol}
-              disabled={symbolLoading}
-            >
-              {symbolLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.actionBtnText}>+ إضافة</Text>
-              )}
+            <TouchableOpacity style={styles.addBtn} onPress={handleAddCurrency}>
+              <Text style={styles.addBtnText}>+ إضافة</Text>
             </TouchableOpacity>
           </View>
 
-          {symbols.length > 0 && (
-            <>
-              <Divider />
-              <View style={styles.symbolsList}>
-                {symbols.map((sym) => (
-                  <View key={sym} style={styles.symbolItem}>
-                    <Text style={styles.symbolText}>{sym}</Text>
-                    <TouchableOpacity
-                      style={styles.removeBtn}
-                      onPress={() => handleRemoveSymbol(sym)}
-                    >
-                      <Text style={styles.removeBtnText}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-                ))}
-              </View>
-            </>
-          )}
-
-          {symbols.length === 0 && (
-            <View style={{ padding: 14, paddingTop: 0 }}>
-              <Text style={styles.rowHint}>لا توجد عملات مضافة</Text>
+          {currencies.length === 0 ? (
+            <Text style={styles.noCurrencies}>لا توجد عملات مضافة</Text>
+          ) : (
+            <View style={styles.currencyList}>
+              {currencies.map((currency) => (
+                <View key={currency} style={styles.currencyItem}>
+                  <Text style={styles.currencyName}>{currency}</Text>
+                  <TouchableOpacity
+                    onPress={() => handleRemoveCurrency(currency)}
+                    style={styles.removeBtn}
+                  >
+                    <Text style={styles.removeBtnText}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
             </View>
           )}
         </View>
 
-        {/* ── حفظ ── */}
-        {Object.keys(edited).length > 0 && (
+        {/* Close Position */}
+        <SectionHeader title="🔴 إغلاق صفقة" />
+        <View style={styles.card}>
+          <Text style={styles.rowLabel}>أغلق صفقة محددة</Text>
+          <Text style={styles.rowHint}>اختر صفقة مفتوحة لإغلاقها</Text>
+          {/* يمكن إضافة قائمة الصفقات المفتوحة هنا */}
+        </View>
+
+        {/* Save Button */}
+        {(Object.keys(edited).length > 0 || currencies !== settings?.trading_pairs) && (
           <TouchableOpacity
             style={[styles.saveBtn, saving && styles.saveBtnDisabled]}
             onPress={handleSave}
@@ -493,28 +412,6 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  dualInput: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  dualField: {
-    backgroundColor: "#0D1117",
-    borderWidth: 1,
-    borderColor: "#30363D",
-    borderRadius: 8,
-    padding: 8,
-    color: "#E6EDF3",
-    fontSize: 14,
-    width: 60,
-    textAlign: "center",
-  },
-  dualSep: {
-    color: "#8B949E",
-    fontSize: 16,
-    fontWeight: "bold",
-  },
-
   intervalRow: {
     flexDirection: "row",
     gap: 8,
@@ -534,7 +431,13 @@ const styles = StyleSheet.create({
   intervalText: { color: "#8B949E", fontWeight: "600" },
   intervalTextActive: { color: "#F0B90B" },
 
-  symbolInput: {
+  currencyInput: {
+    flexDirection: "row",
+    gap: 8,
+    padding: 14,
+  },
+  currencyTextInput: {
+    flex: 1,
     backgroundColor: "#0D1117",
     borderWidth: 1,
     borderColor: "#30363D",
@@ -543,36 +446,41 @@ const styles = StyleSheet.create({
     color: "#E6EDF3",
     fontSize: 14,
   },
-  actionBtn: {
+  addBtn: {
+    backgroundColor: "#238636",
     borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    alignItems: "center",
+    paddingHorizontal: 12,
     justifyContent: "center",
-    minWidth: 80,
   },
-  actionBtnText: { color: "#fff", fontWeight: "bold", fontSize: 13 },
+  addBtnText: { color: "#fff", fontWeight: "600", fontSize: 13 },
 
-  symbolsList: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    padding: 14,
+  currencyList: {
+    paddingHorizontal: 14,
+    paddingBottom: 14,
     gap: 8,
   },
-  symbolItem: {
+  currencyItem: {
     flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
     backgroundColor: "#0D1117",
     borderRadius: 8,
+    padding: 10,
     borderWidth: 1,
     borderColor: "#30363D",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    gap: 6,
   },
-  symbolText: { color: "#E6EDF3", fontSize: 13, fontWeight: "600" },
-  removeBtn: { padding: 2 },
-  removeBtnText: { color: "#FF4444", fontSize: 12, fontWeight: "bold" },
+  currencyName: { color: "#E6EDF3", fontWeight: "500" },
+  removeBtn: {
+    backgroundColor: "#DA3633",
+    borderRadius: 6,
+    width: 24,
+    height: 24,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  removeBtnText: { color: "#fff", fontWeight: "bold", fontSize: 14 },
+
+  noCurrencies: { color: "#8B949E", textAlign: "center", padding: 14, fontSize: 13 },
 
   saveBtn: {
     backgroundColor: "#F0B90B",
