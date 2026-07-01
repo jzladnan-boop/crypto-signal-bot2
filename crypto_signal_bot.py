@@ -625,7 +625,7 @@ def telegram_command_listener(client):
                                 with _lock:
                                     RSI_BUY_PREV = prev
                                     RSI_BUY_CURR = curr
-                                send_admin(f"✅ شرط الشراء: RSI السابق < {RSI_BUY_PREV} والحالي >= {RSI_BUY_CURR}")
+                                send_admin(f"✅ شرط الشراء: RSI السابق أقل من {RSI_BUY_PREV} والحالي أكبر من {RSI_BUY_CURR}")
                         except:
                             send_admin("❌ مثال: /set_buy_rsi 25 30")
 
@@ -651,6 +651,8 @@ def telegram_command_listener(client):
                             trail            = TRAIL_PCT * 100
                             stoploss         = STOP_LOSS_PCT * 100
                             activate         = TRAIL_ACTIVATE_PCT * 100
+                            rsi_prev         = RSI_BUY_PREV
+                            rsi_curr         = RSI_BUY_CURR
                         send_admin(
                             f"⚙️ <b>الإعدادات الحالية</b>\n\n"
                             f"📊 الاستراتيجية: {strategy_label}\n"
@@ -661,6 +663,7 @@ def telegram_command_listener(client):
                             f"🛑 حد الخسارة (Stop Loss): {stoploss}%\n"
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
                             f"🔍 مساحة Trailing Stop: {trail}%\n"
+                            f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}"
                         )
 
                     # ── /help ─────────────────────────────────
@@ -684,7 +687,8 @@ def telegram_command_listener(client):
                             "/set_stoploss 1.5 — حد الخسارة الثابت قبل تفعيل Trailing\n"
                             "/set_activate 0.5 — نسبة الربح المطلوبة لتفعيل Trailing Stop\n"
                             "/set_rsi_range 20 38 — نطاق RSI للمراقبة المكثفة\n"
-                            "/set_interval 30 — الفريم الزمني للشموع (15/30/60/240 دقيقة)\n\n"
+                            "/set_interval 30 — الفريم الزمني للشموع (15/30/60/240 دقيقة)\n"
+                            "/set_buy_rsi 25 30 — شرط الشراء: RSI السابق أصغر من 25 والحالي أكبر من 30\n\n"
                             "<b>الاستراتيجية:</b>\n"
                             "/set_strategy rsi — شراء عند ارتداد RSI فوق 30\n"
                             "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n\n"
