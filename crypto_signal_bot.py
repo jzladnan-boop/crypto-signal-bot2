@@ -651,6 +651,8 @@ def telegram_command_listener(client):
                             trail            = TRAIL_PCT * 100
                             stoploss         = STOP_LOSS_PCT * 100
                             activate         = TRAIL_ACTIVATE_PCT * 100
+                       rsi_prev         = RSI_BUY_PREV
+                            rsi_curr         = RSI_BUY_CURR
                         send_admin(
                             f"⚙️ <b>الإعدادات الحالية</b>\n\n"
                             f"📊 الاستراتيجية: {strategy_label}\n"
@@ -661,7 +663,7 @@ def telegram_command_listener(client):
                             f"🛑 حد الخسارة (Stop Loss): {stoploss}%\n"
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
                             f"🔍 مساحة Trailing Stop: {trail}%\n"
-                            f"📉 شرط الشراء RSI: السابق < {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}"
+                            f"📉 شرط الشراء: RSI السابق أصغر من {rsi_buy_prev} | الحالي >= {rsi_buy_curr}"
                         )
 
                     # ── /help ─────────────────────────────────
