@@ -663,7 +663,7 @@ def telegram_command_listener(client):
                             f"🛑 حد الخسارة (Stop Loss): {stoploss}%\n"
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
                             f"🔍 مساحة Trailing Stop: {trail}%\n"
-                            f"📉 شرط الشراء: RSI السابق أصغر من {rsi_buy_prev} | الحالي >= {rsi_buy_curr}"
+                            f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}"
                         )
 
                     # ── /help ─────────────────────────────────
