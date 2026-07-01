@@ -53,6 +53,8 @@ current_interval   = INTERVAL
 RSI_PERIOD         = 14
 RSI_BUY            = 30
 RSI_SELL           = 70
+RSI_BUY_PREV       = 25
+RSI_BUY_CURR       = 30
 STOP_LOSS_PCT      = 0.02
 TRAIL_PCT          = 0.01
 TRAIL_ACTIVATE_PCT = 0.01
@@ -290,7 +292,7 @@ def send_admin(message):
 def telegram_command_listener(client):
     global SYMBOLS, trading_enabled, ma20_enabled, current_interval, current_strategy
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
-    global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
+    global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -611,6 +613,22 @@ def telegram_command_listener(client):
                                 f"💹 PnL: {pnl}"
                             )
 
+                    # ── /set_buy_rsi ──────────────────────────
+                    elif text.startswith("/set_buy_rsi "):
+                        try:
+                            parts = text.replace("/set_buy_rsi ", "").split()
+                            prev  = float(parts[0])
+                            curr  = float(parts[1])
+                            if prev <= 0 or curr <= 0 or prev >= curr:
+                                send_admin("❌ القيمة الأولى لازم أصغر من الثانية.")
+                            else:
+                                with _lock:
+                                    RSI_BUY_PREV = prev
+                                    RSI_BUY_CURR = curr
+                                send_admin(f"✅ شرط الشراء: RSI السابق < {RSI_BUY_PREV} والحالي >= {RSI_BUY_CURR}")
+                        except:
+                            send_admin("❌ مثال: /set_buy_rsi 25 30")
+
                     # ── /set_strategy ─────────────────────────
                     elif text.startswith("/set_strategy "):
                         strategy = text.replace("/set_strategy ", "").strip().lower()
@@ -642,7 +660,8 @@ def telegram_command_listener(client):
                             f"💼 أقصى صفقات: {max_tr}\n"
                             f"🛑 حد الخسارة (Stop Loss): {stoploss}%\n"
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
-                            f"🔍 مساحة Trailing Stop: {trail}%"
+                            f"🔍 مساحة Trailing Stop: {trail}%\n"
+                            f"📉 شرط الشراء RSI: السابق < {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}"
                         )
 
                     # ── /help ─────────────────────────────────
@@ -856,9 +875,11 @@ def buy_market(client, symbol, usdt_amount):
         return {"qty": qty, "entry_price": price, "order_id": order["orderId"]}
     except BinanceAPIException as e:
         log.error(f"❌ شراء {symbol}: {e.status_code} | {e.message}")
+        send_admin(f"خطأ شراء {symbol}: {e.message}")
         return None
     except Exception as e:
         log.error(f"❌ شراء {symbol}: {e}")
+        send_admin(f"خطأ شراء {symbol}: {e}")
         return None
 
 def sell_market(client, symbol, qty):
@@ -903,9 +924,11 @@ def sell_market(client, symbol, qty):
         return price
     except BinanceAPIException as e:
         log.error(f"❌ بيع {symbol}: {e.status_code} | {e.message}")
+        send_admin(f"خطأ بيع {symbol}: {e.message}")
         return None
     except Exception as e:
         log.error(f"❌ بيع {symbol}: {e}")
+        send_admin(f"خطأ بيع {symbol}: {e}")
         return None
 
 # ──────────────────────────────────────────────
@@ -1073,6 +1096,8 @@ def api_get_settings():
             "stochastic_enabled": current_strategy == "stoch_rsi",
             "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
+            "rsi_buy_prev": RSI_BUY_PREV,
+            "rsi_buy_curr": RSI_BUY_CURR,
         })
 
 
@@ -1080,7 +1105,7 @@ def api_get_settings():
 @login_required
 def api_set_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
-    global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
+    global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -1127,6 +1152,12 @@ def api_set_settings():
         if "activate_trailing_pct" in data:
             v = float(data["activate_trailing_pct"]) / 100
             if v >= 0: TRAIL_ACTIVATE_PCT = v
+        if "rsi_buy_prev" in data and "rsi_buy_curr" in data:
+            prev = float(data["rsi_buy_prev"])
+            curr = float(data["rsi_buy_curr"])
+            if prev > 0 and curr > 0 and prev < curr:
+                RSI_BUY_PREV = prev
+                RSI_BUY_CURR = curr
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
@@ -1152,6 +1183,108 @@ def api_control():
         save_circuit_state()
         return jsonify({"ok": True})
     return jsonify({"error": "action لازم تكون start أو stop"}), 400
+
+
+@app.route("/api/symbols", methods=["GET"])
+@login_required
+def api_get_symbols():
+    base_names = [s.replace("USDT", "") for s in SYMBOLS]
+    return jsonify(base_names)
+
+
+@app.route("/api/symbols", methods=["POST"])
+@login_required
+def api_add_symbol():
+    global SYMBOLS
+    data   = request.get_json(silent=True) or {}
+    symbol = data.get("symbol", "").upper().strip()
+    if not symbol:
+        return jsonify({"error": "symbol مفقود"}), 400
+    full = f"{symbol}USDT"
+    if full in SYMBOLS:
+        return jsonify({"error": "العملة موجودة أصلاً"}), 400
+    SYMBOLS.append(full)
+    save_symbols_to_txt()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/symbols/<symbol>", methods=["DELETE"])
+@login_required
+def api_delete_symbol(symbol):
+    global SYMBOLS
+    full = f"{symbol.upper()}USDT"
+    if full not in SYMBOLS:
+        return jsonify({"error": "العملة غير موجودة"}), 404
+    SYMBOLS.remove(full)
+    save_symbols_to_txt()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/close_trade", methods=["POST"])
+@login_required
+def api_close_trade():
+    data   = request.get_json(silent=True) or {}
+    symbol = data.get("symbol", "").upper().strip()
+    if not symbol:
+        return jsonify({"error": "symbol مفقود"}), 400
+    if not _binance_client:
+        return jsonify({"error": "البوت غير متصل ببينانس"}), 503
+    sell_price, status = close_trade(_binance_client, f"{symbol}USDT")
+    if status == "not_found":
+        return jsonify({"error": "لا توجد صفقة مفتوحة لهذه العملة"}), 404
+    elif status == "sell_failed":
+        return jsonify({"error": "فشل إغلاق الصفقة"}), 500
+    elif status == "no_balance_removed":
+        return jsonify({"ok": True, "note": "لا يوجد رصيد، تم حذف الصفقة من السجل"})
+    return jsonify({"ok": True, "sell_price": sell_price})
+
+
+PUSH_TOKENS_FILE = os.path.join(DATA_DIR, "push_tokens.json")
+
+
+def load_push_tokens():
+    if os.path.exists(PUSH_TOKENS_FILE):
+        try:
+            with open(PUSH_TOKENS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+
+def save_push_token(token):
+    tokens = load_push_tokens()
+    if token not in tokens:
+        tokens.append(token)
+        with open(PUSH_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(tokens, f, ensure_ascii=False, indent=2)
+
+
+def send_push_notification(title, body):
+    tokens = load_push_tokens()
+    if not tokens:
+        return
+    for token in tokens:
+        try:
+            requests.post(
+                "https://exp.host/--/api/v2/push/send",
+                json={"to": token, "title": title, "body": body, "sound": "default"},
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+        except Exception as e:
+            log.error(f"❌ خطأ إرسال إشعار: {e}")
+
+
+@app.route("/api/register_push", methods=["POST"])
+@login_required
+def api_register_push():
+    data  = request.get_json(silent=True) or {}
+    token = data.get("token", "")
+    if not token:
+        return jsonify({"error": "token مفقود"}), 400
+    save_push_token(token)
+    return jsonify({"ok": True})
 
 
 def start_dashboard():
@@ -1346,7 +1479,7 @@ def run_bot():
                         if not ind:
                             continue
                         ma20_condition = (ind["price"] > ind["ma20"]) if ma20_on else True
-                        buy_signal     = ind["rsi_prev"] < 32 and ind["rsi"] >= RSI_BUY and ma20_condition
+                        buy_signal     = ind["rsi_prev"] < RSI_BUY_PREV and ind["rsi"] >= RSI_BUY_CURR and ma20_condition
                         signal_info    = f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}" if buy_signal else None
                         price          = ind["price"] if buy_signal else None
 
@@ -1400,6 +1533,7 @@ def run_bot():
 
         except BinanceAPIException as e:
             log.error(f"❌ بينانس: {e.status_code} | {e.message}")
+            send_admin(f"خطأ بينانس: {e.status_code} | {e.message}")
         except Exception as e:
             log.error(f"❌ خطأ عام: {e}")
 
