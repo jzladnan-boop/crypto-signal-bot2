@@ -651,7 +651,7 @@ def telegram_command_listener(client):
                             trail            = TRAIL_PCT * 100
                             stoploss         = STOP_LOSS_PCT * 100
                             activate         = TRAIL_ACTIVATE_PCT * 100
-                       rsi_prev         = RSI_BUY_PREV
+                            rsi_prev         = RSI_BUY_PREV
                             rsi_curr         = RSI_BUY_CURR
                         send_admin(
                             f"⚙️ <b>الإعدادات الحالية</b>\n\n"
