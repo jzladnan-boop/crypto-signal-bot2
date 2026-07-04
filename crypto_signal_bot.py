@@ -2,6 +2,7 @@
 Crypto Trading Bot - RSI Auto Trader
 نفس الكود الأصلي + إصلاح 5 أخطاء فقط بدون تغيير المنطق
 + إصلاح إضافي: التحقق من الرصيد الفعلي قبل البيع لتجنب خطأ "insufficient balance"
++ إصلاح إضافي: تفعيل إرسال Push Notification تلقائياً مع كل رسالة تيليغرام
 """
 
 import os
@@ -26,6 +27,8 @@ SYMBOLS_FILE   = os.path.join(DATA_DIR, "symbols.txt")
 TRADES_FILE    = os.path.join(DATA_DIR, "open_trades.json")
 PROFIT_FILE    = os.path.join(DATA_DIR, f"profit_{time.strftime('%Y_%m')}.json")   # ✅ إصلاح #4: ملف شهري منفصل
 CIRCUIT_FILE   = os.path.join(DATA_DIR, "circuit_breaker.json")   # 🛑 ملف لحفظ حالة التوقف التلقائي
+SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")   # ⚙️ ملف حفظ الإعدادات (تنجو من إعادة التشغيل)
+PUSH_TOKENS_FILE = os.path.join(DATA_DIR, "push_tokens.json")   # 📱 ملف حفظ Push Tokens
 
 DEFAULT_BASE_SYMBOLS = [
     "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL",
@@ -201,6 +204,65 @@ def load_circuit_state():
             log.error(f"❌ خطأ تحميل حالة التوقف التلقائي: {e}")
 
 # ──────────────────────────────────────────────
+# ⚙️ حفظ وتحميل الإعدادات (تنجو من إعادة التشغيل)
+# ──────────────────────────────────────────────
+def save_settings():
+    global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
+    global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
+    global RSI_BUY_PREV, RSI_BUY_CURR
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "trade_amount"     : TRADE_AMOUNT,
+                "max_trades"       : MAX_TRADES,
+                "trail_pct"        : TRAIL_PCT,
+                "rsi_watch_low"    : RSI_WATCH_LOW,
+                "rsi_watch_high"   : RSI_WATCH_HIGH,
+                "interval_minutes" : INTERVAL_TO_MINUTES.get(current_interval, 30),
+                "ma20_enabled"     : ma20_enabled,
+                "current_strategy" : current_strategy,
+                "stop_loss_pct"    : STOP_LOSS_PCT,
+                "trail_activate_pct": TRAIL_ACTIVATE_PCT,
+                "rsi_buy_prev"     : RSI_BUY_PREV,
+                "rsi_buy_curr"     : RSI_BUY_CURR,
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"❌ خطأ حفظ الإعدادات: {e}")
+
+def load_settings():
+    global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
+    global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
+    global RSI_BUY_PREV, RSI_BUY_CURR
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        TRADE_AMOUNT       = s.get("trade_amount", TRADE_AMOUNT)
+        MAX_TRADES          = s.get("max_trades", MAX_TRADES)
+        TRAIL_PCT           = s.get("trail_pct", TRAIL_PCT)
+        RSI_WATCH_LOW       = s.get("rsi_watch_low", RSI_WATCH_LOW)
+        RSI_WATCH_HIGH      = s.get("rsi_watch_high", RSI_WATCH_HIGH)
+        minutes             = s.get("interval_minutes")
+        intervals_map = {
+            15 : Client.KLINE_INTERVAL_15MINUTE,
+            30 : Client.KLINE_INTERVAL_30MINUTE,
+            60 : Client.KLINE_INTERVAL_1HOUR,
+            240: Client.KLINE_INTERVAL_4HOUR,
+        }
+        if minutes in intervals_map:
+            current_interval = intervals_map[minutes]
+        ma20_enabled        = s.get("ma20_enabled", ma20_enabled)
+        current_strategy    = s.get("current_strategy", current_strategy)
+        STOP_LOSS_PCT       = s.get("stop_loss_pct", STOP_LOSS_PCT)
+        TRAIL_ACTIVATE_PCT  = s.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
+        RSI_BUY_PREV        = s.get("rsi_buy_prev", RSI_BUY_PREV)
+        RSI_BUY_CURR        = s.get("rsi_buy_curr", RSI_BUY_CURR)
+        log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
+    except Exception as e:
+        log.error(f"❌ خطأ تحميل الإعدادات: {e}")
+
+# ──────────────────────────────────────────────
 # ✅ إصلاح #3+#4: ملف تتبع الأرباح — شهري
 # ──────────────────────────────────────────────
 def get_profit_file(month=None):
@@ -259,9 +321,52 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason):
     save_profit_log(profit_log, month)
 
 # ──────────────────────────────────────────────
+# 📱 Push Notifications (Expo) — لازم تكون معرّفة قبل send_telegram
+# ──────────────────────────────────────────────
+def load_push_tokens():
+    if os.path.exists(PUSH_TOKENS_FILE):
+        try:
+            with open(PUSH_TOKENS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+
+def save_push_token(token):
+    tokens = load_push_tokens()
+    if token not in tokens:
+        tokens.append(token)
+        with open(PUSH_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(tokens, f, ensure_ascii=False, indent=2)
+
+
+def send_push_notification(title, body):
+    tokens = load_push_tokens()
+    if not tokens:
+        return
+    for token in tokens:
+        try:
+            requests.post(
+                "https://exp.host/--/api/v2/push/send",
+                json={"to": token, "title": title, "body": body, "sound": "default"},
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+        except Exception as e:
+            log.error(f"❌ خطأ إرسال إشعار: {e}")
+
+# ──────────────────────────────────────────────
 # 📨 تيليغرام
 # ──────────────────────────────────────────────
 def send_telegram(message):
+    # ✅ إصلاح: إرسال Push Notification تلقائياً مع كل رسالة تيليغرام
+    clean = message.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+    try:
+        send_push_notification("Crypto Bot", clean)
+    except Exception as e:
+        log.error(f"❌ خطأ push من send_telegram: {e}")
+
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -431,6 +536,7 @@ def telegram_command_listener(client):
                             else:
                                 with _lock:   # ✅ إصلاح: حماية race condition
                                     TRADE_AMOUNT = amount
+                                save_settings()
                                 send_admin(f"✅ حجم الصفقة الجديد: ${TRADE_AMOUNT}")
                         except:
                             send_admin("❌ مثال: /set_trade_amount 20")
@@ -444,6 +550,7 @@ def telegram_command_listener(client):
                             else:
                                 with _lock:   # ✅ إصلاح: حماية race condition
                                     MAX_TRADES = value
+                                save_settings()
                                 send_admin(f"✅ أقصى صفقات: {MAX_TRADES}")
                         except:
                             send_admin("❌ مثال: /set_max_trades 5")
@@ -457,6 +564,7 @@ def telegram_command_listener(client):
                             else:
                                 with _lock:   # ✅ إصلاح: حماية race condition
                                     TRAIL_PCT = value
+                                save_settings()
                                 send_admin(f"✅ Trailing Stop: {TRAIL_PCT*100}%")
                         except:
                             send_admin("❌ مثال: /set_trail 1.5")
@@ -470,6 +578,7 @@ def telegram_command_listener(client):
                             else:
                                 with _lock:
                                     STOP_LOSS_PCT = value
+                                save_settings()
                                 send_admin(f"✅ حد الخسارة الثابت (Stop Loss): {STOP_LOSS_PCT*100}%\nيعني لو السعر نزل {STOP_LOSS_PCT*100}% من سعر الدخول، البوت يبيع تلقائياً.")
                         except:
                             send_admin("❌ مثال: /set_stoploss 1.5")
@@ -483,6 +592,7 @@ def telegram_command_listener(client):
                             else:
                                 with _lock:
                                     TRAIL_ACTIVATE_PCT = value
+                                save_settings()
                                 send_admin(f"✅ نقطة تفعيل Trailing: {TRAIL_ACTIVATE_PCT*100}%\nيعني البوت ما يبدأ يتتبع السعر إلا لما يربح {TRAIL_ACTIVATE_PCT*100}% أول.")
                         except:
                             send_admin("❌ مثال: /set_activate 0.5")
@@ -499,6 +609,7 @@ def telegram_command_listener(client):
                                 with _lock:   # ✅ إصلاح: حماية race condition
                                     RSI_WATCH_LOW  = low
                                     RSI_WATCH_HIGH = high
+                                save_settings()
                                 send_admin(f"✅ منطقة RSI: {RSI_WATCH_LOW} - {RSI_WATCH_HIGH}")
                         except:
                             send_admin("❌ مثال: /set_rsi_range 20 38")
@@ -516,6 +627,7 @@ def telegram_command_listener(client):
                             if minutes in intervals:
                                 with _lock:   # ✅ إصلاح: حماية race condition
                                     current_interval = intervals[minutes]
+                                save_settings()
                                 send_admin(f"✅ تم تغيير الفريم إلى {minutes} دقيقة")
                                 log.info(f"📊 الفريم الجديد: {minutes} دقيقة")
                             else:
@@ -527,12 +639,14 @@ def telegram_command_listener(client):
                     elif text == "/enable_ma20":
                         with _lock:   # ✅ إصلاح #1
                             ma20_enabled = True
+                        save_settings()
                         send_admin("✅ تم تفعيل فيلتر MA20")
 
                     # ── /disable_ma20 ────────────────────────
                     elif text == "/disable_ma20":
                         with _lock:   # ✅ إصلاح #1
                             ma20_enabled = False
+                        save_settings()
                         send_admin("❌ تم تعطيل فيلتر MA20 — الشراء بناءً على RSI فقط")
 
                     # ── /profit ──────────────────────────────
@@ -625,6 +739,7 @@ def telegram_command_listener(client):
                                 with _lock:
                                     RSI_BUY_PREV = prev
                                     RSI_BUY_CURR = curr
+                                save_settings()
                                 send_admin(f"✅ شرط الشراء: RSI السابق أقل من {RSI_BUY_PREV} والحالي أكبر من {RSI_BUY_CURR}")
                         except:
                             send_admin("❌ مثال: /set_buy_rsi 25 30")
@@ -635,6 +750,7 @@ def telegram_command_listener(client):
                         if strategy in ("rsi", "stoch_rsi"):
                             with _lock:
                                 current_strategy = strategy
+                            save_settings()
                             labels = {"rsi": "RSI العادي (ارتداد فوق 30)", "stoch_rsi": "Stochastic RSI (تقاطع K فوق D واختراق 20)"}
                             send_admin(f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}")
                         else:
@@ -665,6 +781,14 @@ def telegram_command_listener(client):
                             f"🔍 مساحة Trailing Stop: {trail}%\n"
                             f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}"
                         )
+
+                    # ── /push_status ──────────────────────────
+                    elif text == "/push_status":
+                        tokens = load_push_tokens()
+                        if not tokens:
+                            send_admin("📵 لا يوجد أي جهاز مسجل لاستقبال Push Notifications بعد.\nلازم تفتح تطبيق الموبايل وتوافق على إذن الإشعارات.")
+                        else:
+                            send_admin(f"📱 عدد الأجهزة المسجلة لاستقبال Push: {len(tokens)}")
 
                     # ── /help ─────────────────────────────────
                     elif text == "/help":
@@ -697,6 +821,7 @@ def telegram_command_listener(client):
                             "/disable_ma20 — تعطيل فيلتر MA20\n\n"
                             "<b>التقارير:</b>\n"
                             "/config — عرض كل الإعدادات الحالية\n"
+                            "/push_status — عدد الأجهزة المسجلة لاستقبال Push Notifications\n"
                             "/profit today — أرباح اليوم\n"
                             "/profit — كل الأرباح من البداية\n"
                             "/summary — ملخص كامل للأداء\n"
@@ -1128,12 +1253,13 @@ def api_set_settings():
             if v <= 0: errors.append("trail_pct لازم أكبر من صفر")
             else: TRAIL_PCT = v
 
-        if "rsi_low" in data and "rsi_high" in data:
-            low, high = float(data["rsi_low"]), float(data["rsi_high"])
-            if low <= 0 or high <= 0 or low >= high:
-                errors.append("منطقة RSI غير صحيحة")
+        if "rsi_low" in data or "rsi_high" in data:
+            new_low  = float(data["rsi_low"]) if "rsi_low" in data else RSI_WATCH_LOW
+            new_high = float(data["rsi_high"]) if "rsi_high" in data else RSI_WATCH_HIGH
+            if new_low <= 0 or new_high <= 0 or new_low >= new_high:
+                errors.append("منطقة RSI غير صحيحة: RSI-Low لازم أصغر من RSI-High")
             else:
-                RSI_WATCH_LOW, RSI_WATCH_HIGH = low, high
+                RSI_WATCH_LOW, RSI_WATCH_HIGH = new_low, new_high
 
         if "interval_minutes" in data:
             minutes = int(data["interval_minutes"])
@@ -1155,15 +1281,18 @@ def api_set_settings():
         if "activate_trailing_pct" in data:
             v = float(data["activate_trailing_pct"]) / 100
             if v >= 0: TRAIL_ACTIVATE_PCT = v
-        if "rsi_buy_prev" in data and "rsi_buy_curr" in data:
-            prev = float(data["rsi_buy_prev"])
-            curr = float(data["rsi_buy_curr"])
-            if prev > 0 and curr > 0 and prev < curr:
-                RSI_BUY_PREV = prev
-                RSI_BUY_CURR = curr
+
+        if "rsi_buy_prev" in data or "rsi_buy_curr" in data:
+            new_prev = float(data["rsi_buy_prev"]) if "rsi_buy_prev" in data else RSI_BUY_PREV
+            new_curr = float(data["rsi_buy_curr"]) if "rsi_buy_curr" in data else RSI_BUY_CURR
+            if new_prev <= 0 or new_curr <= 0 or new_prev >= new_curr:
+                errors.append("شرط الشراء غير صحيح: القيمة السابقة لازم أصغر من الحالية")
+            else:
+                RSI_BUY_PREV, RSI_BUY_CURR = new_prev, new_curr
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
+    save_settings()
     return jsonify({"ok": True})
 
 
@@ -1242,43 +1371,6 @@ def api_close_trade():
     return jsonify({"ok": True, "sell_price": sell_price})
 
 
-PUSH_TOKENS_FILE = os.path.join(DATA_DIR, "push_tokens.json")
-
-
-def load_push_tokens():
-    if os.path.exists(PUSH_TOKENS_FILE):
-        try:
-            with open(PUSH_TOKENS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            pass
-    return []
-
-
-def save_push_token(token):
-    tokens = load_push_tokens()
-    if token not in tokens:
-        tokens.append(token)
-        with open(PUSH_TOKENS_FILE, "w", encoding="utf-8") as f:
-            json.dump(tokens, f, ensure_ascii=False, indent=2)
-
-
-def send_push_notification(title, body):
-    tokens = load_push_tokens()
-    if not tokens:
-        return
-    for token in tokens:
-        try:
-            requests.post(
-                "https://exp.host/--/api/v2/push/send",
-                json={"to": token, "title": title, "body": body, "sound": "default"},
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
-        except Exception as e:
-            log.error(f"❌ خطأ إرسال إشعار: {e}")
-
-
 @app.route("/api/register_push", methods=["POST"])
 @login_required
 def api_register_push():
@@ -1318,6 +1410,7 @@ def run_bot():
     load_symbols_from_txt()
     load_trades()
     load_circuit_state()   # 🛑 استرجاع حالة التوقف التلقائي لو موجودة
+    load_settings()        # ⚙️ استرجاع الإعدادات المحفوظة (حجم الصفقة، الاستراتيجية، ...) لو موجودة
 
     try:
         log.info("🔍 جاري مطابقة وتصفية القائمة مع أسواق الـ Spot الرسمية...")
