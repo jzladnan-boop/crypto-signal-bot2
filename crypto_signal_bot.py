@@ -344,17 +344,34 @@ def save_push_token(token):
 def send_push_notification(title, body):
     tokens = load_push_tokens()
     if not tokens:
-        return
+        return []
+
+    results = []
     for token in tokens:
         try:
-            requests.post(
+            r = requests.post(
                 "https://exp.host/--/api/v2/push/send",
                 json={"to": token, "title": title, "body": body, "sound": "default"},
                 headers={"Content-Type": "application/json"},
                 timeout=10,
             )
+            data = r.json()
+            # ✅ Expo يرجع status 200 حتى لو التوكن غلط أو منتهي — لازم نفحص محتوى الرد
+            ticket = data.get("data", {})
+            if isinstance(ticket, list):
+                ticket = ticket[0] if ticket else {}
+            status = ticket.get("status", "unknown")
+            if status != "ok":
+                err_msg = ticket.get("message", "بدون تفاصيل")
+                err_type = ticket.get("details", {}).get("error", "")
+                log.error(f"❌ Expo رفض التوكن {token[:20]}...: {err_type} | {err_msg}")
+                results.append({"token": token, "ok": False, "error": f"{err_type}: {err_msg}"})
+            else:
+                results.append({"token": token, "ok": True})
         except Exception as e:
             log.error(f"❌ خطأ إرسال إشعار: {e}")
+            results.append({"token": token, "ok": False, "error": str(e)})
+    return results
 
 # ──────────────────────────────────────────────
 # 📨 تيليغرام
@@ -790,6 +807,20 @@ def telegram_command_listener(client):
                         else:
                             send_admin(f"📱 عدد الأجهزة المسجلة لاستقبال Push: {len(tokens)}")
 
+                    # ── /test_push ─────────────────────────────
+                    elif text == "/test_push":
+                        results = send_push_notification("🧪 اختبار", "هذا إشعار تجريبي من البوت")
+                        if not results:
+                            send_admin("📵 لا يوجد أي جهاز مسجل — التوكن الأول لسا ما انسجل.")
+                        else:
+                            lines = [f"🧪 نتيجة اختبار Push لـ {len(results)} جهاز:\n"]
+                            for i, r in enumerate(results, 1):
+                                if r["ok"]:
+                                    lines.append(f"{i}. ✅ نجح")
+                                else:
+                                    lines.append(f"{i}. ❌ فشل — {r['error']}")
+                            send_admin("\n".join(lines))
+
                     # ── /help ─────────────────────────────────
                     elif text == "/help":
                         send_admin(
@@ -822,6 +853,7 @@ def telegram_command_listener(client):
                             "<b>التقارير:</b>\n"
                             "/config — عرض كل الإعدادات الحالية\n"
                             "/push_status — عدد الأجهزة المسجلة لاستقبال Push Notifications\n"
+                            "/test_push — إرسال إشعار تجريبي وعرض نتيجة النجاح/الفشل\n"
                             "/profit today — أرباح اليوم\n"
                             "/profit — كل الأرباح من البداية\n"
                             "/summary — ملخص كامل للأداء\n"
