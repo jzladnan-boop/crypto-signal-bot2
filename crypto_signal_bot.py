@@ -29,6 +29,8 @@ PROFIT_FILE    = os.path.join(DATA_DIR, f"profit_{time.strftime('%Y_%m')}.json")
 CIRCUIT_FILE   = os.path.join(DATA_DIR, "circuit_breaker.json")   # 🛑 ملف لحفظ حالة التوقف التلقائي
 SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")   # ⚙️ ملف حفظ الإعدادات (تنجو من إعادة التشغيل)
 PUSH_TOKENS_FILE = os.path.join(DATA_DIR, "push_tokens.json")   # 📱 ملف حفظ Push Tokens
+NOTIFICATIONS_FILE = os.path.join(DATA_DIR, "notifications.json")   # 🔔 سجل الإشعارات لعرضه بالتطبيق
+MAX_NOTIFICATIONS = 50
 
 DEFAULT_BASE_SYMBOLS = [
     "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL",
@@ -341,6 +343,44 @@ def save_push_token(token):
             json.dump(tokens, f, ensure_ascii=False, indent=2)
 
 
+# ──────────────────────────────────────────────
+# 🔔 سجل الإشعارات (يخزن بالسيرفر عشان التطبيق يجيبه حتى لو كان مسكّر وقت الإرسال)
+# ──────────────────────────────────────────────
+def load_notification_log():
+    if os.path.exists(NOTIFICATIONS_FILE):
+        try:
+            with open(NOTIFICATIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+
+def save_notification_log(title, body):
+    try:
+        notifications = load_notification_log()
+        new_item = {
+            "id"  : str(int(time.time() * 1000)),
+            "title": title,
+            "body" : body,
+            "time" : time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        notifications = [new_item] + notifications
+        notifications = notifications[:MAX_NOTIFICATIONS]
+        with open(NOTIFICATIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(notifications, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"❌ خطأ حفظ سجل الإشعارات: {e}")
+
+
+def clear_notification_log():
+    try:
+        with open(NOTIFICATIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"❌ خطأ مسح سجل الإشعارات: {e}")
+
+
 def send_push_notification(title, body):
     tokens = load_push_tokens()
     if not tokens:
@@ -379,6 +419,13 @@ def send_push_notification(title, body):
 def send_telegram(message):
     # ✅ إصلاح: إرسال Push Notification تلقائياً مع كل رسالة تيليغرام
     clean = message.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+
+    # 🔔 تسجيل الإشعار بسجل السيرفر عشان التطبيق يقدر يجيبه حتى لو كان مسكّر وقت الإرسال
+    try:
+        save_notification_log("Crypto Bot", clean)
+    except Exception as e:
+        log.error(f"❌ خطأ حفظ سجل الإشعار من send_telegram: {e}")
+
     try:
         send_push_notification("Crypto Bot", clean)
     except Exception as e:
@@ -1411,6 +1458,19 @@ def api_register_push():
     if not token:
         return jsonify({"error": "token مفقود"}), 400
     save_push_token(token)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/notifications", methods=["GET"])
+@login_required
+def api_get_notifications():
+    return jsonify(load_notification_log())
+
+
+@app.route("/api/notifications", methods=["DELETE"])
+@login_required
+def api_clear_notifications():
+    clear_notification_log()
     return jsonify({"ok": True})
 
 
