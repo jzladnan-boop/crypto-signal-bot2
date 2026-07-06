@@ -93,6 +93,13 @@ MAX_CONSECUTIVE_LOSSES = 3            # عدد الستوب لوز المتتا�
 PAUSE_DURATION_SECONDS = 2 * 60 * 60  # مدة التوقف (ساعتين)
 
 # ──────────────────────────────────────────────
+# 📐 ATR: ستوب لوس متحرك حسب تقلب كل عملة
+# ──────────────────────────────────────────────
+ATR_PERIOD     = 14    # عدد الشموع لحساب ATR
+ATR_MULTIPLIER = 2.0   # مضاعف ATR لتحديد مسافة الستوب الأولي (كلما زاد، اتسعت مساحة التنفس)
+TRAIL_ATR_MULTIPLIER = 1.5   # مضاعف ATR لمسافة الـ Trailing بعد التفعيل (عادة أضيق من الستوب الأولي)
+
+# ──────────────────────────────────────────────
 # ✅ إصلاح #1: threading.Lock بدل Global مباشر
 # ──────────────────────────────────────────────
 _lock           = threading.Lock()
@@ -212,6 +219,7 @@ def save_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -227,6 +235,9 @@ def save_settings():
                 "trail_activate_pct": TRAIL_ACTIVATE_PCT,
                 "rsi_buy_prev"     : RSI_BUY_PREV,
                 "rsi_buy_curr"     : RSI_BUY_CURR,
+                "atr_period"       : ATR_PERIOD,
+                "atr_multiplier"   : ATR_MULTIPLIER,
+                "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -235,6 +246,7 @@ def load_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -260,6 +272,9 @@ def load_settings():
         TRAIL_ACTIVATE_PCT  = s.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
         RSI_BUY_PREV        = s.get("rsi_buy_prev", RSI_BUY_PREV)
         RSI_BUY_CURR        = s.get("rsi_buy_curr", RSI_BUY_CURR)
+        ATR_PERIOD          = s.get("atr_period", ATR_PERIOD)
+        ATR_MULTIPLIER      = s.get("atr_multiplier", ATR_MULTIPLIER)
+        TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -462,6 +477,7 @@ def telegram_command_listener(client):
     global SYMBOLS, trading_enabled, ma20_enabled, current_interval, current_strategy
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -678,6 +694,66 @@ def telegram_command_listener(client):
                         except:
                             send_admin("❌ مثال: /set_rsi_range 20 38")
 
+                    # ── /set_atr_period ────────────────────────
+                    elif text.startswith("/set_atr_period "):
+                        try:
+                            value = int(text.replace("/set_atr_period ", ""))
+                            if value <= 1:
+                                send_admin("❌ القيمة لازم تكون أكبر من 1.")
+                            else:
+                                with _lock:
+                                    ATR_PERIOD = value
+                                save_settings()
+                                send_admin(f"✅ فترة حساب ATR: {ATR_PERIOD} شمعة")
+                        except:
+                            send_admin("❌ مثال: /set_atr_period 14")
+
+                    # ── /set_atr_multiplier ────────────────────
+                    elif text.startswith("/set_atr_multiplier "):
+                        try:
+                            value = float(text.replace("/set_atr_multiplier ", ""))
+                            if value <= 0:
+                                send_admin("❌ القيمة لازم تكون أكبر من صفر.")
+                            else:
+                                with _lock:
+                                    ATR_MULTIPLIER = value
+                                save_settings()
+                                send_admin(f"✅ مضاعف ATR لمسافة الستوب الأولي: {ATR_MULTIPLIER}x")
+                        except:
+                            send_admin("❌ مثال: /set_atr_multiplier 2")
+
+                    # ── /set_trail_atr_multiplier ──────────────
+                    elif text.startswith("/set_trail_atr_multiplier "):
+                        try:
+                            value = float(text.replace("/set_trail_atr_multiplier ", ""))
+                            if value <= 0:
+                                send_admin("❌ القيمة لازم تكون أكبر من صفر.")
+                            else:
+                                with _lock:
+                                    TRAIL_ATR_MULTIPLIER = value
+                                save_settings()
+                                send_admin(f"✅ مضاعف ATR لمسافة الـ Trailing: {TRAIL_ATR_MULTIPLIER}x")
+                        except:
+                            send_admin("❌ مثال: /set_trail_atr_multiplier 1.5")
+
+                    # ── /atr_status ─────────────────────────────
+                    elif text == "/atr_status":
+                        with _lock:
+                            period          = ATR_PERIOD
+                            multiplier      = ATR_MULTIPLIER
+                            trail_multiplier = TRAIL_ATR_MULTIPLIER
+                        send_admin(
+                            f"📐 <b>الستوب لوس المتحرك حسب ATR</b>\n\n"
+                            f"⏱️ فترة الحساب: {period} شمعة\n"
+                            f"✖️ مضاعف الستوب الأولي: {multiplier}x\n"
+                            f"✖️ مضاعف Trailing بعد التفعيل: {trail_multiplier}x\n\n"
+                            f"عند الشراء: Stop Loss = سعر الدخول - ({multiplier} × ATR)\n"
+                            f"بعد تفعيل Trailing: Stop Loss = أعلى سعر - ({trail_multiplier} × ATR)\n"
+                            f"الستوب يتحرك لأعلى بس (يحمي الأرباح)، وما ينزل أبداً مع نزول السعر.\n"
+                            f"كل عملة تاخذ مساحة تنفس تناسب تقلبها الخاص بدل نسبة ثابتة للكل.\n"
+                            f"لو تعذّر حساب ATR لأي سبب، يرجع البوت للنسب الثابتة (Stop Loss % / Trailing %) كاحتياطي."
+                        )
+
                     # ── /set_interval ────────────────────────
                     elif text.startswith("/set_interval "):
                         try:
@@ -833,6 +909,9 @@ def telegram_command_listener(client):
                             activate         = TRAIL_ACTIVATE_PCT * 100
                             rsi_prev         = RSI_BUY_PREV
                             rsi_curr         = RSI_BUY_CURR
+                            atr_period_val   = ATR_PERIOD
+                            atr_mult_val     = ATR_MULTIPLIER
+                            trail_atr_val    = TRAIL_ATR_MULTIPLIER
                         send_admin(
                             f"⚙️ <b>الإعدادات الحالية</b>\n\n"
                             f"📊 الاستراتيجية: {strategy_label}\n"
@@ -840,10 +919,11 @@ def telegram_command_listener(client):
                             f"📈 MA20: {ma20_status}\n"
                             f"💰 حجم الصفقة: ${trade_amt}\n"
                             f"💼 أقصى صفقات: {max_tr}\n"
-                            f"🛑 حد الخسارة (Stop Loss): {stoploss}%\n"
+                            f"🛑 حد الخسارة الاحتياطي (Stop Loss %): {stoploss}%\n"
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
-                            f"🔍 مساحة Trailing Stop: {trail}%\n"
-                            f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}"
+                            f"🔍 مساحة Trailing الاحتياطية: {trail}%\n"
+                            f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}\n"
+                            f"📐 ATR: فترة {atr_period_val} شمعة | مضاعف الستوب {atr_mult_val}x | مضاعف Trailing {trail_atr_val}x"
                         )
 
                     # ── /push_status ──────────────────────────
@@ -891,6 +971,11 @@ def telegram_command_listener(client):
                             "/set_rsi_range 20 38 — نطاق RSI للمراقبة المكثفة\n"
                             "/set_interval 30 — الفريم الزمني للشموع (15/30/60/240 دقيقة)\n"
                             "/set_buy_rsi 25 30 — شرط الشراء: RSI السابق أصغر من 25 والحالي أكبر من 30\n\n"
+                            "<b>📐 الستوب لوس المتحرك (ATR):</b>\n"
+                            "/set_atr_period 14 — عدد الشموع لحساب تقلب العملة\n"
+                            "/set_atr_multiplier 2 — مضاعف مسافة الستوب الأولي\n"
+                            "/set_trail_atr_multiplier 1.5 — مضاعف مسافة الـ Trailing بعد التفعيل\n"
+                            "/atr_status — شرح وعرض إعدادات ATR الحالية\n\n"
                             "<b>الاستراتيجية:</b>\n"
                             "/set_strategy rsi — شراء عند ارتداد RSI فوق 30\n"
                             "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n\n"
@@ -954,10 +1039,28 @@ def get_current_price(client, symbol):
         log.error(f"❌ سعر {symbol}: {e}")
         return None
 
+# ──────────────────────────────────────────────
+# 📐 ATR: يقيس التقلب الطبيعي لكل عملة، يُستخدم لبناء ستوب لوس متحرك بدل نسبة ثابتة
+# ──────────────────────────────────────────────
+def calculate_atr(highs, lows, closes):
+    """يحسب قيمة ATR الحالية (آخر شمعة) لسلسلة high/low/close معطاة"""
+    try:
+        atr_series = ta.volatility.AverageTrueRange(
+            high=highs, low=lows, close=closes, window=ATR_PERIOD
+        ).average_true_range()
+        value = atr_series.iloc[-1]
+        if pd.isna(value) or value <= 0:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
 def get_indicators(client, symbol):
     try:
         klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
         closes = pd.Series([float(k[4]) for k in klines])
+        highs  = pd.Series([float(k[2]) for k in klines])
+        lows   = pd.Series([float(k[3]) for k in klines])
         rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
         ma20   = closes.rolling(window=MA_PERIOD).mean().iloc[-1]
         price  = float(closes.iloc[-1])   # من الـ klines مباشرة، بدون طلب API ثاني
@@ -966,6 +1069,7 @@ def get_indicators(client, symbol):
             "rsi_prev": round(rsi.iloc[-2], 2),
             "price"   : price,
             "ma20"    : round(ma20, 8),
+            "atr"     : calculate_atr(highs, lows, closes),
         }
     except Exception as e:
         log.error(f"❌ مؤشرات {symbol}: {e}")
@@ -985,6 +1089,8 @@ def check_stoch_rsi(client, symbol):
     try:
         klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
         closes = pd.Series([float(k[4]) for k in klines])
+        highs  = pd.Series([float(k[2]) for k in klines])
+        lows   = pd.Series([float(k[3]) for k in klines])
 
         # حساب Stochastic RSI بالإعدادات الافتراضية: period=14, K=3, D=3
         stoch  = ta.momentum.StochRSIIndicator(close=closes, window=14, smooth1=3, smooth2=3)
@@ -1014,11 +1120,32 @@ def check_stoch_rsi(client, symbol):
                 "d_prev": d_prev,
                 "price" : price,
                 "ma20"  : ma20,
+                "atr"   : calculate_atr(highs, lows, closes),
             }
         return None
     except Exception as e:
         log.error(f"❌ Stoch RSI {symbol}: {e}")
         return None
+
+# ──────────────────────────────────────────────
+# 📐 حساب ستوب الـ Trailing (بناءً على ATR المخزن بالصفقة، أو النسبة الثابتة كاحتياطي)
+# ──────────────────────────────────────────────
+def compute_trail_stop(price, trade):
+    """
+    يحسب سعر ستوب جديد بناءً على أعلى سعر وصلته الصفقة (price).
+    - لو الصفقة عندها ATR محفوظ من وقت الشراء: نستخدمه (تقلب العملة الحقيقي).
+    - غير هيك: نرجع للنسبة الثابتة TRAIL_PCT كاحتياطي.
+    ملاحظة: هذا السعر يُستخدم فقط لما يصير سعر قمة جديدة (price > highest_price)،
+    فالستوب يتحرك لأعلى بس ولا ينزل أبداً مع نزول السعر.
+    """
+    atr_val = trade.get("atr")
+    if atr_val:
+        with _lock:
+            multiplier = TRAIL_ATR_MULTIPLIER
+        candidate = price - (multiplier * atr_val)
+        if 0 < candidate < price:
+            return round(candidate, 8)
+    return round(price * (1 - TRAIL_PCT), 8)
 
 # ──────────────────────────────────────────────
 # تنفيذ الصفقات
@@ -1579,14 +1706,14 @@ def run_bot():
                         if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
                             trade["trailing_active"] = True
                             trade["highest_price"]   = price
-                            trade["stop_loss"]       = round(price * (1 - TRAIL_PCT), 8)
+                            trade["stop_loss"]       = compute_trail_stop(price, trade)
                             log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']}")
                             save_trades()
 
                     if trade["trailing_active"]:
                         if price > trade["highest_price"]:
                             trade["highest_price"] = price
-                            trade["stop_loss"]     = round(price * (1 - TRAIL_PCT), 8)
+                            trade["stop_loss"]     = compute_trail_stop(price, trade)
                             save_trades()
                         elif price <= trade["stop_loss"]:
                             sell_price = sell_market(client, symbol, trade["qty"])
@@ -1604,8 +1731,10 @@ def run_bot():
                                 save_trades()
                                 continue
                     else:
-                        entry_sl = round(trade["entry_price"] * (1 - STOP_LOSS_PCT), 8)
-                        if price <= entry_sl:
+                        # ✅ إصلاح خلل: نستخدم trade["stop_loss"] المحفوظ فعلياً وقت الشراء
+                        # (المبني على ATR أو الاحتياطي الثابت)، بدل إعادة حسابه من الصفر بالنسبة الثابتة
+                        # في كل دورة — كان هذا يلغي فائدة ATR قبل تفعيل Trailing.
+                        if price <= trade["stop_loss"]:
                             sell_price = sell_market(client, symbol, trade["qty"])
                             if sell_price:
                                 loss = round((sell_price - trade["entry_price"]) * trade["qty"], 4)
@@ -1670,6 +1799,7 @@ def run_bot():
                         buy_signal     = ind["rsi_prev"] < RSI_BUY_PREV and ind["rsi"] >= RSI_BUY_CURR and ma20_condition
                         signal_info    = f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}" if buy_signal else None
                         price          = ind["price"] if buy_signal else None
+                        atr_value      = ind.get("atr") if buy_signal else None
 
                     # ── استراتيجية Stochastic RSI ──────────────
                     elif strategy == "stoch_rsi":
@@ -1682,7 +1812,8 @@ def run_bot():
                         signal_info    = (
                             f"📊 Stoch K: {stoch['k_prev']} → {stoch['k_curr']} | D: {stoch['d_prev']} → {stoch['d_curr']}"
                         ) if buy_signal else None
-                        price = stoch["price"] if buy_signal else None
+                        price     = stoch["price"] if buy_signal else None
+                        atr_value = stoch.get("atr") if buy_signal else None
 
                     else:
                         time.sleep(0.2)
@@ -1700,18 +1831,37 @@ def run_bot():
                             if res:
                                 res["trailing_active"] = False
                                 res["highest_price"]   = res["entry_price"]
-                                res["stop_loss"]       = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 8)
+
+                                # 📐 ستوب لوس متحرك حسب ATR (تقلب العملة الطبيعي)، مع احتياطي بنسبة ثابتة
+                                stop_price   = None
+                                used_atr     = None
+                                if atr_value:
+                                    with _lock:
+                                        multiplier = ATR_MULTIPLIER
+                                    candidate = res["entry_price"] - (multiplier * atr_value)
+                                    # حماية: ما نسمح بستوب أوسع من 15% ولا أضيق من 0.3% من سعر الدخول
+                                    min_price = res["entry_price"] * 0.997
+                                    max_price = res["entry_price"] * 0.85
+                                    if max_price < candidate < min_price:
+                                        stop_price = candidate
+                                        used_atr   = atr_value   # نخزنه بالصفقة عشان نعيد استخدامه بالـ Trailing لاحقاً
+                                if stop_price is None:
+                                    stop_price = res["entry_price"] * (1 - STOP_LOSS_PCT)   # احتياطي
+
+                                res["stop_loss"] = round(stop_price, 8)
+                                res["atr"]       = used_atr   # None لو استخدمنا الاحتياطي الثابت
                                 open_trades[symbol]    = res
                                 save_trades()
                                 watch_list.discard(symbol)
 
-                                coin_name = symbol.replace("USDT", "")
-                                sl_value  = round(res["entry_price"] * (1 - STOP_LOSS_PCT), 4)
+                                coin_name   = symbol.replace("USDT", "")
+                                sl_value    = res["stop_loss"]
+                                stop_method = "ATR" if used_atr else "ثابت"
                                 send_telegram(
                                     f"🟢 <b>شراء {coin_name}</b>\n"
                                     f"{signal_info}\n"
                                     f"💵 السعر: {res['entry_price']}\n"
-                                    f"🛡️ Stop Loss: {sl_value}\n"
+                                    f"🛡️ Stop Loss ({stop_method}): {sl_value}\n"
                                     f"💼 صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES}"
                                 )
                         else:
