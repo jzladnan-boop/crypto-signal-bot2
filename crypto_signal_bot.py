@@ -1,3 +1,5 @@
+المحتوى من إنشاء المستخدمين وغير موثق.
+1
 """
 Crypto Trading Bot - RSI Auto Trader
 نفس الكود الأصلي + إصلاح 5 أخطاء فقط بدون تغيير المنطق
@@ -1432,6 +1434,9 @@ def api_get_settings():
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
             "rsi_buy_curr": RSI_BUY_CURR,
+            "atr_period": ATR_PERIOD,
+            "atr_multiplier": ATR_MULTIPLIER,
+            "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
         })
 
 
@@ -1440,6 +1445,7 @@ def api_get_settings():
 def api_set_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -1495,6 +1501,21 @@ def api_set_settings():
                 errors.append("شرط الشراء غير صحيح: القيمة السابقة لازم أصغر من الحالية")
             else:
                 RSI_BUY_PREV, RSI_BUY_CURR = new_prev, new_curr
+
+        if "atr_period" in data:
+            v = int(data["atr_period"])
+            if v <= 1: errors.append("atr_period لازم أكبر من 1")
+            else: ATR_PERIOD = v
+
+        if "atr_multiplier" in data:
+            v = float(data["atr_multiplier"])
+            if v <= 0: errors.append("atr_multiplier لازم أكبر من صفر")
+            else: ATR_MULTIPLIER = v
+
+        if "trail_atr_multiplier" in data:
+            v = float(data["trail_atr_multiplier"])
+            if v <= 0: errors.append("trail_atr_multiplier لازم أكبر من صفر")
+            else: TRAIL_ATR_MULTIPLIER = v
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
