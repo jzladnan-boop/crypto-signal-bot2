@@ -3,6 +3,8 @@ Crypto Trading Bot - RSI Auto Trader
 نفس الكود الأصلي + إصلاح 5 أخطاء فقط بدون تغيير المنطق
 + إصلاح إضافي: التحقق من الرصيد الفعلي قبل البيع لتجنب خطأ "insufficient balance"
 + إصلاح إضافي: تفعيل إرسال Push Notification تلقائياً مع كل رسالة تيليغرام
++ إصلاح إضافي: إضافة إعدادات ATR (atr_period, atr_multiplier, trail_atr_multiplier) لواجهة API
+  الخاصة بالتطبيق/لوحة التحكم (GET و POST /api/settings) — كانت موجودة فقط بأوامر تيليغرام
 """
 
 import os
@@ -64,7 +66,7 @@ STOP_LOSS_PCT      = 0.02
 TRAIL_PCT          = 0.01
 TRAIL_ACTIVATE_PCT = 0.01
 TRADE_AMOUNT       = 15.0
-RESERVE_USDT       = 2.0
+RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي بناءً على طلب المستخدم (كان 2.0)
 MAX_TRADES         = 4
 HEARTBEAT_INTERVAL = 3600
 MA_PERIOD          = 20
@@ -1432,6 +1434,11 @@ def api_get_settings():
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
             "rsi_buy_curr": RSI_BUY_CURR,
+            # ✅ إصلاح: إعدادات ATR كانت غايبة هون، لهيك كانت الحقول
+            # طالعة فاضية بالتطبيق حتى لو أوامر تيليغرام شغالة تمام
+            "atr_period": ATR_PERIOD,
+            "atr_multiplier": ATR_MULTIPLIER,
+            "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
         })
 
 
@@ -1440,6 +1447,7 @@ def api_get_settings():
 def api_set_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -1495,6 +1503,22 @@ def api_set_settings():
                 errors.append("شرط الشراء غير صحيح: القيمة السابقة لازم أصغر من الحالية")
             else:
                 RSI_BUY_PREV, RSI_BUY_CURR = new_prev, new_curr
+
+        # ✅ إصلاح: قبول إعدادات ATR من التطبيق (كانت مفقودة كلياً)
+        if "atr_period" in data:
+            v = int(data["atr_period"])
+            if v <= 1: errors.append("atr_period لازم أكبر من 1")
+            else: ATR_PERIOD = v
+
+        if "atr_multiplier" in data:
+            v = float(data["atr_multiplier"])
+            if v <= 0: errors.append("atr_multiplier لازم أكبر من صفر")
+            else: ATR_MULTIPLIER = v
+
+        if "trail_atr_multiplier" in data:
+            v = float(data["trail_atr_multiplier"])
+            if v <= 0: errors.append("trail_atr_multiplier لازم أكبر من صفر")
+            else: TRAIL_ATR_MULTIPLIER = v
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
@@ -1706,14 +1730,18 @@ def run_bot():
                         if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
                             trade["trailing_active"] = True
                             trade["highest_price"]   = price
-                            trade["stop_loss"]       = compute_trail_stop(price, trade)
-                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']}")
+                            # ✅ إصلاح: حماية Breakeven — أول ما الصفقة تدخل بربح، الستوب
+                            # لا يمكن أبداً أن ينزل تحت سعر الدخول، حتى لو مسافة الـ Trailing
+                            # (ATR أو النسبة الثابتة) كانت أوسع من نقطة التفعيل نفسها.
+                            trade["stop_loss"]       = max(compute_trail_stop(price, trade), trade["entry_price"])
+                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']} (محمي عند الدخول كحد أدنى)")
                             save_trades()
 
                     if trade["trailing_active"]:
                         if price > trade["highest_price"]:
                             trade["highest_price"] = price
-                            trade["stop_loss"]     = compute_trail_stop(price, trade)
+                            # ✅ نفس الحماية: الستوب بعد التفعيل ما ينزل تحت سعر الدخول أبداً
+                            trade["stop_loss"]     = max(compute_trail_stop(price, trade), trade["entry_price"])
                             save_trades()
                         elif price <= trade["stop_loss"]:
                             sell_price = sell_market(client, symbol, trade["qty"])
@@ -1826,7 +1854,7 @@ def run_bot():
                             log.error(f"❌ رصيد USDT: {e}")
                             continue
 
-                        if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):
+                        if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):   # ✅ RESERVE_USDT = 0.0 الآن، أي بدون احتياطي جانبي
                             res = buy_market(client, symbol, TRADE_AMOUNT)
                             if res:
                                 res["trailing_active"] = False
