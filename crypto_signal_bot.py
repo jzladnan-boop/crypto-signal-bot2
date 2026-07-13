@@ -5,6 +5,13 @@ Crypto Trading Bot - RSI Auto Trader
 + إصلاح إضافي: تفعيل إرسال Push Notification تلقائياً مع كل رسالة تيليغرام
 + إصلاح إضافي: إضافة إعدادات ATR (atr_period, atr_multiplier, trail_atr_multiplier) لواجهة API
   الخاصة بالتطبيق/لوحة التحكم (GET و POST /api/settings) — كانت موجودة فقط بأوامر تيليغرام
++ إصلاح إضافي: سعر الدخول الفعلي (Executed Price) من رد بينانس مباشرة عند الشراء
+  (actual_entry_price = total_spent / total_quantity) بدل سعر الشمعة التقريبي
++ إصلاح إضافي: حماية من حظر بينانس بسبب كثرة الطلبات (Error -1003)
+  - استخدام get_all_tickers() لجلب كل الأسعار بطلب واحد بدل حلقة لكل عملة
+  - تخزين مؤقت (cache) لمعلومات الرموز (step size) بدل طلبها بكل عملية شراء/بيع
+  - معالج خاص لخطأ -1003: إيقاف مؤقت للطلبات بدل إعادة المحاولة فوراً
+  - تكبير التأخير بين طلبات الفحص الخفيف لتقليل الوزن المستهلك بالدقيقة
 """
 
 import os
@@ -72,7 +79,7 @@ HEARTBEAT_INTERVAL = 3600
 MA_PERIOD          = 20
 
 SCAN_INTERVAL      = 120
-WATCH_INTERVAL     = 10
+WATCH_INTERVAL      = 10
 RSI_WATCH_LOW      = 20
 RSI_WATCH_HIGH     = 38
 
@@ -100,6 +107,48 @@ PAUSE_DURATION_SECONDS = 2 * 60 * 60  # مدة التوقف (ساعتين)
 ATR_PERIOD     = 14    # عدد الشموع لحساب ATR
 ATR_MULTIPLIER = 2.0   # مضاعف ATR لتحديد مسافة الستوب الأولي (كلما زاد، اتسعت مساحة التنفس)
 TRAIL_ATR_MULTIPLIER = 1.5   # مضاعف ATR لمسافة الـ Trailing بعد التفعيل (عادة أضيق من الستوب الأولي)
+
+# ──────────────────────────────────────────────
+# 🚦 حماية من حظر بينانس بسبب كثرة الطلبات (Error -1003)
+# ──────────────────────────────────────────────
+API_BLOCK_PAUSE_SECONDS = 90   # مدة الإيقاف المؤقت لكل الطلبات لما نصطدم بخطأ -1003
+_api_blocked_until       = 0   # timestamp لنهاية فترة الإيقاف المؤقت (0 = مافي حظر حالياً)
+SYMBOL_INFO_CACHE        = {}  # 🗄️ تخزين مؤقت لمعلومات الرموز (step size...) بدل طلبها كل مرة
+
+def is_api_blocked():
+    """يتحقق إذا كنا بفترة إيقاف مؤقت بسبب حظر سابق، وينتظر لو لسا الوقت ما خلص"""
+    global _api_blocked_until
+    if _api_blocked_until and time.time() < _api_blocked_until:
+        return True
+    return False
+
+def register_api_block(source=""):
+    """يسجل حظر جديد من بينانس (-1003) ويوقف الطلبات مؤقتاً لتفادي تشديد الحظر"""
+    global _api_blocked_until
+    _api_blocked_until = time.time() + API_BLOCK_PAUSE_SECONDS
+    log.warning(f"🚦 تم اكتشاف حظر مؤقت من بينانس (-1003) عند {source} — إيقاف كل الطلبات لمدة {API_BLOCK_PAUSE_SECONDS} ثانية")
+
+def is_rate_limit_error(e):
+    """يتحقق إذا كان الخطأ من نوع -1003 (Too much request weight)"""
+    return isinstance(e, BinanceAPIException) and getattr(e, "code", None) == -1003
+
+def get_symbol_info_cached(client, symbol):
+    """يرجع معلومات الرمز من الكاش لو موجودة، وإلا يطلبها مرة وحدة ويخزنها"""
+    if symbol in SYMBOL_INFO_CACHE:
+        return SYMBOL_INFO_CACHE[symbol]
+    info = client.get_symbol_info(symbol)
+    if info:
+        SYMBOL_INFO_CACHE[symbol] = info
+    return info
+
+def get_step_size(client, symbol):
+    info = get_symbol_info_cached(client, symbol)
+    if not info:
+        return None
+    for f in info["filters"]:
+        if f["filterType"] == "LOT_SIZE":
+            return float(f["stepSize"])
+    return None
 
 # ──────────────────────────────────────────────
 # ✅ إصلاح #1: threading.Lock بدل Global مباشر
@@ -1008,6 +1057,12 @@ def get_rsi_quick(client, symbol):
         closes = pd.Series([float(k[4]) for k in klines])
         rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
         return round(rsi.iloc[-1], 2)
+    except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"get_rsi_quick({symbol})")
+        else:
+            log.error(f"❌ RSI سريع {symbol}: {e}")
+        return None
     except Exception as e:
         log.error(f"❌ RSI سريع {symbol}: {e}")
         return None
@@ -1015,15 +1070,21 @@ def get_rsi_quick(client, symbol):
 def scan_all_symbols(client):
     """المرحلة 1: فحص خفيف لكل العملات"""
     global watch_list
+    if is_api_blocked():
+        log.warning("🚦 تخطي دورة الفحص الخفيف — البوت بفترة إيقاف مؤقت بسبب حظر -1003")
+        return
     new_watch = set()
     log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
     for symbol in list(SYMBOLS):
+        if is_api_blocked():
+            log.warning("🚦 تم اكتشاف حظر أثناء الفحص — إيقاف باقي الدورة الحالية")
+            break
         if symbol in open_trades:
             continue
         rsi = get_rsi_quick(client, symbol)
         if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
             new_watch.add(symbol)
-        time.sleep(0.15)  # ✅ إصلاح #5: تأخير أكبر لتجنب Rate Limit
+        time.sleep(0.35)  # ✅ إصلاح: تأخير أكبر بين كل طلب لتقليل الوزن المستهلك بالدقيقة وتفادي -1003
     added = new_watch - watch_list
     if added:
         log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
@@ -1037,9 +1098,38 @@ def get_current_price(client, symbol):
     """سعر لحظي فقط — طلب واحد خفيف لتتبع الصفقات المفتوحة (بدون RSI/MA20)"""
     try:
         return float(client.get_symbol_ticker(symbol=symbol)["price"])
+    except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"get_current_price({symbol})")
+        else:
+            log.error(f"❌ سعر {symbol}: {e}")
+        return None
     except Exception as e:
         log.error(f"❌ سعر {symbol}: {e}")
         return None
+
+def get_all_prices(client, symbols=None):
+    """
+    ✅ إصلاح إضافي: يجلب أسعار كل العملات بطلب واحد فقط (get_all_tickers)
+    بدل ما يطلب سعر كل عملة لحالها بحلقة — هذا يحمي البوت من حظر -1003
+    لأن وزن هذا الطلب ثابت وقليل بغض النظر عن عدد العملات.
+    يرجع dict: {symbol: price}. لو فشل الطلب، يرجع dict فاضي.
+    """
+    try:
+        tickers = client.get_all_tickers()
+        prices  = {t["symbol"]: float(t["price"]) for t in tickers}
+        if symbols is not None:
+            return {s: prices[s] for s in symbols if s in prices}
+        return prices
+    except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block("get_all_prices")
+        else:
+            log.error(f"❌ جلب كل الأسعار: {e}")
+        return {}
+    except Exception as e:
+        log.error(f"❌ جلب كل الأسعار: {e}")
+        return {}
 
 # ──────────────────────────────────────────────
 # 📐 ATR: يقيس التقلب الطبيعي لكل عملة، يُستخدم لبناء ستوب لوس متحرك بدل نسبة ثابتة
@@ -1073,6 +1163,12 @@ def get_indicators(client, symbol):
             "ma20"    : round(ma20, 8),
             "atr"     : calculate_atr(highs, lows, closes),
         }
+    except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"get_indicators({symbol})")
+        else:
+            log.error(f"❌ مؤشرات {symbol}: {e}")
+        return None
     except Exception as e:
         log.error(f"❌ مؤشرات {symbol}: {e}")
         return None
@@ -1125,6 +1221,12 @@ def check_stoch_rsi(client, symbol):
                 "atr"   : calculate_atr(highs, lows, closes),
             }
         return None
+    except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"check_stoch_rsi({symbol})")
+        else:
+            log.error(f"❌ Stoch RSI {symbol}: {e}")
+        return None
     except Exception as e:
         log.error(f"❌ Stoch RSI {symbol}: {e}")
         return None
@@ -1153,12 +1255,8 @@ def compute_trail_stop(price, trade):
 # تنفيذ الصفقات
 # ──────────────────────────────────────────────
 def get_quantity(client, symbol, usdt_amount):
-    info      = client.get_symbol_info(symbol)
+    step_size = get_step_size(client, symbol)   # ✅ إصلاح: من الكاش بدل طلب API بكل مرة
     price     = float(client.get_symbol_ticker(symbol=symbol)["price"])
-    step_size = None
-    for f in info["filters"]:
-        if f["filterType"] == "LOT_SIZE":
-            step_size = float(f["stepSize"])
     qty = usdt_amount / price
     if step_size:
         precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
@@ -1202,14 +1300,50 @@ def close_trade(client, symbol):
     return None, "sell_failed"
 
 def buy_market(client, symbol, usdt_amount):
+    """
+    ✅ إصلاح إضافي: سعر الدخول الفعلي (Executed Price) من رد بينانس مباشرة،
+    بدل سعر الشمعة/التيكر التقريبي وقت إرسال الأمر.
+    actual_entry_price = total_spent (USDT) / total_quantity (كمية العملة الفعلية المشتراة)
+    هذا يضمن إن الـ stop_loss والـ trailing stop يُبنوا على السعر الحقيقي اللي دخلت فيه المحفظة،
+    مش على سعر تقديري ممكن يكون مختلف شوي عن التنفيذ الفعلي (slippage).
+    """
     try:
         qty, price = get_quantity(client, symbol, usdt_amount)
         if qty <= 0:
             return None
         order = client.order_market_buy(symbol=symbol, quantity=qty)
-        log.info(f"✅ شراء {symbol} | السعر: {price} | الكمية: {qty}")
-        return {"qty": qty, "entry_price": price, "order_id": order["orderId"]}
+
+        # ── انتظار وقراءة رد المنصة الفعلي (fills) ─────────────
+        fills = order.get("fills", [])
+        if fills:
+            total_qty   = sum(float(f["qty"]) for f in fills)
+            total_spent = sum(float(f["price"]) * float(f["qty"]) for f in fills)
+            # ✅ عمولة الشراء أحياناً تُخصم من نفس العملة المشتراة (BNB مو مستخدم)،
+            # فنطرح العمولة من الكمية الفعلية لو كانت بنفس عملة الأصل (asset) لدقة أكبر
+            asset = symbol.replace("USDT", "")
+            commission_in_asset = sum(
+                float(f.get("commission", 0)) for f in fills
+                if f.get("commissionAsset") == asset
+            )
+            net_qty = total_qty - commission_in_asset
+            if net_qty > 0 and total_qty > 0:
+                actual_entry_price = total_spent / total_qty   # سعر التنفيذ الفعلي (weighted average)
+            else:
+                actual_entry_price = price
+                net_qty = qty
+        else:
+            # احتياط لو الرد ما رجع fills لأي سبب
+            actual_entry_price = price
+            net_qty             = qty
+
+        log.info(
+            f"✅ شراء {symbol} | سعر تقديري: {price} | سعر تنفيذ فعلي: {actual_entry_price:.8f} | "
+            f"الكمية الفعلية: {net_qty}"
+        )
+        return {"qty": net_qty, "entry_price": actual_entry_price, "order_id": order["orderId"]}
     except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"buy_market({symbol})")
         log.error(f"❌ شراء {symbol}: {e.status_code} | {e.message}")
         send_admin(f"خطأ شراء {symbol}: {e.message}")
         return None
@@ -1230,12 +1364,7 @@ def sell_market(client, symbol, qty):
         balance    = client.get_asset_balance(asset=asset)
         actual_qty = float(balance["free"])
 
-        info      = client.get_symbol_info(symbol)
-        step_size = None
-        for f in info["filters"]:
-            if f["filterType"] == "LOT_SIZE":
-                step_size = float(f["stepSize"])
-                break
+        step_size = get_step_size(client, symbol)   # ✅ إصلاح: من الكاش بدل طلب API بكل مرة
 
         # ✅ نستخدم أصغر قيمة بين المسجل بالذاكرة والمتاح فعلياً بالمحفظة
         sell_qty = min(qty, actual_qty)
@@ -1259,6 +1388,8 @@ def sell_market(client, symbol, qty):
         log.info(f"✅ بيع {symbol} | السعر: {price:.6f} | الكمية: {sell_qty}")
         return price
     except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"sell_market({symbol})")
         log.error(f"❌ بيع {symbol}: {e.status_code} | {e.message}")
         send_admin(f"خطأ بيع {symbol}: {e.message}")
         return None
@@ -1377,14 +1508,12 @@ def api_status():
 @app.route("/api/trades")
 @login_required
 def api_trades():
-    result = []
-    for symbol, t in dict(open_trades).items():
-        current_price = t["entry_price"]
-        if _binance_client:
-            try:
-                current_price = float(_binance_client.get_symbol_ticker(symbol=symbol)["price"])
-            except Exception:
-                pass
+    result       = []
+    trades_copy  = dict(open_trades)
+    # ✅ إصلاح: جلب كل الأسعار بطلب واحد بدل طلب لكل عملة بحلقة
+    all_prices   = get_all_prices(_binance_client, set(trades_copy.keys())) if _binance_client else {}
+    for symbol, t in trades_copy.items():
+        current_price = all_prices.get(symbol, t["entry_price"])
         pnl_pct = round((current_price - t["entry_price"]) / t["entry_price"] * 100, 2)
         result.append({
             "symbol": symbol,
@@ -1662,6 +1791,11 @@ def run_bot():
         global SYMBOLS
         SYMBOLS = [s for s in SYMBOLS if s in active_symbols]
         save_symbols_to_txt()
+        # ✅ إصلاح: تخزين مؤقت (cache) لمعلومات كل الرموز من نفس رد exchange_info،
+        # بدل ما نطلب get_symbol_info لكل رمز لحاله لاحقاً بكل عملية شراء/بيع
+        for s in exchange_info["symbols"]:
+            if s["symbol"] in SYMBOLS:
+                SYMBOL_INFO_CACHE[s["symbol"]] = s
         log.info("✅ تم فلترة وتأكيد العملات النشطة بنجاح.")
     except Exception as e:
         log.warning(f"⚠️ تأخر رد بينانس. تم اعتماد القائمة كاملة: {e}")
@@ -1687,6 +1821,14 @@ def run_bot():
     while True:
         try:
             now = time.time()
+
+            # 🚦 لو البوت بفترة إيقاف مؤقت بسبب حظر -1003، ننام ونتخطى هالدورة بالكامل
+            if is_api_blocked():
+                remaining = int(_api_blocked_until - now)
+                log.warning(f"🚦 البوت بفترة إيقاف مؤقت (-1003) — باقي {remaining} ثانية تقريباً")
+                time.sleep(min(remaining, 30) if remaining > 0 else 5)
+                continue
+
             log.info(f"🔄 فحص دوري | صفقات: {len(open_trades)}/{MAX_TRADES} | مراقبة مكثفة: {len(watch_list)}")
 
             # 🛑 استئناف تلقائي بعد انتهاء فترة التوقف
@@ -1718,10 +1860,20 @@ def run_bot():
                 last_heartbeat = now
 
             # ── 1. إدارة الصفقات المفتوحة ──
-            for symbol in list(open_trades.keys()):
+            # ✅ إصلاح: جلب كل الأسعار بطلب واحد مجمّع (get_all_tickers) بدل طلب سعر
+            # كل عملة لحالها بحلقة — هذا يقلل استهلاك وزن الـ API بشكل كبير ويحمي من -1003
+            open_symbols_now = list(open_trades.keys())
+            prices_map        = get_all_prices(client, open_symbols_now) if open_symbols_now else {}
+
+            for symbol in open_symbols_now:
+                if symbol not in open_trades:
+                    continue
                 trade = open_trades[symbol]
                 try:
-                    price = get_current_price(client, symbol)   # ← طلب واحد خفيف (تحسين)
+                    price = prices_map.get(symbol)
+                    if not price:
+                        # احتياط: لو ما رجع بالطلب المجمّع لأي سبب، نطلبه لحاله كحل أخير
+                        price = get_current_price(client, symbol)
                     if not price:
                         continue
                     coin  = symbol.replace("USDT", "")
@@ -1806,8 +1958,11 @@ def run_bot():
             with _lock:
                 is_trading = trading_enabled
 
-            if watch_list and is_trading and len(open_trades) < MAX_TRADES:
+            if watch_list and is_trading and len(open_trades) < MAX_TRADES and not is_api_blocked():
                 for symbol in list(watch_list):
+                    if is_api_blocked():
+                        log.warning("🚦 تم اكتشاف حظر أثناء الفحص المكثف — إيقاف باقي الدورة الحالية")
+                        break
                     if symbol in open_trades:
                         watch_list.discard(symbol)
                         continue
@@ -1898,6 +2053,8 @@ def run_bot():
                     time.sleep(0.2)
 
         except BinanceAPIException as e:
+            if is_rate_limit_error(e):
+                register_api_block("run_bot main loop")
             log.error(f"❌ بينانس: {e.status_code} | {e.message}")
             send_admin(f"خطأ بينانس: {e.status_code} | {e.message}")
         except Exception as e:
