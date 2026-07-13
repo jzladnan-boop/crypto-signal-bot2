@@ -151,6 +151,34 @@ def get_step_size(client, symbol):
     return None
 
 # ──────────────────────────────────────────────
+# 🗄️ كاش قصير المدة لـ endpoints الداشبورد اللي بتنادي بينانس
+# (مثل /api/status و /api/trades) — عشان أي عدد أجهزة/تبويبات
+# فاتحة بنفس الوقت (موبايل + تاب + متصفح) تشارك نفس الرد المخزن
+# بدل ما كل جهاز يعمل طلب مستقل لبينانس، وهذا يحمي من حظر -1003
+# لما يكون فيه أكثر من جهاز يعمل auto-refresh بنفس اللحظة.
+# ──────────────────────────────────────────────
+DASHBOARD_CACHE_TTL = 8   # ثانية — مدة صلاحية الكاش قبل ما يُطلب رد جديد من بينانس
+_dashboard_cache_lock = threading.Lock()
+_dashboard_cache = {}   # key -> {"data": ..., "ts": epoch_seconds}
+
+def get_cached_or_fetch(key, fetch_fn, ttl=DASHBOARD_CACHE_TTL):
+    """
+    يرجع القيمة المخزنة بالكاش لو لسا صالحة (أصغر من ttl ثانية)،
+    وإلا بيستدعي fetch_fn() مرة وحدة، يخزن النتيجة، ويرجعها.
+    لو صار أكثر من طلب بنفس اللحظة، أول واحد بس بيروح لبينانس والباقي بياخدوا من الكاش.
+    """
+    now = time.time()
+    with _dashboard_cache_lock:
+        cached = _dashboard_cache.get(key)
+        if cached and (now - cached["ts"]) < ttl:
+            return cached["data"]
+    # خارج القفل عشان ما نعلّق باقي الطلبات وقت استدعاء بينانس
+    data = fetch_fn()
+    with _dashboard_cache_lock:
+        _dashboard_cache[key] = {"data": data, "ts": time.time()}
+    return data
+
+# ──────────────────────────────────────────────
 # ✅ إصلاح #1: threading.Lock بدل Global مباشر
 # ──────────────────────────────────────────────
 _lock           = threading.Lock()
@@ -1478,10 +1506,14 @@ def api_status():
 
     balance = 0.0
     if _binance_client:
-        try:
-            balance = float(_binance_client.get_asset_balance(asset="USDT")["free"])
-        except Exception as e:
-            log.error(f"❌ API رصيد: {e}")
+        def _fetch_balance():
+            try:
+                return float(_binance_client.get_asset_balance(asset="USDT")["free"])
+            except Exception as e:
+                log.error(f"❌ API رصيد: {e}")
+                return 0.0
+        # ✅ كاش قصير المدة: أي عدد أجهزة فاتحة بنفس اللحظة بتشارك نفس النداء
+        balance = get_cached_or_fetch("usdt_balance", _fetch_balance)
 
     profit_log = load_all_profit_log()   # ✅ كل الشهور
     total_pnl  = round(sum(r["profit"] for r in profit_log), 4)
@@ -1511,7 +1543,10 @@ def api_trades():
     result       = []
     trades_copy  = dict(open_trades)
     # ✅ إصلاح: جلب كل الأسعار بطلب واحد بدل طلب لكل عملة بحلقة
-    all_prices   = get_all_prices(_binance_client, set(trades_copy.keys())) if _binance_client else {}
+    # ✅ كاش قصير المدة: أي عدد أجهزة فاتحة بنفس اللحظة بتشارك نفس النداء لبينانس
+    def _fetch_prices():
+        return get_all_prices(_binance_client, set(trades_copy.keys())) if _binance_client else {}
+    all_prices   = get_cached_or_fetch("all_open_trade_prices", _fetch_prices)
     for symbol, t in trades_copy.items():
         current_price = all_prices.get(symbol, t["entry_price"])
         pnl_pct = round((current_price - t["entry_price"]) / t["entry_price"] * 100, 2)
