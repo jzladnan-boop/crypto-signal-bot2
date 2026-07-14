@@ -402,15 +402,23 @@ def save_profit_log(log_data, month=None):
 
 def record_trade_result(symbol, entry_price, exit_price, qty, reason):
     """يسجل نتيجة كل صفقة في ملف الشهر الحالي"""
-    month      = time.strftime("%Y_%m")
-    profit_log = load_profit_log(month)
-    profit     = round((exit_price - entry_price) * qty, 4)
+    month       = time.strftime("%Y_%m")
+    profit_log  = load_profit_log(month)
+    profit      = round((exit_price - entry_price) * qty, 4)
+    # ✅ إصلاح: نخزن مبلغ الشراء/البيع الكامل ونسبة التغيّر % مع كل صفقة،
+    # عشان تكون جاهزة لعرضها بالإشعارات وبالداشبورد بدون إعادة حساب بأكثر من مكان
+    buy_amount  = round(entry_price * qty, 4)
+    sell_amount = round(exit_price * qty, 4)
+    pct         = round((exit_price - entry_price) / entry_price * 100, 2) if entry_price else 0.0
     profit_log.append({
         "symbol"     : symbol,
         "entry_price": entry_price,
         "exit_price" : exit_price,
         "qty"        : qty,
         "profit"     : profit,
+        "buy_amount" : buy_amount,
+        "sell_amount": sell_amount,
+        "pct"        : pct,
         "reason"     : reason,
         "time"       : time.strftime("%Y-%m-%d %H:%M:%S")
     })
@@ -935,15 +943,20 @@ def telegram_command_listener(client):
                             # ✅ إصلاح: ما كان فيه رصيد فعلي للعملة، تم تنظيف الصفقة من السجل فقط
                             send_admin(f"⚠️ {coin}: لا يوجد رصيد فعلي لهذي العملة في المحفظة.\nتم حذف الصفقة من سجل البوت لتجنب التعليق.")
                         else:
-                            trade_entry = open_trades.get(symbol, {}).get("entry_price", 0)
-                            # ملاحظة: السعر جُلب بعد الحذف، نحسب PnL من السجل
+                            # ملاحظة: السعر جُلب بعد الحذف، نحسب PnL ومبلغ الشراء/البيع والنسبة % من السجل
                             profit_log = load_profit_log()
                             last       = next((r for r in reversed(profit_log) if r["symbol"] == symbol), None)
-                            pnl        = f"{last['profit']:+.4f} USDT" if last else "—"
+                            if last:
+                                pnl_line     = f"💹 PnL: {last['profit']:+.4f} USDT ({last.get('pct', 0):+.2f}%)"
+                                amounts_line = f"🧾 مبلغ الشراء: {last.get('buy_amount', 0):.4f} USDT → مبلغ البيع: {last.get('sell_amount', 0):.4f} USDT\n"
+                            else:
+                                pnl_line     = "💹 PnL: —"
+                                amounts_line = ""
                             send_admin(
                                 f"🔴 <b>إغلاق يدوي - {coin}</b>\n"
                                 f"💵 سعر البيع: {sell_price:.4f}$\n"
-                                f"💹 PnL: {pnl}"
+                                f"{amounts_line}"
+                                f"{pnl_line}"
                             )
 
                     # ── /set_buy_rsi ──────────────────────────
@@ -1301,9 +1314,11 @@ def close_trade(client, symbol):
             return None, "not_found"
         trade = open_trades[symbol]
 
-    sell_price = sell_market(client, symbol, trade["qty"])
+    sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
     if sell_price:
-        record_trade_result(symbol, trade["entry_price"], sell_price, trade["qty"], "manual_close")
+        # ✅ إصلاح: نستخدم الكمية الفعلية المُنفَّذة (sold_qty) لحساب الربح،
+        # مش الكمية المسجلة بالذاكرة، عشان الربح يطابق تمامًا اللي صار على بينانس
+        record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "manual_close")
         with _lock:
             if symbol in open_trades:
                 del open_trades[symbol]
@@ -1386,6 +1401,12 @@ def sell_market(client, symbol, qty):
     ✅ إصلاح إضافي: التحقق من الرصيد الفعلي في المحفظة قبل البيع،
        واستخدام أصغر قيمة بين الكمية المسجلة في الذاكرة والكمية الفعلية،
        لتجنب خطأ "Account has insufficient balance" (مشكلة TLM المتكررة)
+    ✅ إصلاح إضافي: يرجّع الكمية الفعلية المُنفَّذة (من fills) مع السعر،
+       عشان حساب الربح (record_trade_result) يعتمد على اللي انباع فعلياً
+       على بينانس، مو على الكمية المسجلة بالذاكرة وقت الشراء — كان فيه
+       فرق بسيط أحياناً بين الاثنين بسبب تقريب step_size أو "غبار" بالرصيد،
+       وهاد كان يخلي الربح المعروض بالتطبيق يختلف شوي عن الربح الحقيقي ببينانس.
+    يرجع (price, executed_qty) عند النجاح، أو (None, None) عند الفشل.
     """
     try:
         asset      = symbol.replace("USDT", "")
@@ -1403,28 +1424,29 @@ def sell_market(client, symbol, qty):
 
         if sell_qty <= 0:
             log.warning(f"⚠️ {symbol}: لا يوجد رصيد كافٍ للبيع (مسجل: {qty}, فعلي: {actual_qty})")
-            return None
+            return None, None
 
         order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
         # ✅ إصلاح #1: سعر التنفيذ الفعلي من الأوردر مباشرة (weighted average)
         fills = order.get("fills", [])
         if fills:
-            total_qty = sum(float(f["qty"]) for f in fills)
-            price     = sum(float(f["price"]) * float(f["qty"]) for f in fills) / total_qty
+            executed_qty = sum(float(f["qty"]) for f in fills)
+            price        = sum(float(f["price"]) * float(f["qty"]) for f in fills) / executed_qty
         else:
-            price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        log.info(f"✅ بيع {symbol} | السعر: {price:.6f} | الكمية: {sell_qty}")
-        return price
+            executed_qty = sell_qty
+            price        = float(client.get_symbol_ticker(symbol=symbol)["price"])
+        log.info(f"✅ بيع {symbol} | السعر: {price:.6f} | الكمية المطلوبة: {sell_qty} | الكمية المنفذة فعلياً: {executed_qty}")
+        return price, executed_qty
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
             register_api_block(f"sell_market({symbol})")
         log.error(f"❌ بيع {symbol}: {e.status_code} | {e.message}")
         send_admin(f"خطأ بيع {symbol}: {e.message}")
-        return None
+        return None, None
     except Exception as e:
         log.error(f"❌ بيع {symbol}: {e}")
         send_admin(f"خطأ بيع {symbol}: {e}")
-        return None
+        return None, None
 
 # ──────────────────────────────────────────────
 # 📊 لوحة التحكم (Dashboard) — Flask API
@@ -1931,15 +1953,22 @@ def run_bot():
                             trade["stop_loss"]     = max(compute_trail_stop(price, trade), trade["entry_price"])
                             save_trades()
                         elif price <= trade["stop_loss"]:
-                            sell_price = sell_market(client, symbol, trade["qty"])
+                            sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
                             if sell_price:
-                                profit = round((sell_price - trade["entry_price"]) * trade["qty"], 4)
-                                record_trade_result(symbol, trade["entry_price"], sell_price, trade["qty"], "trailing_stop")  # ✅ إصلاح #3
+                                # ✅ إصلاح: الربح ومبلغ الشراء/البيع محسوبين على الكمية الفعلية المُنفَّذة
+                                # (sold_qty) بدل الكمية المسجلة بالذاكرة، عشان تطابق بينانس تمامًا
+                                profit      = round((sell_price - trade["entry_price"]) * sold_qty, 4)
+                                buy_amount  = round(trade["entry_price"] * sold_qty, 4)
+                                sell_amount = round(sell_price * sold_qty, 4)
+                                pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
+                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "trailing_stop")  # ✅ إصلاح #3
                                 consecutive_losses = 0   # 🛑 صفقة رابحة → تصفير عدّاد الخسارات المتتالية
                                 save_circuit_state()
                                 send_telegram(
                                     f"💰 <b>جني أرباح - {coin}</b>\n"
-                                    f"💵 دخول: {trade['entry_price']:.4f}$ → خروج: {sell_price:.4f}$\n"
+                                    f"💵 دخول: {trade['entry_price']:.6f}$ → خروج: {sell_price:.6f}$\n"
+                                    f"🧾 مبلغ الشراء: {buy_amount:.4f} USDT → مبلغ البيع: {sell_amount:.4f} USDT\n"
+                                    f"📊 النسبة: {pct:+.2f}%\n"
                                     f"💹 PnL: {profit:+.4f} USDT"
                                 )
                                 del open_trades[symbol]
@@ -1950,13 +1979,20 @@ def run_bot():
                         # (المبني على ATR أو الاحتياطي الثابت)، بدل إعادة حسابه من الصفر بالنسبة الثابتة
                         # في كل دورة — كان هذا يلغي فائدة ATR قبل تفعيل Trailing.
                         if price <= trade["stop_loss"]:
-                            sell_price = sell_market(client, symbol, trade["qty"])
+                            sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
                             if sell_price:
-                                loss = round((sell_price - trade["entry_price"]) * trade["qty"], 4)
-                                record_trade_result(symbol, trade["entry_price"], sell_price, trade["qty"], "stop_loss")  # ✅ إصلاح #3
+                                # ✅ إصلاح: الخسارة ومبلغ الشراء/البيع محسوبين على الكمية الفعلية المُنفَّذة
+                                # (sold_qty) بدل الكمية المسجلة بالذاكرة، عشان تطابق بينانس تمامًا
+                                loss        = round((sell_price - trade["entry_price"]) * sold_qty, 4)
+                                buy_amount  = round(trade["entry_price"] * sold_qty, 4)
+                                sell_amount = round(sell_price * sold_qty, 4)
+                                pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
+                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "stop_loss")  # ✅ إصلاح #3
                                 send_telegram(
                                     f"🚨 <b>ستوب لوز - {coin}</b>\n"
-                                    f"📉 السعر: {sell_price:.4f}$\n"
+                                    f"📉 السعر: {sell_price:.6f}$\n"
+                                    f"🧾 مبلغ الشراء: {buy_amount:.4f} USDT → مبلغ البيع: {sell_amount:.4f} USDT\n"
+                                    f"📊 النسبة: {pct:+.2f}%\n"
                                     f"💸 خسارة: {loss:.4f} USDT"
                                 )
 
