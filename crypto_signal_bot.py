@@ -74,7 +74,7 @@ TRAIL_PCT          = 0.01
 TRAIL_ACTIVATE_PCT = 0.01
 TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي بناءً على طلب المستخدم (كان 2.0)
-MAX_TRADES         = 4
+MAX_TRADES         = 2   # 🎯 أقصى عدد صفقات "نشطة" (لسا ما فعّلت Trailing) بالتزامن — لا يوجد سقف على العدد الكلي للصفقات المفتوحة
 HEARTBEAT_INTERVAL = 3600
 MA_PERIOD          = 20
 
@@ -107,6 +107,15 @@ PAUSE_DURATION_SECONDS = 2 * 60 * 60  # مدة التوقف (ساعتين)
 ATR_PERIOD     = 14    # عدد الشموع لحساب ATR
 ATR_MULTIPLIER = 2.0   # مضاعف ATR لتحديد مسافة الستوب الأولي (كلما زاد، اتسعت مساحة التنفس)
 TRAIL_ATR_MULTIPLIER = 1.5   # مضاعف ATR لمسافة الـ Trailing بعد التفعيل (عادة أضيق من الستوب الأولي)
+
+# ──────────────────────────────────────────────
+# 🚀 Trend + StochRSI: استراتيجية ثالثة مستقلة (StochRSI + فوليوم + تأكيد اتجاه 4 ساعات)
+# ثابتة بالكامل حسب الاتفاق — غير قابلة للتعديل من الإعدادات
+# ──────────────────────────────────────────────
+TREND_STOCH_INTERVAL   = Client.KLINE_INTERVAL_4HOUR   # فريم تأكيد الاتجاه العام (ثابت)
+TREND_STOCH_MA_LENGTH  = 50    # طول المتوسط المتحرك لتأكيد الاتجاه على فريم الـ 4 ساعات
+VOLUME_MA_LENGTH        = 20    # طول متوسط الفوليوم للمقارنة (فريم الدخول)
+VOLUME_MULTIPLIER       = 1.0   # الفوليوم الحالي لازم يكون أعلى من (أو يساوي) هذا المضاعف × المتوسط
 
 # ──────────────────────────────────────────────
 # 🚦 حماية من حظر بينانس بسبب كثرة الطلبات (Error -1003)
@@ -186,7 +195,13 @@ trading_enabled = True
 watch_list      = set()
 open_trades     = {}
 ma20_enabled    = True
-current_strategy   = "rsi"   # 🎯 الاستراتيجية الحالية: "rsi" أو "stoch_rsi"
+current_strategy   = "rsi"   # 🎯 الاستراتيجية الحالية: "rsi" أو "stoch_rsi" أو "trend_stoch"
+
+STRATEGY_LABELS = {
+    "rsi"        : "RSI العادي",
+    "stoch_rsi"  : "Stochastic RSI",
+    "trend_stoch": "Trend + StochRSI",
+}
 consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
 pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
 _binance_client     = None   # 📊 مرجع لعميل بينانس، تستخدمه لوحة التحكم
@@ -256,6 +271,15 @@ def load_trades():
             save_trades()
         except Exception as e:
             log.error(f"❌ خطأ تحميل الصفقات: {e}")
+
+def count_active_trades():
+    """
+    🎯 يرجع عدد الصفقات 'النشطة' (اللي لسا ما فعّلت Trailing).
+    هذا هو العدد اللي يتحكم بفتح صفقات جديدة (حده الأقصى MAX_TRADES) —
+    مو العدد الكلي للصفقات المفتوحة، اللي ما فيه سقف عليه إطلاقاً.
+    الصفقات اللي فعّلت Trailing تعتبر "آمنة" ولا تحجز مكان لصفقة جديدة.
+    """
+    return sum(1 for t in open_trades.values() if not t.get("trailing_active"))
 
 # ──────────────────────────────────────────────
 # 🛑 حفظ وتحميل حالة Circuit Breaker (تنجو من إعادة تشغيل السيرفر)
@@ -667,16 +691,17 @@ def telegram_command_listener(client):
                         with _lock:
                             status           = "▶️ شغال" if trading_enabled else "⏸️ موقوف"
                             trades_count     = len(open_trades)
+                            active_count     = count_active_trades()
                             trades_copy      = dict(open_trades)
                             pause_left       = pause_until
-                            strategy_label   = "RSI العادي" if current_strategy == "rsi" else "Stochastic RSI"
+                            strategy_label   = STRATEGY_LABELS.get(current_strategy, current_strategy)
                             interval_minutes = INTERVAL_TO_MINUTES.get(current_interval, 30)
                             ma20_status      = "✅ مفعّل" if ma20_enabled else "❌ مطفي"
                         msg = (
                             f"📊 <b>حالة البوت</b>\n"
                             f"🔘 التداول: {status}\n"
                             f"💰 USDT المتاح: ${usdt_balance:.2f}\n"
-                            f"💼 صفقات: {trades_count}/{MAX_TRADES}\n"
+                            f"💼 صفقات نشطة: {active_count}/{MAX_TRADES} | إجمالي مفتوحة: {trades_count}\n"
                             f"👁️ يراقب: {len(SYMBOLS)} عملة\n"
                             f"🔍 مراقبة مكثفة: {len(watch_list)} عملة\n"
                             f"📊 الاستراتيجية: {strategy_label}\n"
@@ -718,9 +743,9 @@ def telegram_command_listener(client):
                                 with _lock:   # ✅ إصلاح: حماية race condition
                                     MAX_TRADES = value
                                 save_settings()
-                                send_admin(f"✅ أقصى صفقات: {MAX_TRADES}")
+                                send_admin(f"✅ أقصى صفقات نشطة (قبل تفعيل Trailing) بنفس الوقت: {MAX_TRADES}")
                         except:
-                            send_admin("❌ مثال: /set_max_trades 5")
+                            send_admin("❌ مثال: /set_max_trades 2")
 
                     # ── /set_trail ────────────────────────────
                     elif text.startswith("/set_trail "):
@@ -979,19 +1004,23 @@ def telegram_command_listener(client):
                     # ── /set_strategy ─────────────────────────
                     elif text.startswith("/set_strategy "):
                         strategy = text.replace("/set_strategy ", "").strip().lower()
-                        if strategy in ("rsi", "stoch_rsi"):
+                        if strategy in ("rsi", "stoch_rsi", "trend_stoch"):
                             with _lock:
                                 current_strategy = strategy
                             save_settings()
-                            labels = {"rsi": "RSI العادي (ارتداد فوق 30)", "stoch_rsi": "Stochastic RSI (تقاطع K فوق D واختراق 20)"}
+                            labels = {
+                                "rsi"        : "RSI العادي (ارتداد فوق 30)",
+                                "stoch_rsi"  : "Stochastic RSI (تقاطع K فوق D واختراق 20)",
+                                "trend_stoch": "Trend + StochRSI (تأكيد اتجاه 4 ساعات + فوليوم)",
+                            }
                             send_admin(f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}")
                         else:
-                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi")
+                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch")
 
                     # ── /config ───────────────────────────────
                     elif text == "/config":
                         with _lock:
-                            strategy_label   = "RSI العادي" if current_strategy == "rsi" else "Stochastic RSI"
+                            strategy_label   = STRATEGY_LABELS.get(current_strategy, current_strategy)
                             interval_minutes = INTERVAL_TO_MINUTES.get(current_interval, 30)
                             ma20_status      = "✅ مفعّل" if ma20_enabled else "❌ مطفي"
                             trade_amt        = TRADE_AMOUNT
@@ -1070,7 +1099,8 @@ def telegram_command_listener(client):
                             "/atr_status — شرح وعرض إعدادات ATR الحالية\n\n"
                             "<b>الاستراتيجية:</b>\n"
                             "/set_strategy rsi — شراء عند ارتداد RSI فوق 30\n"
-                            "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n\n"
+                            "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n"
+                            "/set_strategy trend_stoch — StochRSI + فوليوم قوي + تأكيد اتجاه صاعد على فريم 4 ساعات\n\n"
                             "<b>المؤشرات:</b>\n"
                             "/enable_ma20 — تشغيل فيلتر MA20 (مستقل عن الاستراتيجية)\n"
                             "/disable_ma20 — تعطيل فيلتر MA20\n\n"
@@ -1270,6 +1300,98 @@ def check_stoch_rsi(client, symbol):
         return None
     except Exception as e:
         log.error(f"❌ Stoch RSI {symbol}: {e}")
+        return None
+
+# ──────────────────────────────────────────────
+# 🚀 Trend + StochRSI — استراتيجية ثالثة مستقلة
+# الشروط: StochRSI بمنطقة تشبع بيعي + تقاطع إيجابي فوق السعر > MA20،
+#         فوليوم أعلى من متوسطه، وتأكيد اتجاه صاعد على فريم 4 ساعات (السعر > MA50)
+# ──────────────────────────────────────────────
+def get_trend_confirmation(client, symbol):
+    """يتأكد أن الاتجاه العام على فريم TREND_STOCH_INTERVAL صاعد (آخر شمعة مغلقة فوق MA50)"""
+    try:
+        klines = client.get_klines(symbol=symbol, interval=TREND_STOCH_INTERVAL, limit=TREND_STOCH_MA_LENGTH + 5)
+        if not klines or len(klines) < TREND_STOCH_MA_LENGTH:
+            return False
+        closes = pd.Series([float(k[4]) for k in klines])
+        trend_ma = closes.rolling(window=TREND_STOCH_MA_LENGTH).mean()
+        last_closed_close = closes.iloc[-2]
+        last_closed_ma     = trend_ma.iloc[-2]
+        if pd.isna(last_closed_ma):
+            return False
+        return last_closed_close > last_closed_ma
+    except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"get_trend_confirmation({symbol})")
+        else:
+            log.error(f"❌ تأكيد اتجاه {symbol}: {e}")
+        return False
+    except Exception as e:
+        log.error(f"❌ تأكيد اتجاه {symbol}: {e}")
+        return False
+
+def check_trend_stoch(client, symbol):
+    """
+    إشارة الشراء (الثلاث شروط لازم تتحقق كلها):
+    - نفس شرط Stochastic RSI (تشبع بيعي + تقاطع إيجابي + اختراق 20) + السعر فوق MA20
+    - الفوليوم الحالي أعلى من متوسطه (VOLUME_MULTIPLIER × المتوسط)
+    - الاتجاه العام على فريم 4 ساعات صاعد (تأكيد إضافي يمنع صفقات السكين الساقطة)
+    يعيد dict بالقيم أو None لو مافي إشارة
+    """
+    try:
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
+        closes  = pd.Series([float(k[4]) for k in klines])
+        highs   = pd.Series([float(k[2]) for k in klines])
+        lows    = pd.Series([float(k[3]) for k in klines])
+        volumes = pd.Series([float(k[5]) for k in klines])
+
+        stoch  = ta.momentum.StochRSIIndicator(close=closes, window=14, smooth1=3, smooth2=3)
+        k_line = stoch.stochrsi_k() * 100
+        d_line = stoch.stochrsi_d() * 100
+
+        k_curr = round(k_line.iloc[-1], 2)
+        k_prev = round(k_line.iloc[-2], 2)
+        d_curr = round(d_line.iloc[-1], 2)
+        d_prev = round(d_line.iloc[-2], 2)
+        price  = float(closes.iloc[-1])
+        ma20   = round(closes.rolling(window=MA_PERIOD).mean().iloc[-1], 8)
+
+        base_condition = (
+            k_prev < 20 and d_prev < 20 and
+            k_curr >= 20 and
+            k_prev < d_prev and
+            k_curr > d_curr and
+            price > ma20
+        )
+        if not base_condition:
+            return None
+
+        # فلتر الفوليوم: لازم فوليوم آخر شمعة أعلى من متوسطه
+        vol_ma = volumes.rolling(window=VOLUME_MA_LENGTH).mean().iloc[-1]
+        if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * VOLUME_MULTIPLIER):
+            return None
+
+        # فلتر تأكيد الاتجاه على فريم 4 ساعات
+        if not get_trend_confirmation(client, symbol):
+            return None
+
+        return {
+            "k_curr": k_curr,
+            "k_prev": k_prev,
+            "d_curr": d_curr,
+            "d_prev": d_prev,
+            "price" : price,
+            "ma20"  : ma20,
+            "atr"   : calculate_atr(highs, lows, closes),
+        }
+    except BinanceAPIException as e:
+        if is_rate_limit_error(e):
+            register_api_block(f"check_trend_stoch({symbol})")
+        else:
+            log.error(f"❌ Trend+StochRSI {symbol}: {e}")
+        return None
+    except Exception as e:
+        log.error(f"❌ Trend+StochRSI {symbol}: {e}")
         return None
 
 # ──────────────────────────────────────────────
@@ -1550,6 +1672,7 @@ def api_status():
         },
         "balance_usdt": round(balance, 2),
         "open_trades_count": len(open_trades),
+        "active_trades_count": count_active_trades(),
         "max_trades": max_trades,
         "watch_count": len(watch_list),
         "symbols_count": len(SYMBOLS),
@@ -1616,6 +1739,7 @@ def api_get_settings():
             "ma20_enabled": ma20_enabled,
             "rsi_enabled": current_strategy == "rsi",
             "stochastic_enabled": current_strategy == "stoch_rsi",
+            "trend_stoch_enabled": current_strategy == "trend_stoch",
             "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
@@ -1675,6 +1799,8 @@ def api_set_settings():
             current_strategy = "rsi"
         if "stochastic_enabled" in data and data["stochastic_enabled"]:
             current_strategy = "stoch_rsi"
+        if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
+            current_strategy = "trend_stoch"
         if "stop_loss_pct" in data:
             v = float(data["stop_loss_pct"]) / 100
             if v > 0: STOP_LOSS_PCT = v
@@ -1886,7 +2012,7 @@ def run_bot():
                 time.sleep(min(remaining, 30) if remaining > 0 else 5)
                 continue
 
-            log.info(f"🔄 فحص دوري | صفقات: {len(open_trades)}/{MAX_TRADES} | مراقبة مكثفة: {len(watch_list)}")
+            log.info(f"🔄 فحص دوري | صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)} | مراقبة مكثفة: {len(watch_list)}")
 
             # 🛑 استئناف تلقائي بعد انتهاء فترة التوقف
             with _lock:
@@ -1911,7 +2037,7 @@ def run_bot():
                     f"💚 <b>البوت شغال</b>\n"
                     f"🔘 التداول: {status}\n"
                     f"💰 رصيد USDT: ${usdt_balance:.2f}\n"
-                    f"💼 صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES}\n"
+                    f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}\n"
                     f"👁️ يراقب {len(SYMBOLS)} عملة"
                 )
                 last_heartbeat = now
@@ -2029,7 +2155,7 @@ def run_bot():
             with _lock:
                 is_trading = trading_enabled
 
-            if watch_list and is_trading and len(open_trades) < MAX_TRADES and not is_api_blocked():
+            if watch_list and is_trading and count_active_trades() < MAX_TRADES and not is_api_blocked():
                 for symbol in list(watch_list):
                     if is_api_blocked():
                         log.warning("🚦 تم اكتشاف حظر أثناء الفحص المكثف — إيقاف باقي الدورة الحالية")
@@ -2037,7 +2163,7 @@ def run_bot():
                     if symbol in open_trades:
                         watch_list.discard(symbol)
                         continue
-                    if len(open_trades) >= MAX_TRADES:
+                    if count_active_trades() >= MAX_TRADES:
                         break
 
                     with _lock:
@@ -2068,6 +2194,21 @@ def run_bot():
                         ) if buy_signal else None
                         price     = stoch["price"] if buy_signal else None
                         atr_value = stoch.get("atr") if buy_signal else None
+
+                    # ── استراتيجية Trend + StochRSI ─────────────
+                    elif strategy == "trend_stoch":
+                        trend_sig = check_trend_stoch(client, symbol)
+                        if not trend_sig:
+                            time.sleep(0.2)
+                            continue
+                        # كل الشروط (StochRSI + فوليوم + اتجاه 4 ساعات) اتفحصت جوا check_trend_stoch نفسها
+                        buy_signal  = True
+                        signal_info = (
+                            f"🚀 Trend+Stoch K: {trend_sig['k_prev']} → {trend_sig['k_curr']} | "
+                            f"D: {trend_sig['d_prev']} → {trend_sig['d_curr']} | ✅ اتجاه 4س صاعد + فوليوم قوي"
+                        )
+                        price     = trend_sig["price"]
+                        atr_value = trend_sig.get("atr")
 
                     else:
                         time.sleep(0.2)
@@ -2116,7 +2257,7 @@ def run_bot():
                                     f"{signal_info}\n"
                                     f"💵 السعر: {res['entry_price']}\n"
                                     f"🛡️ Stop Loss ({stop_method}): {sl_value}\n"
-                                    f"💼 صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES}"
+                                    f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}"
                                 )
                         else:
                             log.warning(f"⚠️ رصيد غير كافٍ: {usdt_balance:.2f} USDT")
