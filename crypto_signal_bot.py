@@ -27,6 +27,7 @@ from binance.exceptions import BinanceAPIException
 import ta
 from flask import Flask, request, jsonify, session, send_from_directory
 from functools import wraps
+from market_regime import MarketRegimeDetector
 
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات الأساسية — نفس الأصلي
@@ -207,6 +208,13 @@ pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقا
 _binance_client     = None   # 📊 مرجع لعميل بينانس، تستخدمه لوحة التحكم
 
 # ──────────────────────────────────────────────
+# 🧠 Market Regime Detector: تبديل تلقائي بين الاستراتيجيات حسب حالة السوق (اتجاه + تذبذب)
+# ──────────────────────────────────────────────
+AUTO_STRATEGY_ENABLED   = False   # 🔘 مطفي افتراضياً — لازم تفعّله يدوياً بأمر /set_auto_strategy on
+AUTO_STRATEGY_INTERVAL  = 15 * 60 # فحص كل 15 دقيقة
+_regime_detector        = None    # مرجع الكاشف (يُنشأ عند بدء تشغيل البوت)
+
+# ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
 logging.basicConfig(
@@ -323,6 +331,7 @@ def save_settings():
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global AUTO_STRATEGY_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -341,6 +350,7 @@ def save_settings():
                 "atr_period"       : ATR_PERIOD,
                 "atr_multiplier"   : ATR_MULTIPLIER,
                 "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
+                "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -350,6 +360,7 @@ def load_settings():
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global AUTO_STRATEGY_ENABLED
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -378,6 +389,7 @@ def load_settings():
         ATR_PERIOD          = s.get("atr_period", ATR_PERIOD)
         ATR_MULTIPLIER      = s.get("atr_multiplier", ATR_MULTIPLIER)
         TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
+        AUTO_STRATEGY_ENABLED = s.get("auto_strategy_enabled", AUTO_STRATEGY_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -589,6 +601,7 @@ def telegram_command_listener(client):
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global AUTO_STRATEGY_ENABLED
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -697,6 +710,7 @@ def telegram_command_listener(client):
                             strategy_label   = STRATEGY_LABELS.get(current_strategy, current_strategy)
                             interval_minutes = INTERVAL_TO_MINUTES.get(current_interval, 30)
                             ma20_status      = "✅ مفعّل" if ma20_enabled else "❌ مطفي"
+                            auto_status      = "🧠 تلقائي" if AUTO_STRATEGY_ENABLED else "✋ يدوي"
                         msg = (
                             f"📊 <b>حالة البوت</b>\n"
                             f"🔘 التداول: {status}\n"
@@ -704,7 +718,7 @@ def telegram_command_listener(client):
                             f"💼 صفقات نشطة: {active_count}/{MAX_TRADES} | إجمالي مفتوحة: {trades_count}\n"
                             f"👁️ يراقب: {len(SYMBOLS)} عملة\n"
                             f"🔍 مراقبة مكثفة: {len(watch_list)} عملة\n"
-                            f"📊 الاستراتيجية: {strategy_label}\n"
+                            f"📊 الاستراتيجية: {strategy_label} ({auto_status})\n"
                             f"🕯️ الفريم: {interval_minutes} دقيقة\n"
                             f"📈 MA20: {ma20_status}\n"
                         )
@@ -1007,15 +1021,55 @@ def telegram_command_listener(client):
                         if strategy in ("rsi", "stoch_rsi", "trend_stoch"):
                             with _lock:
                                 current_strategy = strategy
+                                auto_on = AUTO_STRATEGY_ENABLED
                             save_settings()
                             labels = {
                                 "rsi"        : "RSI العادي (ارتداد فوق 30)",
                                 "stoch_rsi"  : "Stochastic RSI (تقاطع K فوق D واختراق 20)",
                                 "trend_stoch": "Trend + StochRSI (تأكيد اتجاه 4 ساعات + فوليوم)",
                             }
-                            send_admin(f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}")
+                            msg = f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}"
+                            if auto_on:
+                                msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بالفحص الجاي حسب حالة السوق. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
+                            send_admin(msg)
                         else:
                             send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch")
+
+                    # ── /set_auto_strategy ─────────────────────
+                    elif text.startswith("/set_auto_strategy "):
+                        value = text.replace("/set_auto_strategy ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                AUTO_STRATEGY_ENABLED = (value == "on")
+                            save_settings()
+                            if value == "on":
+                                send_admin(
+                                    "✅ <b>تم تفعيل التبديل التلقائي بين الاستراتيجيات</b>\n"
+                                    "البوت رح يحلل حالة السوق (اتجاه + تذبذب) كل 15 دقيقة، "
+                                    "ويبدل الاستراتيجية تلقائياً لما يلزم، مع تنبيه فوري بكل تبديل."
+                                )
+                            else:
+                                send_admin("⏸️ تم إيقاف التبديل التلقائي — الاستراتيجية صارت يدوية بالكامل (/set_strategy).")
+                        else:
+                            send_admin("❌ مثال: /set_auto_strategy on  أو  /set_auto_strategy off")
+
+                    # ── /auto_strategy_status ──────────────────
+                    elif text == "/auto_strategy_status":
+                        with _lock:
+                            auto_on = AUTO_STRATEGY_ENABLED
+                            strategy_now = current_strategy
+                        status_txt = "✅ مفعّل" if auto_on else "⏸️ مطفي"
+                        msg = (
+                            f"🧠 <b>التبديل التلقائي بين الاستراتيجيات</b>\n\n"
+                            f"الحالة: {status_txt}\n"
+                            f"الاستراتيجية الحالية: {STRATEGY_LABELS.get(strategy_now, strategy_now)}\n\n"
+                            f"المنطق:\n"
+                            f"📈 ترند واضح (BTC فوق MA50 على 4س) → Trend+StochRSI\n"
+                            f"📊 جانبي + تذبذب عالٍ → Stochastic RSI\n"
+                            f"😴 جانبي + هادئ → RSI العادي\n\n"
+                            f"فحص كل 15 دقيقة، مع فترة تبريد 45 دقيقة بين كل تبديل وتاني."
+                        )
+                        send_admin(msg)
 
                     # ── /config ───────────────────────────────
                     elif text == "/config":
@@ -1033,9 +1087,11 @@ def telegram_command_listener(client):
                             atr_period_val   = ATR_PERIOD
                             atr_mult_val     = ATR_MULTIPLIER
                             trail_atr_val    = TRAIL_ATR_MULTIPLIER
+                            auto_strategy_status = "✅ مفعّل" if AUTO_STRATEGY_ENABLED else "❌ مطفي"
                         send_admin(
                             f"⚙️ <b>الإعدادات الحالية</b>\n\n"
                             f"📊 الاستراتيجية: {strategy_label}\n"
+                            f"🧠 التبديل التلقائي: {auto_strategy_status}\n"
                             f"🕯️ الفريم: {interval_minutes} دقيقة\n"
                             f"📈 MA20: {ma20_status}\n"
                             f"💰 حجم الصفقة: ${trade_amt}\n"
@@ -1101,6 +1157,10 @@ def telegram_command_listener(client):
                             "/set_strategy rsi — شراء عند ارتداد RSI فوق 30\n"
                             "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n"
                             "/set_strategy trend_stoch — StochRSI + فوليوم قوي + تأكيد اتجاه صاعد على فريم 4 ساعات\n\n"
+                            "<b>🧠 التبديل التلقائي بين الاستراتيجيات:</b>\n"
+                            "/set_auto_strategy on — تفعيل التبديل التلقائي حسب حالة السوق\n"
+                            "/set_auto_strategy off — إيقافه (يرجع كل شي يدوي)\n"
+                            "/auto_strategy_status — عرض الحالة والمنطق الحالي\n\n"
                             "<b>المؤشرات:</b>\n"
                             "/enable_ma20 — تشغيل فيلتر MA20 (مستقل عن الاستراتيجية)\n"
                             "/disable_ma20 — تعطيل فيلتر MA20\n\n"
@@ -1678,6 +1738,9 @@ def api_status():
         "symbols_count": len(SYMBOLS),
         "win_rate": win_rate,
         "total_pnl": total_pnl,
+        "strategy": current_strategy,
+        "strategy_label": STRATEGY_LABELS.get(current_strategy, current_strategy),
+        "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
     })
 
 
@@ -1740,6 +1803,7 @@ def api_get_settings():
             "rsi_enabled": current_strategy == "rsi",
             "stochastic_enabled": current_strategy == "stoch_rsi",
             "trend_stoch_enabled": current_strategy == "trend_stoch",
+            "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
             "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
@@ -1758,6 +1822,7 @@ def api_set_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global AUTO_STRATEGY_ENABLED
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -1801,6 +1866,9 @@ def api_set_settings():
             current_strategy = "stoch_rsi"
         if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
             current_strategy = "trend_stoch"
+
+        if "auto_strategy_enabled" in data:
+            AUTO_STRATEGY_ENABLED = bool(data["auto_strategy_enabled"])
         if "stop_loss_pct" in data:
             v = float(data["stop_loss_pct"]) / 100
             if v > 0: STOP_LOSS_PCT = v
@@ -1953,7 +2021,8 @@ def start_dashboard():
 # ──────────────────────────────────────────────
 def run_bot():
     global consecutive_losses, pause_until, trading_enabled
-    global _binance_client
+    global _binance_client, _regime_detector
+    global current_strategy
 
     os.makedirs(DATA_DIR, exist_ok=True)   # 📁 تأكد إن مجلد البيانات (Volume) موجود
     log.info(f"📁 مجلد البيانات: {DATA_DIR}")
@@ -1966,6 +2035,9 @@ def run_bot():
     load_trades()
     load_circuit_state()   # 🛑 استرجاع حالة التوقف التلقائي لو موجودة
     load_settings()        # ⚙️ استرجاع الإعدادات المحفوظة (حجم الصفقة، الاستراتيجية، ...) لو موجودة
+
+    # 🧠 إنشاء كاشف حالة السوق (يُستخدم فقط لو AUTO_STRATEGY_ENABLED مفعّل)
+    _regime_detector = MarketRegimeDetector(client, cooldown_minutes=45)
 
     try:
         log.info("🔍 جاري مطابقة وتصفية القائمة مع أسواق الـ Spot الرسمية...")
@@ -1991,6 +2063,7 @@ def run_bot():
 
     last_heartbeat = time.time()
     last_scan      = 0
+    last_regime_check = 0
 
     log.info(f"🚀 البوت انطلق | {len(SYMBOLS)} عملة | {len(open_trades)} صفقة محملة")
     send_telegram(
@@ -2024,6 +2097,26 @@ def run_bot():
                 save_circuit_state()
                 log.info("✅ انتهت فترة التوقف التلقائي — استئناف التداول")
                 send_telegram("✅ <b>انتهت فترة التوقف التلقائي</b>\nتم استئناف التداول بشكل تلقائي.")
+
+            # 🧠 فحص حالة السوق وتبديل الاستراتيجية تلقائياً (لو مفعّل)
+            with _lock:
+                auto_on = AUTO_STRATEGY_ENABLED
+            if auto_on and _regime_detector and (now - last_regime_check >= AUTO_STRATEGY_INTERVAL):
+                last_regime_check = now
+                try:
+                    new_strategy, reason, switched = _regime_detector.check()
+                    if switched and new_strategy:
+                        with _lock:
+                            current_strategy = new_strategy
+                        save_settings()
+                        log.info(f"🧠 تبديل تلقائي → {new_strategy} | {reason}")
+                        send_telegram(
+                            f"🔄 <b>تبديل تلقائي للاستراتيجية</b>\n"
+                            f"➡️ {STRATEGY_LABELS.get(new_strategy, new_strategy)}\n"
+                            f"📋 السبب: {reason}"
+                        )
+                except Exception as e:
+                    log.error(f"❌ خطأ فحص حالة السوق: {e}")
 
             # ── Heartbeat كل ساعة ─────────
             if now - last_heartbeat >= HEARTBEAT_INTERVAL:
