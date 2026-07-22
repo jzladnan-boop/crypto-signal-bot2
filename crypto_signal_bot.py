@@ -1022,6 +1022,11 @@ def telegram_command_listener(client):
                             with _lock:
                                 current_strategy = strategy
                                 auto_on = AUTO_STRATEGY_ENABLED
+                            # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع الاختيار اليدوي، وإلا يضل تايه
+                            # عن الواقع ويتوقف عن التبديل الفعلي (يظهر "متجمد")
+                            if _regime_detector:
+                                _regime_detector.current_strategy = strategy
+                                _regime_detector.last_switch_time = time.time()
                             save_settings()
                             labels = {
                                 "rsi"        : "RSI العادي (ارتداد فوق 30)",
@@ -1030,7 +1035,7 @@ def telegram_command_listener(client):
                             }
                             msg = f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}"
                             if auto_on:
-                                msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بالفحص الجاي حسب حالة السوق. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
+                                msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بعد فترة التبريد (45 دقيقة) لو حالة السوق تغيّرت. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
                             send_admin(msg)
                         else:
                             send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch")
@@ -1041,8 +1046,15 @@ def telegram_command_listener(client):
                         if value in ("on", "off"):
                             with _lock:
                                 AUTO_STRATEGY_ENABLED = (value == "on")
+                                strategy_now = current_strategy
                             save_settings()
                             if value == "on":
+                                # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع الاستراتيجية الحالية الفعلية
+                                # وقت التفعيل (ممكن تكون تغيّرت يدوياً وقت ما كان التبديل مطفي)،
+                                # ونبدأ فترة تبريد جديدة من هاللحظة عشان نعطي فرصة للاختيار الحالي.
+                                if _regime_detector:
+                                    _regime_detector.current_strategy = strategy_now
+                                    _regime_detector.last_switch_time = time.time()
                                 send_admin(
                                     "✅ <b>تم تفعيل التبديل التلقائي بين الاستراتيجيات</b>\n"
                                     "البوت رح يحلل حالة السوق (اتجاه + تذبذب) كل 15 دقيقة، "
@@ -1867,8 +1879,18 @@ def api_set_settings():
         if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
             current_strategy = "trend_stoch"
 
+        # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
+        if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled")):
+            if _regime_detector:
+                _regime_detector.current_strategy = current_strategy
+                _regime_detector.last_switch_time = time.time()
+
         if "auto_strategy_enabled" in data:
             AUTO_STRATEGY_ENABLED = bool(data["auto_strategy_enabled"])
+            if AUTO_STRATEGY_ENABLED and _regime_detector:
+                # ✅ إصلاح خلل: نزامن الكاشف مع الاستراتيجية الحالية وقت التفعيل من التطبيق
+                _regime_detector.current_strategy = current_strategy
+                _regime_detector.last_switch_time = time.time()
         if "stop_loss_pct" in data:
             v = float(data["stop_loss_pct"]) / 100
             if v > 0: STOP_LOSS_PCT = v
@@ -2130,242 +2152,4 @@ def run_bot():
                     f"💚 <b>البوت شغال</b>\n"
                     f"🔘 التداول: {status}\n"
                     f"💰 رصيد USDT: ${usdt_balance:.2f}\n"
-                    f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}\n"
-                    f"👁️ يراقب {len(SYMBOLS)} عملة"
-                )
-                last_heartbeat = now
-
-            # ── 1. إدارة الصفقات المفتوحة ──
-            # ✅ إصلاح: جلب كل الأسعار بطلب واحد مجمّع (get_all_tickers) بدل طلب سعر
-            # كل عملة لحالها بحلقة — هذا يقلل استهلاك وزن الـ API بشكل كبير ويحمي من -1003
-            open_symbols_now = list(open_trades.keys())
-            prices_map        = get_all_prices(client, open_symbols_now) if open_symbols_now else {}
-
-            for symbol in open_symbols_now:
-                if symbol not in open_trades:
-                    continue
-                trade = open_trades[symbol]
-                try:
-                    price = prices_map.get(symbol)
-                    if not price:
-                        # احتياط: لو ما رجع بالطلب المجمّع لأي سبب، نطلبه لحاله كحل أخير
-                        price = get_current_price(client, symbol)
-                    if not price:
-                        continue
-                    coin  = symbol.replace("USDT", "")
-
-                    if not trade["trailing_active"]:
-                        if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
-                            trade["trailing_active"] = True
-                            trade["highest_price"]   = price
-                            # ✅ إصلاح: حماية Breakeven — أول ما الصفقة تدخل بربح، الستوب
-                            # لا يمكن أبداً أن ينزل تحت سعر الدخول، حتى لو مسافة الـ Trailing
-                            # (ATR أو النسبة الثابتة) كانت أوسع من نقطة التفعيل نفسها.
-                            trade["stop_loss"]       = max(compute_trail_stop(price, trade), trade["entry_price"])
-                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']} (محمي عند الدخول كحد أدنى)")
-                            save_trades()
-
-                    if trade["trailing_active"]:
-                        if price > trade["highest_price"]:
-                            trade["highest_price"] = price
-                            # ✅ نفس الحماية: الستوب بعد التفعيل ما ينزل تحت سعر الدخول أبداً
-                            trade["stop_loss"]     = max(compute_trail_stop(price, trade), trade["entry_price"])
-                            save_trades()
-                        elif price <= trade["stop_loss"]:
-                            sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
-                            if sell_price:
-                                # ✅ إصلاح: الربح ومبلغ الشراء/البيع محسوبين على الكمية الفعلية المُنفَّذة
-                                # (sold_qty) بدل الكمية المسجلة بالذاكرة، عشان تطابق بينانس تمامًا
-                                profit      = round((sell_price - trade["entry_price"]) * sold_qty, 4)
-                                buy_amount  = round(trade["entry_price"] * sold_qty, 4)
-                                sell_amount = round(sell_price * sold_qty, 4)
-                                pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
-                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "trailing_stop")  # ✅ إصلاح #3
-                                consecutive_losses = 0   # 🛑 صفقة رابحة → تصفير عدّاد الخسارات المتتالية
-                                save_circuit_state()
-                                send_telegram(
-                                    f"💰 <b>جني أرباح - {coin}</b>\n"
-                                    f"💵 دخول: {trade['entry_price']:.6f}$ → خروج: {sell_price:.6f}$\n"
-                                    f"🧾 مبلغ الشراء: {buy_amount:.4f} USDT → مبلغ البيع: {sell_amount:.4f} USDT\n"
-                                    f"📊 النسبة: {pct:+.2f}%\n"
-                                    f"💹 PnL: {profit:+.4f} USDT"
-                                )
-                                del open_trades[symbol]
-                                save_trades()
-                                continue
-                    else:
-                        # ✅ إصلاح خلل: نستخدم trade["stop_loss"] المحفوظ فعلياً وقت الشراء
-                        # (المبني على ATR أو الاحتياطي الثابت)، بدل إعادة حسابه من الصفر بالنسبة الثابتة
-                        # في كل دورة — كان هذا يلغي فائدة ATR قبل تفعيل Trailing.
-                        if price <= trade["stop_loss"]:
-                            sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
-                            if sell_price:
-                                # ✅ إصلاح: الخسارة ومبلغ الشراء/البيع محسوبين على الكمية الفعلية المُنفَّذة
-                                # (sold_qty) بدل الكمية المسجلة بالذاكرة، عشان تطابق بينانس تمامًا
-                                loss        = round((sell_price - trade["entry_price"]) * sold_qty, 4)
-                                buy_amount  = round(trade["entry_price"] * sold_qty, 4)
-                                sell_amount = round(sell_price * sold_qty, 4)
-                                pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
-                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "stop_loss")  # ✅ إصلاح #3
-                                send_telegram(
-                                    f"🚨 <b>ستوب لوز - {coin}</b>\n"
-                                    f"📉 السعر: {sell_price:.6f}$\n"
-                                    f"🧾 مبلغ الشراء: {buy_amount:.4f} USDT → مبلغ البيع: {sell_amount:.4f} USDT\n"
-                                    f"📊 النسبة: {pct:+.2f}%\n"
-                                    f"💸 خسارة: {loss:.4f} USDT"
-                                )
-
-                                # 🛑 Circuit Breaker: عدّ الخسارات المتتالية
-                                consecutive_losses += 1
-                                save_circuit_state()
-                                if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-                                    with _lock:
-                                        trading_enabled = False
-                                        pause_until     = time.time() + PAUSE_DURATION_SECONDS
-                                    consecutive_losses = 0
-                                    save_circuit_state()
-                                    log.warning(f"🛑 توقف تلقائي: {MAX_CONSECUTIVE_LOSSES} ستوب لوز متتالية — توقف لمدة {PAUSE_DURATION_SECONDS//3600} ساعة")
-                                    send_telegram(
-                                        f"🛑 <b>توقف تلقائي للتداول!</b>\n"
-                                        f"⚠️ {MAX_CONSECUTIVE_LOSSES} صفقات ستوب لوز متتالية\n"
-                                        f"⏸️ التداول متوقف لمدة {PAUSE_DURATION_SECONDS//3600} ساعة\n"
-                                        f"✅ سيُستأنف تلقائيًا، أو اكتب /start لاستئنافه يدويًا"
-                                    )
-
-                                del open_trades[symbol]
-                                save_trades()
-                                continue
-
-                except Exception as e:
-                    log.error(f"❌ إدارة {symbol}: {e}")
-
-            # ── 2. فحص خفيف لكل العملات ──────
-            if now - last_scan >= SCAN_INTERVAL:
-                scan_all_symbols(client)
-                last_scan = now
-
-            # ── 3. فحص مكثف للمرشحين ───
-            with _lock:
-                is_trading = trading_enabled
-
-            if watch_list and is_trading and count_active_trades() < MAX_TRADES and not is_api_blocked():
-                for symbol in list(watch_list):
-                    if is_api_blocked():
-                        log.warning("🚦 تم اكتشاف حظر أثناء الفحص المكثف — إيقاف باقي الدورة الحالية")
-                        break
-                    if symbol in open_trades:
-                        watch_list.discard(symbol)
-                        continue
-                    if count_active_trades() >= MAX_TRADES:
-                        break
-
-                    with _lock:
-                        ma20_on  = ma20_enabled
-                        strategy = current_strategy
-
-                    # ── استراتيجية RSI العادي ──────────────────
-                    if strategy == "rsi":
-                        ind = get_indicators(client, symbol)
-                        if not ind:
-                            continue
-                        ma20_condition = (ind["price"] > ind["ma20"]) if ma20_on else True
-                        buy_signal     = ind["rsi_prev"] < RSI_BUY_PREV and ind["rsi"] >= RSI_BUY_CURR and ma20_condition
-                        signal_info    = f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}" if buy_signal else None
-                        price          = ind["price"] if buy_signal else None
-                        atr_value      = ind.get("atr") if buy_signal else None
-
-                    # ── استراتيجية Stochastic RSI ──────────────
-                    elif strategy == "stoch_rsi":
-                        stoch = check_stoch_rsi(client, symbol)
-                        if not stoch:
-                            time.sleep(0.2)
-                            continue
-                        ma20_condition = (stoch["price"] > stoch["ma20"]) if ma20_on else True
-                        buy_signal     = ma20_condition
-                        signal_info    = (
-                            f"📊 Stoch K: {stoch['k_prev']} → {stoch['k_curr']} | D: {stoch['d_prev']} → {stoch['d_curr']}"
-                        ) if buy_signal else None
-                        price     = stoch["price"] if buy_signal else None
-                        atr_value = stoch.get("atr") if buy_signal else None
-
-                    # ── استراتيجية Trend + StochRSI ─────────────
-                    elif strategy == "trend_stoch":
-                        trend_sig = check_trend_stoch(client, symbol)
-                        if not trend_sig:
-                            time.sleep(0.2)
-                            continue
-                        # كل الشروط (StochRSI + فوليوم + اتجاه 4 ساعات) اتفحصت جوا check_trend_stoch نفسها
-                        buy_signal  = True
-                        signal_info = (
-                            f"🚀 Trend+Stoch K: {trend_sig['k_prev']} → {trend_sig['k_curr']} | "
-                            f"D: {trend_sig['d_prev']} → {trend_sig['d_curr']} | ✅ اتجاه 4س صاعد + فوليوم قوي"
-                        )
-                        price     = trend_sig["price"]
-                        atr_value = trend_sig.get("atr")
-
-                    else:
-                        time.sleep(0.2)
-                        continue
-
-                    if buy_signal:
-                        try:
-                            usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
-                        except Exception as e:
-                            log.error(f"❌ رصيد USDT: {e}")
-                            continue
-
-                        if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):   # ✅ RESERVE_USDT = 0.0 الآن، أي بدون احتياطي جانبي
-                            res = buy_market(client, symbol, TRADE_AMOUNT)
-                            if res:
-                                res["trailing_active"] = False
-                                res["highest_price"]   = res["entry_price"]
-
-                                # 📐 ستوب لوس متحرك حسب ATR (تقلب العملة الطبيعي)، مع احتياطي بنسبة ثابتة
-                                stop_price   = None
-                                used_atr     = None
-                                if atr_value:
-                                    with _lock:
-                                        multiplier = ATR_MULTIPLIER
-                                    candidate = res["entry_price"] - (multiplier * atr_value)
-                                    # حماية: ما نسمح بستوب أوسع من 15% ولا أضيق من 0.3% من سعر الدخول
-                                    min_price = res["entry_price"] * 0.997
-                                    max_price = res["entry_price"] * 0.85
-                                    if max_price < candidate < min_price:
-                                        stop_price = candidate
-                                        used_atr   = atr_value   # نخزنه بالصفقة عشان نعيد استخدامه بالـ Trailing لاحقاً
-                                if stop_price is None:
-                                    stop_price = res["entry_price"] * (1 - STOP_LOSS_PCT)   # احتياطي
-
-                                res["stop_loss"] = round(stop_price, 8)
-                                res["atr"]       = used_atr   # None لو استخدمنا الاحتياطي الثابت
-                                open_trades[symbol]    = res
-                                save_trades()
-                                watch_list.discard(symbol)
-
-                                coin_name   = symbol.replace("USDT", "")
-                                sl_value    = res["stop_loss"]
-                                stop_method = "ATR" if used_atr else "ثابت"
-                                send_telegram(
-                                    f"🟢 <b>شراء {coin_name}</b>\n"
-                                    f"{signal_info}\n"
-                                    f"💵 السعر: {res['entry_price']}\n"
-                                    f"🛡️ Stop Loss ({stop_method}): {sl_value}\n"
-                                    f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}"
-                                )
-                        else:
-                            log.warning(f"⚠️ رصيد غير كافٍ: {usdt_balance:.2f} USDT")
-
-                    time.sleep(0.2)
-
-        except BinanceAPIException as e:
-            if is_rate_limit_error(e):
-                register_api_block("run_bot main loop")
-            log.error(f"❌ بينانس: {e.status_code} | {e.message}")
-            send_admin(f"خطأ بينانس: {e.status_code} | {e.message}")
-        except Exception as e:
-            log.error(f"❌ خطأ عام: {e}")
-
-        time.sleep(WATCH_INTERVAL)
-
-if __name__ == "__main__":
-    run_bot()
+                    f"💼 صفقات نشطة: {count_active_t
