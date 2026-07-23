@@ -28,6 +28,8 @@ import ta
 from flask import Flask, request, jsonify, session, send_from_directory
 from functools import wraps
 from market_regime import MarketRegimeDetector
+from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config
+from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score
 
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات الأساسية — نفس الأصلي
@@ -202,6 +204,7 @@ STRATEGY_LABELS = {
     "rsi"        : "RSI العادي",
     "stoch_rsi"  : "Stochastic RSI",
     "trend_stoch": "Trend + StochRSI",
+    "inverse_btc": "Inverse BTC 🔄",
 }
 consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
 pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
@@ -213,6 +216,25 @@ _binance_client     = None   # 📊 مرجع لعميل بينانس، تستخ�
 AUTO_STRATEGY_ENABLED   = False   # 🔘 مطفي افتراضياً — لازم تفعّله يدوياً بأمر /set_auto_strategy on
 AUTO_STRATEGY_INTERVAL  = 15 * 60 # فحص كل 15 دقيقة
 _regime_detector        = None    # مرجع الكاشف (يُنشأ عند بدء تشغيل البوت)
+
+# ──────────────────────────────────────────────
+# 📐 فلاتر تأكيد إضافية: VWAP + Bollinger Bands (اختيارية، مطفية افتراضياً)
+# ──────────────────────────────────────────────
+VWAP_FILTER_ENABLED = False   # لو مفعّل: نشتري بس لو السعر فوق VWAP (تأكيد قوة شراء حقيقية)
+BB_FILTER_ENABLED   = False   # لو مفعّل: نشتري بس لو السعر قريب من الحد السفلي لبولينجر (ارتداد حقيقي من قاع)
+BB_LOWER_MARGIN_PCT = 0.01    # هامش القرب المسموح من الحد السفلي (1% فوقه يُعتبر "قريب كفاية")
+
+# ──────────────────────────────────────────────
+# 🔄 إعدادات Inverse BTC (قابلة للتعديل من التطبيق)
+# ──────────────────────────────────────────────
+INVERSE_BTC_ENABLED = False   # 🔘 مطفي افتراضياً — تفعّله من التطبيق أو تيليغرام
+INVERSE_BTC_CONFIG = {
+    "btc_decline_threshold_pct": 3.0,   # BTC لازم ينزل 3% على الأقل
+    "rs_min_threshold_pct": 5.0,        # العملة أقوى من BTC بـ 5%
+    "rsi_max_for_entry": 40,            # RSI تحت 40
+    "stoch_k_max_for_entry": 30,        # Stoch K تحت 30
+    "min_volume_ratio": 1.2,            # فوليوم 1.2× المتوسط
+}
 
 # ──────────────────────────────────────────────
 # Logging
@@ -332,6 +354,7 @@ def save_settings():
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
+    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -351,6 +374,10 @@ def save_settings():
                 "atr_multiplier"   : ATR_MULTIPLIER,
                 "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
                 "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
+                "vwap_filter_enabled": VWAP_FILTER_ENABLED,
+                "bb_filter_enabled"  : BB_FILTER_ENABLED,
+                "inverse_btc_enabled": INVERSE_BTC_ENABLED,
+                "inverse_btc_config" : INVERSE_BTC_CONFIG,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -361,6 +388,7 @@ def load_settings():
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
+    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -390,6 +418,13 @@ def load_settings():
         ATR_MULTIPLIER      = s.get("atr_multiplier", ATR_MULTIPLIER)
         TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
         AUTO_STRATEGY_ENABLED = s.get("auto_strategy_enabled", AUTO_STRATEGY_ENABLED)
+        VWAP_FILTER_ENABLED = s.get("vwap_filter_enabled", VWAP_FILTER_ENABLED)
+        BB_FILTER_ENABLED   = s.get("bb_filter_enabled", BB_FILTER_ENABLED)
+        INVERSE_BTC_ENABLED = s.get("inverse_btc_enabled", INVERSE_BTC_ENABLED)
+        loaded_inv_config = s.get("inverse_btc_config")
+        if loaded_inv_config:
+            INVERSE_BTC_CONFIG.update(loaded_inv_config)
+            set_inverse_config(**loaded_inv_config)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -602,6 +637,7 @@ def telegram_command_listener(client):
     global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
+    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -862,6 +898,94 @@ def telegram_command_listener(client):
                         except:
                             send_admin("❌ مثال: /set_trail_atr_multiplier 1.5")
 
+                    # ── /set_vwap_filter ────────────────────────
+                    elif text.startswith("/set_vwap_filter "):
+                        value = text.replace("/set_vwap_filter ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                VWAP_FILTER_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّل" if VWAP_FILTER_ENABLED else "❌ مطفي"
+                            send_admin(f"{status_txt} فلتر VWAP — الشراء هلق يشترط السعر فوق VWAP" if VWAP_FILTER_ENABLED else "❌ تم إطفاء فلتر VWAP")
+                        else:
+                            send_admin("❌ مثال: /set_vwap_filter on  أو  /set_vwap_filter off")
+
+                    # ── /set_bb_filter ──────────────────────────
+                    elif text.startswith("/set_bb_filter "):
+                        value = text.replace("/set_bb_filter ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                BB_FILTER_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّل" if BB_FILTER_ENABLED else "❌ مطفي"
+                            send_admin(f"{status_txt} فلتر Bollinger Bands — الشراء هلق يشترط قرب السعر من الحد السفلي" if BB_FILTER_ENABLED else "❌ تم إطفاء فلتر Bollinger Bands")
+                        else:
+                            send_admin("❌ مثال: /set_bb_filter on  أو  /set_bb_filter off")
+
+                    # ── /filters_status ──────────────────────────
+                    elif text == "/filters_status":
+                        with _lock:
+                            vwap_status = "✅ مفعّل" if VWAP_FILTER_ENABLED else "❌ مطفي"
+                            bb_status   = "✅ مفعّل" if BB_FILTER_ENABLED else "❌ مطفي"
+                        send_admin(
+                            f"📐 <b>فلاتر التأكيد الإضافية</b>\n\n"
+                            f"VWAP: {vwap_status}\n"
+                            f"↳ لو مفعّل: نشتري بس لو السعر فوق VWAP (تأكيد قوة شراء حقيقية بالحجم)\n\n"
+                            f"Bollinger Bands: {bb_status}\n"
+                            f"↳ لو مفعّل: نشتري بس لو السعر قريب من الحد السفلي (ارتداد حقيقي من قاع، مو نزول مستمر)\n\n"
+                            f"🏆 ترتيب الزخم (Momentum Score): شغال دائماً — لو فيه أكثر من مرشح شراء بنفس دورة الفحص، "
+                            f"البوت يشتري الأقوى أولاً (فوليوم أعلى + حركة سعر أوضح)."
+                        )
+
+                    # ── /set_inverse_btc ─────────────────────────
+                    elif text.startswith("/set_inverse_btc "):
+                        value = text.replace("/set_inverse_btc ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                INVERSE_BTC_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّل" if INVERSE_BTC_ENABLED else "❌ مطفي"
+                            send_admin(f"{status_txt} استراتيجية Inverse BTC")
+                        else:
+                            send_admin("❌ مثال: /set_inverse_btc on  أو  /set_inverse_btc off")
+
+                    # ── /set_inverse_config ──────────────────────
+                    elif text.startswith("/set_inverse_config "):
+                        try:
+                            parts = text.replace("/set_inverse_config ", "").strip().split()
+                            key = parts[0]
+                            val = float(parts[1])
+                            valid_keys = ["btc_decline_threshold_pct", "rs_min_threshold_pct", "rsi_max_for_entry", "stoch_k_max_for_entry", "min_volume_ratio"]
+                            if key not in valid_keys:
+                                send_admin(f"❌ المفتاح غير صحيح. الصح: {', '.join(valid_keys)}")
+                            else:
+                                with _lock:
+                                    INVERSE_BTC_CONFIG[key] = val
+                                    set_inverse_config(**{key: val})
+                                save_settings()
+                                send_admin(f"✅ Inverse BTC — {key} = {val}")
+                        except Exception as e:
+                            send_admin(f"❌ خطأ: {e}\nمثال: /set_inverse_config btc_decline_threshold_pct 3.0")
+
+                    # ── /inverse_status ──────────────────────────
+                    elif text == "/inverse_status":
+                        with _lock:
+                            enabled = INVERSE_BTC_ENABLED
+                            cfg = dict(INVERSE_BTC_CONFIG)
+                        status_txt = "✅ مفعّل" if enabled else "❌ مطفي"
+                        send_admin(
+                            f"🔄 <b>Inverse BTC</b>\n\n"
+                            f"الحالة: {status_txt}\n\n"
+                            f"الإعدادات:\n"
+                            f"📉 حد نزول BTC: {cfg['btc_decline_threshold_pct']}%\n"
+                            f"💪 قوة نسبية min: {cfg['rs_min_threshold_pct']}%\n"
+                            f"📊 RSI max: {cfg['rsi_max_for_entry']}\n"
+                            f"📈 Stoch K max: {cfg['stoch_k_max_for_entry']}\n"
+                            f"🔊 فوليوم min: {cfg['min_volume_ratio']}×\n\n"
+                            f"المنطق: لما BTC ينزل {cfg['btc_decline_threshold_pct']}% أو أكثر، "
+                            f"البوت يبحث عن عملات أقوى من BTC بـ {cfg['rs_min_threshold_pct']}% على الأقل."
+                        )
+
                     # ── /atr_status ─────────────────────────────
                     elif text == "/atr_status":
                         with _lock:
@@ -1018,7 +1142,7 @@ def telegram_command_listener(client):
                     # ── /set_strategy ─────────────────────────
                     elif text.startswith("/set_strategy "):
                         strategy = text.replace("/set_strategy ", "").strip().lower()
-                        if strategy in ("rsi", "stoch_rsi", "trend_stoch"):
+                        if strategy in ("rsi", "stoch_rsi", "trend_stoch", "inverse_btc"):
                             with _lock:
                                 current_strategy = strategy
                                 auto_on = AUTO_STRATEGY_ENABLED
@@ -1032,13 +1156,14 @@ def telegram_command_listener(client):
                                 "rsi"        : "RSI العادي (ارتداد فوق 30)",
                                 "stoch_rsi"  : "Stochastic RSI (تقاطع K فوق D واختراق 20)",
                                 "trend_stoch": "Trend + StochRSI (تأكيد اتجاه 4 ساعات + فوليوم)",
+                                "inverse_btc": "Inverse BTC (شراء العملات اللي بتقاوم نزول BTC)",
                             }
                             msg = f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}"
                             if auto_on:
                                 msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بعد فترة التبريد (45 دقيقة) لو حالة السوق تغيّرت. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
                             send_admin(msg)
                         else:
-                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch")
+                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch\n/set_strategy inverse_btc")
 
                     # ── /set_auto_strategy ─────────────────────
                     elif text.startswith("/set_auto_strategy "):
@@ -1100,6 +1225,10 @@ def telegram_command_listener(client):
                             atr_mult_val     = ATR_MULTIPLIER
                             trail_atr_val    = TRAIL_ATR_MULTIPLIER
                             auto_strategy_status = "✅ مفعّل" if AUTO_STRATEGY_ENABLED else "❌ مطفي"
+                            vwap_status_cfg  = "✅" if VWAP_FILTER_ENABLED else "❌"
+                            bb_status_cfg    = "✅" if BB_FILTER_ENABLED else "❌"
+                            inv_status_cfg   = "✅" if INVERSE_BTC_ENABLED else "❌"
+                            inv_cfg = dict(INVERSE_BTC_CONFIG)
                         send_admin(
                             f"⚙️ <b>الإعدادات الحالية</b>\n\n"
                             f"📊 الاستراتيجية: {strategy_label}\n"
@@ -1112,7 +1241,9 @@ def telegram_command_listener(client):
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
                             f"🔍 مساحة Trailing الاحتياطية: {trail}%\n"
                             f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}\n"
-                            f"📐 ATR: فترة {atr_period_val} شمعة | مضاعف الستوب {atr_mult_val}x | مضاعف Trailing {trail_atr_val}x"
+                            f"📐 ATR: فترة {atr_period_val} شمعة | مضاعف الستوب {atr_mult_val}x | مضاعف Trailing {trail_atr_val}x\n"
+                            f"📊 فلاتر تأكيد: VWAP {vwap_status_cfg} | Bollinger {bb_status_cfg}\n"
+                            f"🔄 Inverse BTC: {inv_status_cfg} | نزول BTC: {inv_cfg['btc_decline_threshold_pct']}% | قوة نسبية: {inv_cfg['rs_min_threshold_pct']}%"
                         )
 
                     # ── /push_status ──────────────────────────
@@ -1173,6 +1304,19 @@ def telegram_command_listener(client):
                             "/set_auto_strategy on — تفعيل التبديل التلقائي حسب حالة السوق\n"
                             "/set_auto_strategy off — إيقافه (يرجع كل شي يدوي)\n"
                             "/auto_strategy_status — عرض الحالة والمنطق الحالي\n\n"
+                            "<b>🔄 Inverse BTC:</b>\n"
+                            "/set_strategy inverse_btc — تفعيل استراتيجية عكس BTC\n"
+                            "/set_inverse_btc on — تفعيل/إطفاء الاستراتيجية\n"
+                            "/set_inverse_config btc_decline_threshold_pct 3.0 — تعديل حد نزول BTC\n"
+                            "/set_inverse_config rs_min_threshold_pct 5.0 — تعديل الحد الأدنى للقوة النسبية\n"
+                            "/set_inverse_config rsi_max_for_entry 40 — تعديل حد RSI\n"
+                            "/set_inverse_config stoch_k_max_for_entry 30 — تعديل حد Stoch K\n"
+                            "/set_inverse_config min_volume_ratio 1.2 — تعديل حد الفوليوم\n"
+                            "/inverse_status — عرض إعدادات Inverse BTC\n\n"
+                            "<b>📐 فلاتر تأكيد إضافية:</b>\n"
+                            "/set_vwap_filter on — الشراء يشترط السعر فوق VWAP\n"
+                            "/set_bb_filter on — الشراء يشترط قرب السعر من حد بولينجر السفلي\n"
+                            "/filters_status — عرض حالة الفلاتر وشرح ترتيب الزخم\n\n"
                             "<b>المؤشرات:</b>\n"
                             "/enable_ma20 — تشغيل فيلتر MA20 (مستقل عن الاستراتيجية)\n"
                             "/disable_ma20 — تعطيل فيلتر MA20\n\n"
@@ -1292,19 +1436,25 @@ def calculate_atr(highs, lows, closes):
 
 def get_indicators(client, symbol):
     try:
-        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
-        closes = pd.Series([float(k[4]) for k in klines])
-        highs  = pd.Series([float(k[2]) for k in klines])
-        lows   = pd.Series([float(k[3]) for k in klines])
-        rsi    = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
-        ma20   = closes.rolling(window=MA_PERIOD).mean().iloc[-1]
-        price  = float(closes.iloc[-1])   # من الـ klines مباشرة، بدون طلب API ثاني
+        klines  = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
+        closes  = pd.Series([float(k[4]) for k in klines])
+        highs   = pd.Series([float(k[2]) for k in klines])
+        lows    = pd.Series([float(k[3]) for k in klines])
+        volumes = pd.Series([float(k[5]) for k in klines])
+        rsi     = ta.momentum.RSIIndicator(close=closes, window=RSI_PERIOD).rsi()
+        ma20    = closes.rolling(window=MA_PERIOD).mean().iloc[-1]
+        price   = float(closes.iloc[-1])   # من الـ klines مباشرة، بدون طلب API ثاني
+        vwap_value = calculate_vwap(highs, lows, closes, volumes)
+        bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
             "price"   : price,
             "ma20"    : round(ma20, 8),
             "atr"     : calculate_atr(highs, lows, closes),
+            "vwap"    : vwap_value,
+            "bb_lower": bb_lower,
+            "momentum_score": calculate_momentum_score(closes, volumes),
         }
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
@@ -1328,10 +1478,11 @@ def check_stoch_rsi(client, symbol):
     يعيد dict بالقيم أو None لو مافي إشارة
     """
     try:
-        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
-        closes = pd.Series([float(k[4]) for k in klines])
-        highs  = pd.Series([float(k[2]) for k in klines])
-        lows   = pd.Series([float(k[3]) for k in klines])
+        klines  = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
+        closes  = pd.Series([float(k[4]) for k in klines])
+        highs   = pd.Series([float(k[2]) for k in klines])
+        lows    = pd.Series([float(k[3]) for k in klines])
+        volumes = pd.Series([float(k[5]) for k in klines])
 
         # حساب Stochastic RSI بالإعدادات الافتراضية: period=14, K=3, D=3
         stoch  = ta.momentum.StochRSIIndicator(close=closes, window=14, smooth1=3, smooth2=3)
@@ -1354,6 +1505,7 @@ def check_stoch_rsi(client, symbol):
         )
 
         if signal:
+            bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
             return {
                 "k_curr": k_curr,
                 "k_prev": k_prev,
@@ -1362,6 +1514,9 @@ def check_stoch_rsi(client, symbol):
                 "price" : price,
                 "ma20"  : ma20,
                 "atr"   : calculate_atr(highs, lows, closes),
+                "vwap"    : calculate_vwap(highs, lows, closes, volumes),
+                "bb_lower": bb_lower,
+                "momentum_score": calculate_momentum_score(closes, volumes),
             }
         return None
     except BinanceAPIException as e:
@@ -1447,6 +1602,7 @@ def check_trend_stoch(client, symbol):
         if not get_trend_confirmation(client, symbol):
             return None
 
+        bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
         return {
             "k_curr": k_curr,
             "k_prev": k_prev,
@@ -1455,6 +1611,9 @@ def check_trend_stoch(client, symbol):
             "price" : price,
             "ma20"  : ma20,
             "atr"   : calculate_atr(highs, lows, closes),
+            "vwap"    : calculate_vwap(highs, lows, closes, volumes),
+            "bb_lower": bb_lower,
+            "momentum_score": calculate_momentum_score(closes, volumes),
         }
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
@@ -1465,6 +1624,31 @@ def check_trend_stoch(client, symbol):
     except Exception as e:
         log.error(f"❌ Trend+StochRSI {symbol}: {e}")
         return None
+
+# ──────────────────────────────────────────────
+# 📐 فحص فلاتر التأكيد الاختيارية (VWAP + Bollinger) — مشتركة بين الاستراتيجيات الثلاث
+# ──────────────────────────────────────────────
+def passes_confirmation_filters(signal_data):
+    """
+    يفحص فلاتر VWAP وBollinger الاختيارية (لو مفعّلة) على نتيجة أي إشارة شراء.
+    لو الفلتر مطفي، ما يأثر بشي. لو مفعّل وتعذر حساب القيمة (None)، نرفض الإشارة
+    احتياطاً (أفضل نتجاهل صفقة مشكوك فيها من نشتري بدون تأكيد).
+    """
+    if VWAP_FILTER_ENABLED:
+        vwap  = signal_data.get("vwap")
+        price = signal_data.get("price")
+        if vwap is None or price is None or price <= vwap:
+            return False
+
+    if BB_FILTER_ENABLED:
+        bb_lower = signal_data.get("bb_lower")
+        price    = signal_data.get("price")
+        if bb_lower is None or price is None:
+            return False
+        if price > bb_lower * (1 + BB_LOWER_MARGIN_PCT):
+            return False
+
+    return True
 
 # ──────────────────────────────────────────────
 # 📐 حساب ستوب الـ Trailing (بناءً على ATR المخزن بالصفقة، أو النسبة الثابتة كاحتياطي)
@@ -1825,6 +2009,10 @@ def api_get_settings():
             "atr_period": ATR_PERIOD,
             "atr_multiplier": ATR_MULTIPLIER,
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
+            "vwap_filter_enabled": VWAP_FILTER_ENABLED,
+            "bb_filter_enabled": BB_FILTER_ENABLED,
+            "inverse_btc_enabled": INVERSE_BTC_ENABLED,
+            "inverse_btc_config": dict(INVERSE_BTC_CONFIG),
         })
 
 
@@ -1835,6 +2023,7 @@ def api_set_settings():
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
+    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -1921,6 +2110,20 @@ def api_set_settings():
             v = float(data["trail_atr_multiplier"])
             if v <= 0: errors.append("trail_atr_multiplier لازم أكبر من صفر")
             else: TRAIL_ATR_MULTIPLIER = v
+
+        if "vwap_filter_enabled" in data:
+            VWAP_FILTER_ENABLED = bool(data["vwap_filter_enabled"])
+        if "bb_filter_enabled" in data:
+            BB_FILTER_ENABLED = bool(data["bb_filter_enabled"])
+        if "inverse_btc_enabled" in data:
+            INVERSE_BTC_ENABLED = bool(data["inverse_btc_enabled"])
+        if "inverse_btc_config" in data:
+            inv_cfg = data["inverse_btc_config"]
+            if isinstance(inv_cfg, dict):
+                for key, val in inv_cfg.items():
+                    if key in INVERSE_BTC_CONFIG:
+                        INVERSE_BTC_CONFIG[key] = float(val)
+                set_inverse_config(**INVERSE_BTC_CONFIG)
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
@@ -2060,6 +2263,11 @@ def run_bot():
 
     # 🧠 إنشاء كاشف حالة السوق (يُستخدم فقط لو AUTO_STRATEGY_ENABLED مفعّل)
     _regime_detector = MarketRegimeDetector(client, cooldown_minutes=45)
+    # تفعيل/إطفاء Inverse BTC بالتبديل التلقائي حسب الإعدادات المحفوظة
+    _regime_detector.set_inverse_btc_enabled(
+        INVERSE_BTC_ENABLED,
+        INVERSE_BTC_CONFIG.get("btc_decline_threshold_pct", 3.0) / 100.0
+    )
 
     try:
         log.info("🔍 جاري مطابقة وتصفية القائمة مع أسواق الـ Spot الرسمية...")
@@ -2123,6 +2331,14 @@ def run_bot():
             # 🧠 فحص حالة السوق وتبديل الاستراتيجية تلقائياً (لو مفعّل)
             with _lock:
                 auto_on = AUTO_STRATEGY_ENABLED
+                inv_enabled = INVERSE_BTC_ENABLED
+                inv_cfg = dict(INVERSE_BTC_CONFIG)
+            # نزامن حالة Inverse BTC بالكاشف (لو تغيّرت من التطبيق)
+            if _regime_detector and _regime_detector.inverse_btc_enabled != inv_enabled:
+                _regime_detector.set_inverse_btc_enabled(
+                    inv_enabled,
+                    inv_cfg.get("btc_decline_threshold_pct", 3.0) / 100.0
+                )
             if auto_on and _regime_detector and (now - last_regime_check >= AUTO_STRATEGY_INTERVAL):
                 last_regime_check = now
                 try:
@@ -2271,6 +2487,14 @@ def run_bot():
                 is_trading = trading_enabled
 
             if watch_list and is_trading and count_active_trades() < MAX_TRADES and not is_api_blocked():
+                with _lock:
+                    ma20_on  = ma20_enabled
+                    strategy = current_strategy
+
+                # ══ المرحلة 1: تقييم كل المرشحين وتجميع من نجح منهم بإشارة شراء ══
+                # (بدل شراء أول مرشح نلاقيه، نجمعهم كلهم أول، ونرتبهم بعدين حسب قوة الزخم)
+                candidates = []   # كل عنصر: (momentum_score, symbol, price, atr_value, signal_info)
+
                 for symbol in list(watch_list):
                     if is_api_blocked():
                         log.warning("🚦 تم اكتشاف حظر أثناء الفحص المكثف — إيقاف باقي الدورة الحالية")
@@ -2278,23 +2502,20 @@ def run_bot():
                     if symbol in open_trades:
                         watch_list.discard(symbol)
                         continue
-                    if count_active_trades() >= MAX_TRADES:
-                        break
-
-                    with _lock:
-                        ma20_on  = ma20_enabled
-                        strategy = current_strategy
 
                     # ── استراتيجية RSI العادي ──────────────────
                     if strategy == "rsi":
                         ind = get_indicators(client, symbol)
                         if not ind:
+                            time.sleep(0.2)
                             continue
                         ma20_condition = (ind["price"] > ind["ma20"]) if ma20_on else True
                         buy_signal     = ind["rsi_prev"] < RSI_BUY_PREV and ind["rsi"] >= RSI_BUY_CURR and ma20_condition
-                        signal_info    = f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}" if buy_signal else None
-                        price          = ind["price"] if buy_signal else None
-                        atr_value      = ind.get("atr") if buy_signal else None
+                        if buy_signal and not passes_confirmation_filters(ind):
+                            buy_signal = False
+                        if buy_signal:
+                            signal_info = f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}"
+                            candidates.append((ind.get("momentum_score", 0.0), symbol, ind["price"], ind.get("atr"), signal_info))
 
                     # ── استراتيجية Stochastic RSI ──────────────
                     elif strategy == "stoch_rsi":
@@ -2304,11 +2525,11 @@ def run_bot():
                             continue
                         ma20_condition = (stoch["price"] > stoch["ma20"]) if ma20_on else True
                         buy_signal     = ma20_condition
-                        signal_info    = (
-                            f"📊 Stoch K: {stoch['k_prev']} → {stoch['k_curr']} | D: {stoch['d_prev']} → {stoch['d_curr']}"
-                        ) if buy_signal else None
-                        price     = stoch["price"] if buy_signal else None
-                        atr_value = stoch.get("atr") if buy_signal else None
+                        if buy_signal and not passes_confirmation_filters(stoch):
+                            buy_signal = False
+                        if buy_signal:
+                            signal_info = f"📊 Stoch K: {stoch['k_prev']} → {stoch['k_curr']} | D: {stoch['d_prev']} → {stoch['d_curr']}"
+                            candidates.append((stoch.get("momentum_score", 0.0), symbol, stoch["price"], stoch.get("atr"), signal_info))
 
                     # ── استراتيجية Trend + StochRSI ─────────────
                     elif strategy == "trend_stoch":
@@ -2316,20 +2537,50 @@ def run_bot():
                         if not trend_sig:
                             time.sleep(0.2)
                             continue
-                        # كل الشروط (StochRSI + فوليوم + اتجاه 4 ساعات) اتفحصت جوا check_trend_stoch نفسها
-                        buy_signal  = True
-                        signal_info = (
-                            f"🚀 Trend+Stoch K: {trend_sig['k_prev']} → {trend_sig['k_curr']} | "
-                            f"D: {trend_sig['d_prev']} → {trend_sig['d_curr']} | ✅ اتجاه 4س صاعد + فوليوم قوي"
-                        )
-                        price     = trend_sig["price"]
-                        atr_value = trend_sig.get("atr")
+                        # كل شروط trend_stoch الأساسية اتفحصت جوا الدالة نفسها؛ يضل بس فلاتر VWAP/BB الاختيارية
+                        if passes_confirmation_filters(trend_sig):
+                            signal_info = (
+                                f"🚀 Trend+Stoch K: {trend_sig['k_prev']} → {trend_sig['k_curr']} | "
+                                f"D: {trend_sig['d_prev']} → {trend_sig['d_curr']} | ✅ اتجاه 4س صاعد + فوليوم قوي"
+                            )
+                            candidates.append((trend_sig.get("momentum_score", 0.0), symbol, trend_sig["price"], trend_sig.get("atr"), signal_info))
+
+                    # ── استراتيجية Inverse BTC ──────────────────
+                    elif strategy == "inverse_btc":
+                        inv_sig = check_inverse_btc(client, symbol)
+                        if not inv_sig:
+                            time.sleep(0.2)
+                            continue
+                        # كل الشروط اتفحصت جوا check_inverse_btc
+                        buy_signal = True
+                        signal_info = inv_sig["signal_info"]
+                        price = inv_sig["price"]
+                        atr_value = inv_sig.get("atr")
+                        # نستخدم rs_score كـ momentum score للترتيب
+                        momentum = inv_sig.get("rs_score_pct", 0.0) / 100.0
+                        candidates.append((momentum, symbol, price, atr_value, signal_info))
 
                     else:
                         time.sleep(0.2)
                         continue
 
-                    if buy_signal:
+                    time.sleep(0.2)
+
+                # ══ المرحلة 2: ترتيب المرشحين حسب قوة الزخم (الأقوى أولاً) وتنفيذ الشراء ══
+                if candidates:
+                    candidates.sort(key=lambda c: c[0], reverse=True)
+                    if len(candidates) > 1:
+                        log.info(f"🏆 {len(candidates)} مرشح بنفس الدورة — رتبناهم بالزخم: {[c[1] for c in candidates]}")
+
+                    for momentum_score, symbol, price, atr_value, signal_info in candidates:
+                        if is_api_blocked():
+                            break
+                        if count_active_trades() >= MAX_TRADES:
+                            break
+                        if symbol in open_trades:
+                            watch_list.discard(symbol)
+                            continue
+
                         try:
                             usdt_balance = float(client.get_asset_balance(asset="USDT")["free"])
                         except Exception as e:
@@ -2348,12 +2599,12 @@ def run_bot():
                                 if atr_value:
                                     with _lock:
                                         multiplier = ATR_MULTIPLIER
-                                    candidate = res["entry_price"] - (multiplier * atr_value)
+                                    candidate_stop = res["entry_price"] - (multiplier * atr_value)
                                     # حماية: ما نسمح بستوب أوسع من 15% ولا أضيق من 0.3% من سعر الدخول
                                     min_price = res["entry_price"] * 0.997
                                     max_price = res["entry_price"] * 0.85
-                                    if max_price < candidate < min_price:
-                                        stop_price = candidate
+                                    if max_price < candidate_stop < min_price:
+                                        stop_price = candidate_stop
                                         used_atr   = atr_value   # نخزنه بالصفقة عشان نعيد استخدامه بالـ Trailing لاحقاً
                                 if stop_price is None:
                                     stop_price = res["entry_price"] * (1 - STOP_LOSS_PCT)   # احتياطي
@@ -2367,17 +2618,18 @@ def run_bot():
                                 coin_name   = symbol.replace("USDT", "")
                                 sl_value    = res["stop_loss"]
                                 stop_method = "ATR" if used_atr else "ثابت"
+                                momentum_line = f"🏆 زخم: {momentum_score:.2f}\n" if len(candidates) > 1 else ""
                                 send_telegram(
                                     f"🟢 <b>شراء {coin_name}</b>\n"
                                     f"{signal_info}\n"
+                                    f"{momentum_line}"
                                     f"💵 السعر: {res['entry_price']}\n"
                                     f"🛡️ Stop Loss ({stop_method}): {sl_value}\n"
                                     f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}"
                                 )
                         else:
                             log.warning(f"⚠️ رصيد غير كافٍ: {usdt_balance:.2f} USDT")
-
-                    time.sleep(0.2)
+                            break   # الرصيد مش كافي أصلاً، ما فيه داعي نكمل نفحص باقي المرشحين
 
         except BinanceAPIException as e:
             if is_rate_limit_error(e):
