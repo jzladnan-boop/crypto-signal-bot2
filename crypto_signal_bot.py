@@ -229,7 +229,7 @@ BB_LOWER_MARGIN_PCT = 0.01    # هامش القرب المسموح من الحد
 # ──────────────────────────────────────────────
 INVERSE_BTC_ENABLED = False   # 🔘 مطفي افتراضياً — تفعّله من التطبيق أو تيليغرام
 INVERSE_BTC_CONFIG = {
-    "btc_decline_threshold_pct": 3.0,   # BTC لازم ينزل 3% على الأقل
+    "btc_decline_threshold_pct": 1.0,   # BTC لازم ينزل 1% على الأقل
     "rs_min_threshold_pct": 5.0,        # العملة أقوى من BTC بـ 5%
     "rsi_max_for_entry": 40,            # RSI تحت 40
     "stoch_k_max_for_entry": 30,        # Stoch K تحت 30
@@ -1988,6 +1988,7 @@ def api_history():
 @login_required
 def api_get_settings():
     with _lock:
+        inv_cfg = dict(INVERSE_BTC_CONFIG)
         return jsonify({
             "trade_amount": TRADE_AMOUNT,
             "max_trades": MAX_TRADES,
@@ -2004,15 +2005,20 @@ def api_get_settings():
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
             "rsi_buy_curr": RSI_BUY_CURR,
-            # ✅ إصلاح: إعدادات ATR كانت غايبة هون، لهيك كانت الحقول
-            # طالعة فاضية بالتطبيق حتى لو أوامر تيليغرام شغالة تمام
             "atr_period": ATR_PERIOD,
             "atr_multiplier": ATR_MULTIPLIER,
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             "vwap_filter_enabled": VWAP_FILTER_ENABLED,
             "bb_filter_enabled": BB_FILTER_ENABLED,
             "inverse_btc_enabled": INVERSE_BTC_ENABLED,
-            "inverse_btc_config": dict(INVERSE_BTC_CONFIG),
+            # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
+            "inverse_btc_threshold": inv_cfg.get("btc_decline_threshold_pct", 3.0),
+            "inverse_btc_rs_min": inv_cfg.get("rs_min_threshold_pct", 5.0),
+            "inverse_btc_rsi_max": inv_cfg.get("rsi_max_for_entry", 40),
+            "inverse_btc_stoch_max": inv_cfg.get("stoch_k_max_for_entry", 30),
+            "inverse_btc_volume_min": inv_cfg.get("min_volume_ratio", 1.2),
+            # ✅ للتوافق مع النسخ القديمة من التطبيق
+            "inverse_btc_config": inv_cfg,
         })
 
 
@@ -2117,18 +2123,51 @@ def api_set_settings():
             BB_FILTER_ENABLED = bool(data["bb_filter_enabled"])
         if "inverse_btc_enabled" in data:
             INVERSE_BTC_ENABLED = bool(data["inverse_btc_enabled"])
+
+        # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
+        if "inverse_btc_threshold" in data:
+            INVERSE_BTC_CONFIG["btc_decline_threshold_pct"] = float(data["inverse_btc_threshold"])
+        if "inverse_btc_rs_min" in data:
+            INVERSE_BTC_CONFIG["rs_min_threshold_pct"] = float(data["inverse_btc_rs_min"])
+        if "inverse_btc_rsi_max" in data:
+            INVERSE_BTC_CONFIG["rsi_max_for_entry"] = float(data["inverse_btc_rsi_max"])
+        if "inverse_btc_stoch_max" in data:
+            INVERSE_BTC_CONFIG["stoch_k_max_for_entry"] = float(data["inverse_btc_stoch_max"])
+        if "inverse_btc_volume_min" in data:
+            INVERSE_BTC_CONFIG["min_volume_ratio"] = float(data["inverse_btc_volume_min"])
+
+        # ✅ للتوافق مع النسخ القديمة من التطبيق
         if "inverse_btc_config" in data:
             inv_cfg = data["inverse_btc_config"]
             if isinstance(inv_cfg, dict):
                 for key, val in inv_cfg.items():
                     if key in INVERSE_BTC_CONFIG:
                         INVERSE_BTC_CONFIG[key] = float(val)
-                set_inverse_config(**INVERSE_BTC_CONFIG)
+
+        # ✅ نزامن إعدادات inverse_btc مع المكتبة
+        set_inverse_config(**INVERSE_BTC_CONFIG)
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
     save_settings()
     return jsonify({"ok": True})
+
+# ── الاستراتيجيات ───────────────────────────────────
+@app.route("/api/strategies")
+@login_required
+def api_strategies():
+    """يرجع حالة كل استراتيجية (للـ Toggleات بالتطبيق)"""
+    with _lock:
+        return jsonify({
+            "current_strategy": current_strategy,
+            "rsi_enabled": current_strategy == "rsi",
+            "stochastic_enabled": current_strategy == "stoch_rsi",
+            "trend_stoch_enabled": current_strategy == "trend_stoch",
+            "inverse_btc_enabled": current_strategy == "inverse_btc",
+            "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
+            "strategy_label": STRATEGY_LABELS.get(current_strategy, current_strategy),
+        })
+
 
 
 # ── التحكم بالتداول ───────────────────────────────
@@ -2205,6 +2244,35 @@ def api_close_trade():
         return jsonify({"ok": True, "note": "لا يوجد رصيد، تم حذف الصفقة من السجل"})
     return jsonify({"ok": True, "sell_price": sell_price})
 
+
+
+# ── قائمة الصفقات القابلة للإغلاق ───────────────────
+@app.route("/api/closeable_trades")
+@login_required
+def api_closeable_trades():
+    """يرجع الصفقات المفتوحة مع PnL (لشاشة الصفقات — إغلاق يدوي)"""
+    result = []
+    trades_copy = dict(open_trades)
+
+    def _fetch_prices():
+        return get_all_prices(_binance_client, set(trades_copy.keys())) if _binance_client else {}
+
+    all_prices = get_cached_or_fetch("closeable_trade_prices", _fetch_prices)
+
+    for symbol, t in trades_copy.items():
+        current_price = all_prices.get(symbol, t["entry_price"])
+        pnl_pct = round((current_price - t["entry_price"]) / t["entry_price"] * 100, 2)
+        result.append({
+            "symbol": symbol,
+            "coin": symbol.replace("USDT", ""),
+            "entry_price": t["entry_price"],
+            "current_price": current_price,
+            "pnl_pct": pnl_pct,
+            "trailing_active": t.get("trailing_active", False),
+            "qty": t.get("qty", 0),
+        })
+
+    return jsonify(result)
 
 @app.route("/api/register_push", methods=["POST"])
 @login_required
