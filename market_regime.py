@@ -1,11 +1,16 @@
 """
 🧠 Market Regime Detector
 =========================
-يحلل حالة السوق العامة (اتجاه + تذبذب) بناءً على BTC، ويقرر أنسب استراتيجية:
+يحلل حالة السوق العامة (اتجاه + تذبذب + مزاج عام) بناءً على BTC ومؤشر الخوف
+والجشع، ويقرر أنسب استراتيجية:
 
 - ترند واضح  (BTC فوق MA50 على فريم 4 ساعات بهامش واضح)  → trend_stoch
 - جانبي + تذبذب عالي (ATR% مرتفع على فريم الساعة)         → stoch_rsi
 - جانبي + هادئ                                            → rsi
+
+مؤشر الخوف والجشع (Fear & Greed) يُستخدم كعامل حذر إضافي: وقت مزاج متطرف
+(خوف شديد أو جشع شديد)، نطلب هامش ترند أوضح (ضعف الطبيعي) قبل ما نثق فيه
+ونحوّل لـ trend_stoch — لأن الأسواق بهالحالات أكثر عرضة لانعكاسات حادة.
 
 فيه "فترة تبريد" بين كل تبديل وتاني لتجنب الرفرفة (Flip-flopping)
 لما يكون السوق عالحافة بالضبط بين حالتين.
@@ -29,6 +34,7 @@
 import time
 import pandas as pd
 import ta
+import requests
 from binance.client import Client
 
 
@@ -39,11 +45,14 @@ class MarketRegimeDetector:
         symbol="BTCUSDT",
         trend_interval=Client.KLINE_INTERVAL_4HOUR,
         trend_ma_length=50,
-        trend_margin_pct=0.01,        # 1% هامش فوق MA50 عشان يعتبر "ترند واضح"
+        trend_margin_pct=0.02,        # 2% هامش فوق MA50 عشان يعتبر "ترند واضح"
         volatility_interval=Client.KLINE_INTERVAL_1HOUR,
         atr_period=14,
-        high_volatility_pct=0.012,    # 1.2% (ATR/السعر) يعتبر تذبذب عالي
+        high_volatility_pct=0.015,    # 1.5% (ATR/السعر) يعتبر تذبذب عالي
         cooldown_minutes=45,
+        fear_greed_extreme_low=20,    # تحت هذا الرقم = خوف شديد
+        fear_greed_extreme_high=80,   # فوق هذا الرقم = جشع شديد
+        fear_greed_cache_minutes=10,  # نكاش قيمة المؤشر عشان ما نضرب الـ API كل فحص
     ):
         self.client = client
         self.symbol = symbol
@@ -54,9 +63,19 @@ class MarketRegimeDetector:
         self.atr_period = atr_period
         self.high_volatility_pct = high_volatility_pct
         self.cooldown_minutes = cooldown_minutes
+        self.fear_greed_extreme_low = fear_greed_extreme_low
+        self.fear_greed_extreme_high = fear_greed_extreme_high
+        self.fear_greed_cache_minutes = fear_greed_cache_minutes
+
+        # 🔄 إعدادات Inverse BTC للتبديل التلقائي
+        self.inverse_btc_enabled = False   # يُحدد من bot.py
+        self.inverse_btc_decline_threshold = 0.03  # 3% نزول BTC
 
         self.current_strategy = None   # آخر استراتيجية قررها الكاشف
         self.last_switch_time = 0      # timestamp لآخر تبديل فعلي طُبّق
+
+        self._fg_cache_value = None    # آخر قيمة Fear&Greed معروفة
+        self._fg_cache_time = 0        # وقت آخر تحديث للكاش
 
     # ──────────────────────────────────────────────
     # تحليل الاتجاه (Trend)
@@ -116,6 +135,46 @@ class MarketRegimeDetector:
             return None
 
     # ──────────────────────────────────────────────
+    # مؤشر الخوف والجشع (Fear & Greed) — نفس المصدر المستخدم بالتطبيق
+    # ──────────────────────────────────────────────
+    def _get_fear_greed(self):
+        """يرجع قيمة المؤشر (0-100) أو None لو تعذر الجلب. مكاش لتقليل عدد الطلبات."""
+        now = time.time()
+        if self._fg_cache_value is not None and (now - self._fg_cache_time) < (self.fear_greed_cache_minutes * 60):
+            return self._fg_cache_value
+        try:
+            resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+            data = resp.json()
+            value = int(data["data"][0]["value"])
+            self._fg_cache_value = value
+            self._fg_cache_time = now
+            return value
+        except Exception:
+            return self._fg_cache_value   # نرجع آخر قيمة معروفة لو الطلب فشل، أفضل من ولا شي
+
+    # ──────────────────────────────────────────────
+    # 🔄 فحص نزول BTC (لاستراتيجية Inverse BTC)
+    # ──────────────────────────────────────────────
+    def _get_btc_decline_for_inverse(self):
+        """يحسب نسبة نزول BTC خلال آخر 6 شموع على فريم 1 ساعة."""
+        try:
+            klines = self.client.get_klines(
+                symbol="BTCUSDT",
+                interval=Client.KLINE_INTERVAL_1HOUR,
+                limit=10,
+            )
+            if not klines or len(klines) < 7:
+                return None
+            closes = pd.Series([float(k[4]) for k in klines])
+            old_price = closes.iloc[-7]   # قبل 6 شموع
+            new_price = closes.iloc[-2]   # آخر شمعة مغلقة
+            if old_price <= 0:
+                return None
+            return (new_price - old_price) / old_price
+        except Exception:
+            return None
+
+    # ──────────────────────────────────────────────
     # القرار الخام (بدون فترة تبريد)
     # ──────────────────────────────────────────────
     def decide(self):
@@ -125,21 +184,40 @@ class MarketRegimeDetector:
         """
         is_uptrend, trend_margin = self._get_trend_state()
         volatility_pct = self._get_volatility_pct()
+        fear_greed = self._get_fear_greed()
 
         if is_uptrend is None or volatility_pct is None:
             return None, "تعذر تحليل حالة السوق (بيانات غير كافية أو خطأ اتصال)"
 
+        fg_suffix = f" | مزاج السوق: {fear_greed}/100" if fear_greed is not None else ""
+        is_extreme_sentiment = fear_greed is not None and (
+            fear_greed <= self.fear_greed_extreme_low or fear_greed >= self.fear_greed_extreme_high
+        )
+        # وقت مزاج متطرف (خوف شديد أو جشع شديد)، الأسواق أكثر عرضة لانعكاسات حادة —
+        # نطلب هامش ترند أوضح (ضعف الطبيعي) قبل ما نثق فيه ونحوّل لـ trend_stoch
+        effective_trend_margin = self.trend_margin_pct * (2 if is_extreme_sentiment else 1)
+
+        # 🔄 فحص Inverse BTC أولاً (لو مفعّل): لو BTC نازل بقوة → نحوّل لـ inverse_btc
+        if self.inverse_btc_enabled:
+            btc_decline = self._get_btc_decline_for_inverse()
+            if btc_decline is not None and btc_decline <= -self.inverse_btc_decline_threshold:
+                reason = (
+                    f"BTC نازل {abs(btc_decline)*100:.1f}% (آخر 6 شموع على 1 ساعة) — "
+                    f"البحث عن عملات مقاومة{fg_suffix}"
+                )
+                return "inverse_btc", reason
+
         # ترند واضح: BTC فوق MA50 (فريم 4 ساعات) بهامش أكبر من الحد المطلوب
-        if is_uptrend and trend_margin >= self.trend_margin_pct:
-            reason = f"BTC فوق MA50 (4 ساعات) بهامش {trend_margin*100:.2f}%"
+        if is_uptrend and trend_margin >= effective_trend_margin:
+            reason = f"BTC فوق MA50 (4 ساعات) بهامش {trend_margin*100:.2f}%{fg_suffix}"
             return "trend_stoch", reason
 
         # جانبي (لا يوجد ترند صعودي واضح بهامش كافٍ)
         if volatility_pct >= self.high_volatility_pct:
-            reason = f"سوق جانبي + تذبذب عالٍ (ATR {volatility_pct*100:.2f}%)"
+            reason = f"سوق جانبي + تذبذب عالٍ (ATR {volatility_pct*100:.2f}%){fg_suffix}"
             return "stoch_rsi", reason
 
-        reason = f"سوق جانبي + هادئ (ATR {volatility_pct*100:.2f}%)"
+        reason = f"سوق جانبي + هادئ (ATR {volatility_pct*100:.2f}%){fg_suffix}"
         return "rsi", reason
 
     # ──────────────────────────────────────────────
@@ -179,3 +257,11 @@ class MarketRegimeDetector:
         self.current_strategy = proposed_strategy
         self.last_switch_time = now
         return proposed_strategy, reason, True
+
+    def set_inverse_btc_enabled(self, enabled, decline_threshold=0.03):
+        """
+        يفعّل/يطفي استراتيجية Inverse BTC بالتبديل التلقائي.
+        يُستدعى من bot.py لما المستخدم يغيّر الإعداد.
+        """
+        self.inverse_btc_enabled = enabled
+        self.inverse_btc_decline_threshold = decline_threshold
