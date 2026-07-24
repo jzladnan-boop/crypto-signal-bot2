@@ -156,17 +156,17 @@ class MarketRegimeDetector:
     # 🔄 فحص نزول BTC (لاستراتيجية Inverse BTC)
     # ──────────────────────────────────────────────
     def _get_btc_decline_for_inverse(self):
-        """يحسب نسبة نزول BTC خلال آخر 6 شموع على فريم 1 ساعة."""
+        """يحسب نسبة نزول BTC بين آخر شمعة مغلقة والشمعة يلي قبلها على فريم 15 دقيقة (شمعة وحدة ~15 دقيقة) — أسرع استجابة ممكنة."""
         try:
             klines = self.client.get_klines(
                 symbol="BTCUSDT",
-                interval=Client.KLINE_INTERVAL_1HOUR,
-                limit=10,
+                interval=Client.KLINE_INTERVAL_15MINUTE,
+                limit=5,
             )
-            if not klines or len(klines) < 7:
+            if not klines or len(klines) < 3:
                 return None
             closes = pd.Series([float(k[4]) for k in klines])
-            old_price = closes.iloc[-7]   # قبل 6 شموع
+            old_price = closes.iloc[-3]   # الشمعة قبل الأخيرة
             new_price = closes.iloc[-2]   # آخر شمعة مغلقة
             if old_price <= 0:
                 return None
@@ -202,7 +202,7 @@ class MarketRegimeDetector:
         btc_decline = self._get_btc_decline_for_inverse()
         if btc_decline is not None and btc_decline <= -self.inverse_btc_decline_threshold:
             reason = (
-                f"BTC نازل {abs(btc_decline)*100:.1f}% (آخر 6 شموع على 1 ساعة) — "
+                f"BTC نازل {abs(btc_decline)*100:.1f}% (شمعة وحدة 15 دقيقة) — "
                 f"البحث عن عملات مقاومة{fg_suffix}"
             )
             return "inverse_btc", reason
