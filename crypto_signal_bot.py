@@ -638,6 +638,7 @@ def telegram_command_listener(client):
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
+    global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -2030,6 +2031,7 @@ def api_set_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
+    global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     data = request.get_json(silent=True) or {}
     errors = []
 
