@@ -195,13 +195,14 @@ def check_inverse_btc(client, symbol):
     if not is_btc_declining or btc_decline is None:
         return None
 
-    # ── الخطوة 2: العملة لازم تكون أقوى من BTC ──
+    # ── الخطوة 2: العملة لازم تكون صاعدة فعلياً (مو بس أداء نسبي أفضل من BTC) ──
     rs_score, coin_return, btc_return = get_relative_strength(client, symbol)
-    if rs_score is None:
+    if coin_return is None or btc_return is None:
         return None
 
     rs_threshold = cfg["rs_min_threshold_pct"] / 100.0
-    if rs_score < rs_threshold:
+    # العملة لازم تكون صاعدة فعلياً بنسبة >= الحد المطلوب (مو بس أبطأ نزولاً من BTC)
+    if coin_return < rs_threshold:
         return None
 
     # ── الخطوة 3: المؤشرات التقنية ──
@@ -234,11 +235,10 @@ def check_inverse_btc(client, symbol):
         "btc_decline_pct": round(abs(btc_decline) * 100, 2),
         "coin_return_pct": round(coin_return * 100, 2),
         "btc_return_pct": round(btc_return * 100, 2),
-        "rs_score_pct": round(rs_score * 100, 2),
+        "rs_score_pct": round(rs_score * 100, 2) if rs_score is not None else None,
         "signal_info": (
             f"🔄 <b>Inverse BTC — {coin_name}</b>\n"
-            f"📉 BTC نازل {abs(btc_return)*100:.1f}% | العملة: {coin_return*100:+.1f}%\n"
-            f"💪 قوة نسبية: +{rs_score*100:.1f}% (أقوى من BTC)\n"
+            f"📉 BTC نازل {abs(btc_decline)*100:.1f}% | العملة صاعدة: +{coin_return*100:.1f}%\n"
             f"📊 RSI: {ind['rsi']} | Stoch K: {ind['stoch_k']}\n"
             f"📈 فوليوم: {ind['vol_ratio']:.1f}× المتوسط"
         ),
