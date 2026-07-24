@@ -2073,6 +2073,8 @@ def api_set_settings():
             current_strategy = "stoch_rsi"
         if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
             current_strategy = "trend_stoch"
+        if "inverse_btc_enabled" in data and data["inverse_btc_enabled"]:
+            current_strategy = "inverse_btc"
 
         # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
         if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled")):
