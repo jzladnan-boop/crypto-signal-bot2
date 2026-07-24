@@ -4,8 +4,8 @@
 استراتيجية رابعة مستقلة — تشتري العملات اللي بتقاوم نزول BTC.
 
 المنطق:
-1. BTC لازم يكون نازل بقوة (آخر 6 شموع على فريم 1 ساعة)
-2. العملة لازم تكون أقوى من BTC بفارق واضح (Relative Strength)
+1. BTC لازم يكون نازل بقوة (خلال 24 ساعة من Binance مباشرة)
+2. العملة لازم تكون صاعدة بـ 1% أو أكثر (مقاومة لنزول BTC)
 3. العملة لازم تكون بمنطقة شراء تقنياً (RSI < 40 أو StochRSI بمنطقة تشبع بيعي)
 4. فوليوم أعلى من المتوسط (تأكيد إن فيه اهتمام حقيقي)
 
@@ -22,17 +22,14 @@ from binance.client import Client
 # ── إعدادات افتراضية (قابلة للتعديل من التطبيق) ─────────────────────────
 DEFAULT_CONFIG = {
     "btc_symbol": "BTCUSDT",
-    "btc_interval": Client.KLINE_INTERVAL_1HOUR,      # ✅ فريم 1 ساعة
-    "lookback_candles": 6,                             # ✅ 6 شموع
-    "btc_decline_threshold_pct": 3.0,                  # BTC لازم ينزل 3% على الأقل
-    "rs_min_threshold_pct": 5.0,                       # العملة لازم تكون أقوى من BTC بـ 5%
-    "rsi_max_for_entry": 40,                           # RSI لازم يكون تحت 40
-    "stoch_k_max_for_entry": 30,                       # StochRSI K تحت 30
-    "volume_ma_period": 20,                            # فترة متوسط الفوليوم
-    "min_volume_ratio": 1.2,                           # الفوليوم الحالي 1.2× المتوسط
+    "btc_decline_threshold_pct": 1.0,   # ✅ BTC لازم ينزل 1% على الأقل (24 ساعة)
+    "rs_min_threshold_pct": 1.0,        # ✅ العملة لازم تكون صاعدة 1% على الأقل
+    "rsi_max_for_entry": 40,            # RSI لازم يكون تحت 40
+    "stoch_k_max_for_entry": 30,        # StochRSI K تحت 30
+    "volume_ma_period": 20,             # فترة متوسط الفوليوم
+    "min_volume_ratio": 1.2,            # الفوليوم الحالي 1.2× المتوسط
 }
 
-# الكاشف بيستدعي load_settings() وبيمرر الإعدادات هون
 _current_config = dict(DEFAULT_CONFIG)
 
 
@@ -62,73 +59,60 @@ def _get_klines_safe(client, symbol, interval, limit):
         return None
 
 
-def _calculate_returns(closes, lookback):
-    """يحسب نسبة التغيّر خلال آخر `lookback` شموع مغلقة."""
-    if len(closes) < lookback + 1:
+def get_24h_change_pct(client, symbol):
+    """
+    📊 يرجع نسبة تغيّر السعر خلال 24 ساعة مباشرة من Binance (get_ticker).
+    لا يحتاج شموع — قيمة جاهزة من البورصة.
+    """
+    try:
+        ticker = client.get_ticker(symbol=symbol)
+        return float(ticker.get("priceChangePercent", 0))
+    except Exception:
         return None
-    old_price = closes.iloc[-lookback - 1]
-    new_price = closes.iloc[-2]  # آخر شمعة مغلقة
-    if old_price <= 0:
-        return None
-    return (new_price - old_price) / old_price
 
 
 # ── الفحص الرئيسي ───────────────────────────────────────────────────────
 
 def get_btc_decline(client):
     """
-    يحسب نسبة نزول BTC خلال آخر N شمعة.
+    يحسب نسبة نزول BTC خلال 24 ساعة من Binance مباشرة.
     يرجع (decline_pct, is_declining) أو (None, False).
     """
-    cfg = get_config()
-    klines = _get_klines_safe(
-        client, cfg["btc_symbol"], cfg["btc_interval"], cfg["lookback_candles"] + 5
-    )
-    if klines is None:
+    change_pct = get_24h_change_pct(client, _current_config["btc_symbol"])
+    if change_pct is None:
         return None, False
 
-    closes = pd.Series([float(k[4]) for k in klines])
-    decline_pct = _calculate_returns(closes, cfg["lookback_candles"])
-
-    if decline_pct is None:
-        return None, False
-
-    threshold = cfg["btc_decline_threshold_pct"] / 100.0
-    is_declining = decline_pct <= -threshold  # سالب وتحت الحد
-
+    # change_pct سالبة لو نازل (مثلاً -1.5). نحولها لصيغة return (-0.015)
+    decline_pct = change_pct / 100.0
+    threshold = _current_config["btc_decline_threshold_pct"] / 100.0
+    is_declining = decline_pct <= -threshold
     return decline_pct, is_declining
 
 
 def get_relative_strength(client, symbol):
     """
-    يحسب قوة العملة النسبية مقابل BTC خلال نفس الفترة.
+    يحسب قوة العملة النسبية مقابل BTC خلال 24 ساعة (من get_ticker).
     يرجع (rs_score, coin_return, btc_return) أو (None, None, None).
     """
-    cfg = get_config()
-    limit = cfg["lookback_candles"] + 5
+    coin_change = get_24h_change_pct(client, symbol)
+    btc_change = get_24h_change_pct(client, _current_config["btc_symbol"])
 
-    coin_klines = _get_klines_safe(client, symbol, cfg["btc_interval"], limit)
-    btc_klines = _get_klines_safe(client, cfg["btc_symbol"], cfg["btc_interval"], limit)
-
-    if coin_klines is None or btc_klines is None:
+    if coin_change is None or btc_change is None:
         return None, None, None
 
-    coin_closes = pd.Series([float(k[4]) for k in coin_klines])
-    btc_closes = pd.Series([float(k[4]) for k in btc_klines])
-
-    coin_return = _calculate_returns(coin_closes, cfg["lookback_candles"])
-    btc_return = _calculate_returns(btc_closes, cfg["lookback_candles"])
-
-    if coin_return is None or btc_return is None:
-        return None, coin_return, btc_return
+    coin_return = coin_change / 100.0
+    btc_return = btc_change / 100.0
 
     # لو BTC ما نازل — ما بنشتري بهالاستراتيجية
     if btc_return >= 0:
         return None, coin_return, btc_return
 
-    # Relative Strength
-    # لو العملة نازلة أقل من BTC → RS إيجابي
-    # لو العملة صاعدة وBTC نازل → RS إيجابي بقوة
+    # ✅ العملة لازم تكون صاعدة فعلياً بنسبة >= الحد المطلوب (1%)
+    rs_threshold = _current_config["rs_min_threshold_pct"] / 100.0
+    if coin_return < rs_threshold:
+        return None, coin_return, btc_return
+
+    # Relative Strength: كم العملة أقوى من BTC نسبياً
     rs_score = ((1 + coin_return) / (1 + btc_return)) - 1
 
     return rs_score, coin_return, btc_return
@@ -190,20 +174,17 @@ def check_inverse_btc(client, symbol):
     """
     cfg = get_config()
 
-    # ── الخطوة 1: BTC لازم يكون نازل ──
+    # ── الخطوة 1: BTC لازم يكون نازل 1% أو أكثر (24 ساعة) ──
     btc_decline, is_btc_declining = get_btc_decline(client)
     if not is_btc_declining or btc_decline is None:
         return None
 
-    # ── الخطوة 2: العملة لازم تكون صاعدة فعلياً (مو بس أداء نسبي أفضل من BTC) ──
+    # ── الخطوة 2: العملة لازم تكون صاعدة 1% أو أكثر ──
     rs_score, coin_return, btc_return = get_relative_strength(client, symbol)
     if coin_return is None or btc_return is None:
         return None
 
-    rs_threshold = cfg["rs_min_threshold_pct"] / 100.0
-    # العملة لازم تكون صاعدة فعلياً بنسبة >= الحد المطلوب (مو بس أبطأ نزولاً من BTC)
-    if coin_return < rs_threshold:
-        return None
+    # coin_return فحصه صار جوا get_relative_strength (لازم >= 1%)
 
     # ── الخطوة 3: المؤشرات التقنية ──
     ind = get_inverse_indicators(client, symbol)
@@ -238,7 +219,8 @@ def check_inverse_btc(client, symbol):
         "rs_score_pct": round(rs_score * 100, 2) if rs_score is not None else None,
         "signal_info": (
             f"🔄 <b>Inverse BTC — {coin_name}</b>\n"
-            f"📉 BTC نازل {abs(btc_decline)*100:.1f}% | العملة صاعدة: +{coin_return*100:.1f}%\n"
+            f"📉 BTC نازل {abs(btc_decline)*100:.1f}% (24 ساعة) | العملة صاعدة: +{coin_return*100:.1f}%\n"
+            f"💪 قوة نسبية: +{rs_score*100:.1f}% (أقوى من BTC)\n"
             f"📊 RSI: {ind['rsi']} | Stoch K: {ind['stoch_k']}\n"
             f"📈 فوليوم: {ind['vol_ratio']:.1f}× المتوسط"
         ),
