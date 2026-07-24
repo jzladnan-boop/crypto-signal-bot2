@@ -2628,8 +2628,8 @@ def run_bot():
                         signal_info = inv_sig["signal_info"]
                         price = inv_sig["price"]
                         atr_value = inv_sig.get("atr")
-                        # نستخدم rs_score كـ momentum score للترتيب
-                        momentum = inv_sig.get("rs_score_pct", 0.0) / 100.0
+                        # نستخدم نسبة صعود العملة الفعلية كـ momentum score للترتيب
+                        momentum = inv_sig.get("coin_return_pct", 0.0) / 100.0
                         candidates.append((momentum, symbol, price, atr_value, signal_info))
 
                     else:
