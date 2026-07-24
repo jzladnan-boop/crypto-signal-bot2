@@ -8,7 +8,6 @@
 2. العملة لازم تكون أقوى من BTC بفارق واضح (Relative Strength)
 3. العملة لازم تكون بمنطقة شراء تقنياً (RSI < 40 أو StochRSI بمنطقة تشبع بيعي)
 4. فوليوم أعلى من المتوسط (تأكيد إن فيه اهتمام حقيقي)
-5. السعر فوق MA20 (تأكيد إن الاتجاه لسا صاعد على المدى القصير)
 
 هذا الملف مستقل تماماً — بس يستقبل client وsymbol ويرجع dict أو None.
 """
@@ -31,7 +30,6 @@ DEFAULT_CONFIG = {
     "stoch_k_max_for_entry": 30,                       # StochRSI K تحت 30
     "volume_ma_period": 20,                            # فترة متوسط الفوليوم
     "min_volume_ratio": 1.2,                           # الفوليوم الحالي 1.2× المتوسط
-    "price_above_ma20": True,                          # السعر لازم يكون فوق MA20
 }
 
 # الكاشف بيستدعي load_settings() وبيمرر الإعدادات هون
@@ -222,11 +220,6 @@ def check_inverse_btc(client, symbol):
     # فوليوم أعلى من المتوسط
     if ind["vol_ratio"] < cfg["min_volume_ratio"]:
         return None
-
-    # السعر فوق MA20 (لو مفعل)
-    if cfg["price_above_ma20"]:
-        if ind["ma20"] is None or ind["price"] <= ind["ma20"]:
-            return None
 
     # ── كل الشروط تحققت ──
     coin_name = symbol.replace("USDT", "")
