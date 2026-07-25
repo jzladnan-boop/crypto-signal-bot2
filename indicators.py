@@ -51,6 +51,47 @@ def calculate_bollinger_bands(closes: pd.Series, period: int = 20, std_dev: floa
         return None, None, None
 
 
+def calculate_beta(coin_closes: pd.Series, btc_closes: pd.Series):
+    """
+    يحسب Beta: معامل تقلب العملة النسبي مقابل BTC (نفس مفهوم Beta بالأسهم).
+    Beta > 1  → العملة تتحرك أعنف من BTC (لو BTC طلع 1%، هاي تطلع أكثر)
+    Beta < 1  → العملة أهدأ من BTC (تتحرك أقل)
+    Beta ~ 1  → تتحرك تقريباً بنفس وتيرة BTC
+
+    يستقبل سلسلتين متطابقتين بالطول (نفس الفريم الزمني ونفس عدد الشموع)،
+    ويحسب العائد الدوري (% تغيّر كل شمعة) لكل وحدة، بعدين:
+        Beta = التباين المشترك(عائد العملة, عائد BTC) / تباين(عائد BTC)
+
+    يرجع float أو None لو تعذر الحساب (بيانات ناقصة، أو BTC بدون أي تذبذب).
+    """
+    try:
+        if len(coin_closes) != len(btc_closes) or len(coin_closes) < 10:
+            return None
+
+        coin_returns = coin_closes.pct_change().dropna()
+        btc_returns  = btc_closes.pct_change().dropna()
+
+        # نتأكد إن الطول متطابق بعد إسقاط أول قيمة (NaN) من pct_change
+        min_len = min(len(coin_returns), len(btc_returns))
+        if min_len < 5:
+            return None
+        coin_returns = coin_returns.iloc[-min_len:]
+        btc_returns  = btc_returns.iloc[-min_len:]
+
+        btc_variance = btc_returns.var()
+        if pd.isna(btc_variance) or btc_variance == 0:
+            return None
+
+        covariance = coin_returns.cov(btc_returns)
+        if pd.isna(covariance):
+            return None
+
+        beta = covariance / btc_variance
+        return round(float(beta), 3)
+    except Exception:
+        return None
+
+
 def calculate_momentum_score(closes: pd.Series, volumes: pd.Series, volume_period: int = 20, price_lookback: int = 5):
     """
     يحسب "درجة زخم" عامة لمرشح شراء — تُستخدم لترتيب أولوية الشراء لما يكون
