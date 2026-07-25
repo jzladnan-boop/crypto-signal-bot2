@@ -184,7 +184,11 @@ def check_inverse_btc(client, symbol):
     if coin_return is None or btc_return is None:
         return None
 
-    # coin_return فحصه صار جوا get_relative_strength (لازم >= 1%)
+    # ✅ إصلاح خلل: rs_score يرجع None لو BTC مو نازل فعلياً أو العملة ما صعدت كفاية
+    # (حتى لو coin_return/btc_return مليانين) — لازم نتأكد منه هون قبل ما نكمل،
+    # وإلا العملية {rs_score*100} بآخر الدالة تنكسر بـ TypeError على قيمة None
+    if rs_score is None:
+        return None
 
     # ── الخطوة 3: المؤشرات التقنية ──
     ind = get_inverse_indicators(client, symbol)
@@ -205,6 +209,7 @@ def check_inverse_btc(client, symbol):
 
     # ── كل الشروط تحققت ──
     coin_name = symbol.replace("USDT", "")
+    rs_display = f"{rs_score*100:.1f}" if rs_score is not None else "؟"   # ✅ حماية إضافية احتياطية
     return {
         "price": ind["price"],
         "ma20": ind["ma20"],
@@ -220,7 +225,7 @@ def check_inverse_btc(client, symbol):
         "signal_info": (
             f"🔄 <b>Inverse BTC — {coin_name}</b>\n"
             f"📉 BTC نازل {abs(btc_decline)*100:.1f}% (24 ساعة) | العملة صاعدة: +{coin_return*100:.1f}%\n"
-            f"💪 قوة نسبية: +{rs_score*100:.1f}% (أقوى من BTC)\n"
+            f"💪 قوة نسبية: +{rs_display}% (أقوى من BTC)\n"
             f"📊 RSI: {ind['rsi']} | Stoch K: {ind['stoch_k']}\n"
             f"📈 فوليوم: {ind['vol_ratio']:.1f}× المتوسط"
         ),
