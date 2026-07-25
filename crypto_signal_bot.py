@@ -29,7 +29,7 @@ from flask import Flask, request, jsonify, session, send_from_directory
 from functools import wraps
 from market_regime import MarketRegimeDetector
 from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config
-from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score
+from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_beta
 
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات الأساسية — نفس الأصلي
@@ -112,13 +112,18 @@ ATR_MULTIPLIER = 2.0   # مضاعف ATR لتحديد مسافة الستوب ا�
 TRAIL_ATR_MULTIPLIER = 1.5   # مضاعف ATR لمسافة الـ Trailing بعد التفعيل (عادة أضيق من الستوب الأولي)
 
 # ──────────────────────────────────────────────
-# 🚀 Trend + StochRSI: استراتيجية ثالثة مستقلة (StochRSI + فوليوم + تأكيد اتجاه 4 ساعات)
-# ثابتة بالكامل حسب الاتفاق — غير قابلة للتعديل من الإعدادات
+# 🚀 Trend + StochRSI: استراتيجية ثالثة مستقلة (StochRSI + فوليوم + فلتر Beta مقابل BTC)
 # ──────────────────────────────────────────────
-TREND_STOCH_INTERVAL   = Client.KLINE_INTERVAL_4HOUR   # فريم تأكيد الاتجاه العام (ثابت)
-TREND_STOCH_MA_LENGTH  = 50    # طول المتوسط المتحرك لتأكيد الاتجاه على فريم الـ 4 ساعات
+TREND_STOCH_INTERVAL   = Client.KLINE_INTERVAL_4HOUR   # (لم يعد يُستخدم لتأكيد الاتجاه — أُبقي للتوافق)
+TREND_STOCH_MA_LENGTH  = 50    # (لم يعد يُستخدم — أُبقي للتوافق مع إعدادات قديمة محفوظة)
 VOLUME_MA_LENGTH        = 20    # طول متوسط الفوليوم للمقارنة (فريم الدخول)
 VOLUME_MULTIPLIER       = 1.0   # الفوليوم الحالي لازم يكون أعلى من (أو يساوي) هذا المضاعف × المتوسط
+
+# ✅ فلتر Beta: بدل "تأكيد ترند العملة لحالها"، نطلب إن العملة تتحرك أعنف من BTC
+# (Beta > 1.2 يعني: لو BTC طلع 1%، العملة عادة بتطلع أكثر — استغلال زخم الترند الصاعد)
+TREND_STOCH_BETA_THRESHOLD = 1.2   # أقل Beta مقبول للشراء بهالاستراتيجية
+TREND_STOCH_BETA_LOOKBACK  = 30    # عدد الشموع (على نفس فريم الدخول الحالي) لحساب Beta
+BETA_CACHE_TTL_SECONDS      = 120   # نكاش شموع BTC 120 ثانية — نفس البيانات تُستخدم لكل عملات الدورة
 
 # ──────────────────────────────────────────────
 # 🚦 حماية من حظر بينانس بسبب كثرة الطلبات (Error -1003)
@@ -1535,35 +1540,36 @@ def check_stoch_rsi(client, symbol):
 # الشروط: StochRSI بمنطقة تشبع بيعي + تقاطع إيجابي فوق السعر > MA20،
 #         فوليوم أعلى من متوسطه، وتأكيد اتجاه صاعد على فريم 4 ساعات (السعر > MA50)
 # ──────────────────────────────────────────────
-def get_trend_confirmation(client, symbol):
-    """يتأكد أن الاتجاه العام على فريم TREND_STOCH_INTERVAL صاعد (آخر شمعة مغلقة فوق MA50)"""
-    try:
-        klines = client.get_klines(symbol=symbol, interval=TREND_STOCH_INTERVAL, limit=TREND_STOCH_MA_LENGTH + 5)
-        if not klines or len(klines) < TREND_STOCH_MA_LENGTH:
-            return False
-        closes = pd.Series([float(k[4]) for k in klines])
-        trend_ma = closes.rolling(window=TREND_STOCH_MA_LENGTH).mean()
-        last_closed_close = closes.iloc[-2]
-        last_closed_ma     = trend_ma.iloc[-2]
-        if pd.isna(last_closed_ma):
-            return False
-        return last_closed_close > last_closed_ma
-    except BinanceAPIException as e:
-        if is_rate_limit_error(e):
-            register_api_block(f"get_trend_confirmation({symbol})")
-        else:
-            log.error(f"❌ تأكيد اتجاه {symbol}: {e}")
-        return False
-    except Exception as e:
-        log.error(f"❌ تأكيد اتجاه {symbol}: {e}")
-        return False
+def get_btc_closes_cached(client):
+    """
+    يجيب آخر شموع BTC (بنفس الفريم الحالي current_interval) لاستخدامها بحساب Beta.
+    مكاشة لمدة BETA_CACHE_TTL_SECONDS — نفس البيانات تنعاد استخدامها لكل عملات
+    نفس دورة الفحص، بدل ما نطلب شموع BTC من جديد لكل عملة لحالها.
+    """
+    def _fetch():
+        try:
+            klines = client.get_klines(
+                symbol="BTCUSDT",
+                interval=current_interval,
+                limit=TREND_STOCH_BETA_LOOKBACK + 5,
+            )
+            if not klines:
+                return None
+            return pd.Series([float(k[4]) for k in klines])
+        except Exception as e:
+            log.error(f"❌ شموع BTC لحساب Beta: {e}")
+            return None
+
+    cache_key = f"btc_closes_beta_{current_interval}"
+    return get_cached_or_fetch(cache_key, _fetch, ttl=BETA_CACHE_TTL_SECONDS)
 
 def check_trend_stoch(client, symbol):
     """
     إشارة الشراء (الثلاث شروط لازم تتحقق كلها):
     - نفس شرط Stochastic RSI (تشبع بيعي + تقاطع إيجابي + اختراق 20) + السعر فوق MA20
     - الفوليوم الحالي أعلى من متوسطه (VOLUME_MULTIPLIER × المتوسط)
-    - الاتجاه العام على فريم 4 ساعات صاعد (تأكيد إضافي يمنع صفقات السكين الساقطة)
+    - Beta العملة مقابل BTC أعلى من TREND_STOCH_BETA_THRESHOLD (تتحرك أعنف من BTC،
+      فلو BTC بترند صاعد، هاي العملة عادة بتطلع أكثر منه — استغلال الزخم)
     يعيد dict بالقيم أو None لو مافي إشارة
     """
     try:
@@ -1599,8 +1605,14 @@ def check_trend_stoch(client, symbol):
         if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * VOLUME_MULTIPLIER):
             return None
 
-        # فلتر تأكيد الاتجاه على فريم 4 ساعات
-        if not get_trend_confirmation(client, symbol):
+        # فلتر Beta: العملة لازم تكون أعنف حركة من BTC
+        btc_closes = get_btc_closes_cached(client)
+        if btc_closes is None or len(btc_closes) < TREND_STOCH_BETA_LOOKBACK:
+            return None   # ما قدرنا نتأكد من Beta — نتجاهل الإشارة احتياطاً
+
+        coin_closes_for_beta = closes.iloc[-len(btc_closes):]   # نفس عدد الشموع بالضبط
+        beta_value = calculate_beta(coin_closes_for_beta, btc_closes)
+        if beta_value is None or beta_value < TREND_STOCH_BETA_THRESHOLD:
             return None
 
         bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
@@ -1611,6 +1623,7 @@ def check_trend_stoch(client, symbol):
             "d_prev": d_prev,
             "price" : price,
             "ma20"  : ma20,
+            "beta"  : beta_value,
             "atr"   : calculate_atr(highs, lows, closes),
             "vwap"    : calculate_vwap(highs, lows, closes, volumes),
             "bb_lower": bb_lower,
@@ -2613,7 +2626,8 @@ def run_bot():
                         if passes_confirmation_filters(trend_sig):
                             signal_info = (
                                 f"🚀 Trend+Stoch K: {trend_sig['k_prev']} → {trend_sig['k_curr']} | "
-                                f"D: {trend_sig['d_prev']} → {trend_sig['d_curr']} | ✅ اتجاه 4س صاعد + فوليوم قوي"
+                                f"D: {trend_sig['d_prev']} → {trend_sig['d_curr']} | "
+                                f"β={trend_sig.get('beta', '؟')} (أعنف من BTC) + فوليوم قوي"
                             )
                             candidates.append((trend_sig.get("momentum_score", 0.0), symbol, trend_sig["price"], trend_sig.get("atr"), signal_info))
 
