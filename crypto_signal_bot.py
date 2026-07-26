@@ -2024,7 +2024,7 @@ def api_get_settings():
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             "vwap_filter_enabled": VWAP_FILTER_ENABLED,
             "bb_filter_enabled": BB_FILTER_ENABLED,
-            "inverse_btc_enabled": INVERSE_BTC_ENABLED,
+            "inverse_btc_enabled": current_strategy == "inverse_btc",   # ✅ إصلاح: كان يرجع INVERSE_BTC_ENABLED (إذن التبديل التلقائي) بدل الحالة الفعلية
             # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
             "inverse_btc_threshold": inv_cfg.get("btc_decline_threshold_pct", 3.0),
             "inverse_btc_rs_min": inv_cfg.get("rs_min_threshold_pct", 5.0),
@@ -2092,7 +2092,8 @@ def api_set_settings():
             current_strategy = "inverse_btc"
 
         # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
-        if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled")):
+        # (بما فيها inverse_btc — كانت ناقصة من القائمة، وهذا سبب "الزرار يضل مثبت")
+        if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled", "inverse_btc_enabled")):
             if _regime_detector:
                 _regime_detector.current_strategy = current_strategy
                 _regime_detector.last_switch_time = time.time()
