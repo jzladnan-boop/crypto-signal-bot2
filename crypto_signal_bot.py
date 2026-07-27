@@ -30,6 +30,7 @@ from functools import wraps
 from market_regime import MarketRegimeDetector
 from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_beta
+from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
 # ──────────────────────────────────────────────
 # ⚙️ الإعدادات الأساسية — نفس الأصلي
@@ -42,6 +43,10 @@ CIRCUIT_FILE   = os.path.join(DATA_DIR, "circuit_breaker.json")   # 🛑 ملف 
 SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")   # ⚙️ ملف حفظ الإعدادات (تنجو من إعادة التشغيل)
 PUSH_TOKENS_FILE = os.path.join(DATA_DIR, "push_tokens.json")   # 📱 ملف حفظ Push Tokens
 NOTIFICATIONS_FILE = os.path.join(DATA_DIR, "notifications.json")   # 🔔 سجل الإشعارات لعرضه بالتطبيق
+COIN_MEMORY_FILE   = os.path.join(DATA_DIR, "coin_memory.db")   # 🧠 ذاكرة الأداء التاريخي لكل عملة (SQLite)
+
+# 🧠 نظام الذاكرة الذكية (Adaptive Memory System): تخزين الأداء + التصنيف + الترتيب + صمام أمان ATR
+CORRELATION_UPDATE_INTERVAL = 30 * 60   # كل 30 دقيقة نعيد تصنيف ارتباط العملات مع BTC (تجنّب حمل زائد على الـ API)
 MAX_NOTIFICATIONS = 50
 
 DEFAULT_BASE_SYMBOLS = [
@@ -221,6 +226,16 @@ _binance_client     = None   # 📊 مرجع لعميل بينانس، تستخ�
 AUTO_STRATEGY_ENABLED   = False   # 🔘 مطفي افتراضياً — لازم تفعّله يدوياً بأمر /set_auto_strategy on
 AUTO_STRATEGY_INTERVAL  = 15 * 60 # فحص كل 15 دقيقة
 _regime_detector        = None    # مرجع الكاشف (يُنشأ عند بدء تشغيل البوت)
+
+# ──────────────────────────────────────────────
+# 🧠 Adaptive Memory System: ذاكرة أداء العملات + تصنيف الارتباط + الترتيب الذكي + صمام أمان ATR
+# لا تحتاج اتصال بينانس، فتُنشأ فوراً عند استيراد الملف (بعكس _regime_detector).
+# ──────────────────────────────────────────────
+coin_memory   = CoinMemory(COIN_MEMORY_FILE)
+corr_engine   = CorrelationEngine(coin_memory)
+smart_ranker  = SmartRanker(coin_memory)
+atr_guard     = ATRGuard()
+_last_correlation_update = 0   # timestamp لآخر تحديث لتصنيف الارتباط مع BTC
 
 # ──────────────────────────────────────────────
 # 📐 فلاتر تأكيد إضافية: VWAP + Bollinger Bands (اختيارية، مطفية افتراضياً)
@@ -476,7 +491,7 @@ def save_profit_log(log_data, month=None):
     except Exception as e:
         log.error(f"❌ خطأ حفظ الأرباح: {e}")
 
-def record_trade_result(symbol, entry_price, exit_price, qty, reason):
+def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slippage_pct=0.0):
     """يسجل نتيجة كل صفقة في ملف الشهر الحالي"""
     month       = time.strftime("%Y_%m")
     profit_log  = load_profit_log(month)
@@ -499,6 +514,18 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason):
         "time"       : time.strftime("%Y-%m-%d %H:%M:%S")
     })
     save_profit_log(profit_log, month)
+
+    # 🧠 نُسجّل نفس النتيجة بذاكرة العملات (coin_memory): فوز/خسارة + الانزلاق،
+    # ليستخدمها SmartRanker لاحقاً بترتيب المرشحين. أي خطأ هون ما لازم يوقف تسجيل الربح نفسه.
+    try:
+        coin_memory.record_trade(
+            symbol=symbol,
+            is_win=(profit > 0),
+            pnl=profit,
+            slippage_pct=entry_slippage_pct,
+        )
+    except Exception as e:
+        log.error(f"❌ تسجيل ذاكرة العملة {symbol}: {e}")
 
 # ──────────────────────────────────────────────
 # 📱 Push Notifications (Expo) — لازم تكون معرّفة قبل send_telegram
@@ -1563,6 +1590,52 @@ def get_btc_closes_cached(client):
     cache_key = f"btc_closes_beta_{current_interval}"
     return get_cached_or_fetch(cache_key, _fetch, ttl=BETA_CACHE_TTL_SECONDS)
 
+# ──────────────────────────────────────────────
+# 🧠 تحديث تصنيف الارتباط مع BTC لكل عملة (ذاكرة العملات) — دوري وليس بكل دورة فحص
+# ──────────────────────────────────────────────
+CORRELATION_LOOKBACK = 60   # عدد الشموع المستخدمة بحساب الارتباط (نفس الفريم الحالي)
+
+def update_symbol_correlations(client, symbols):
+    """
+    يُحدّث تصنيف كل عملة بذاكرة العملات: TREND_FOLLOWER (تمشي مع BTC) أو
+    INVERSE_STRENGTH (تقاوم/تبرز وقت هبوط BTC) أو NEUTRAL.
+    يُستدعى دورياً (كل CORRELATION_UPDATE_INTERVAL) وليس بكل دورة فحص مكثف،
+    لتفادي حمل إضافي على وزن الـ API.
+    """
+    try:
+        btc_closes = get_btc_closes_cached(client)
+        if btc_closes is None or len(btc_closes) < 10:
+            return
+        btc_returns = btc_closes.pct_change().dropna()
+
+        for symbol in symbols:
+            try:
+                klines = client.get_klines(symbol=symbol, interval=current_interval, limit=CORRELATION_LOOKBACK + 5)
+                if not klines or len(klines) < 10:
+                    continue
+                coin_closes = pd.Series([float(k[4]) for k in klines])
+                coin_returns = coin_closes.pct_change().dropna()
+
+                min_len = min(len(btc_returns), len(coin_returns))
+                if min_len < 10:
+                    continue
+
+                corr_engine.update_symbol_correlation(
+                    symbol,
+                    btc_returns=btc_returns.iloc[-min_len:].tolist(),
+                    symbol_returns=coin_returns.iloc[-min_len:].tolist(),
+                )
+                time.sleep(0.15)   # تفادي ضغط سريع على الـ API
+            except BinanceAPIException as e:
+                if is_rate_limit_error(e):
+                    register_api_block(f"update_symbol_correlations({symbol})")
+                    break
+            except Exception as e:
+                log.error(f"❌ تحديث ارتباط {symbol}: {e}")
+    except Exception as e:
+        log.error(f"❌ تحديث ارتباط العملات (عام): {e}")
+
+
 def check_trend_stoch(client, symbol):
     """
     إشارة الشراء (الثلاث شروط لازم تتحقق كلها):
@@ -1710,7 +1783,8 @@ def close_trade(client, symbol):
     if sell_price:
         # ✅ إصلاح: نستخدم الكمية الفعلية المُنفَّذة (sold_qty) لحساب الربح،
         # مش الكمية المسجلة بالذاكرة، عشان الربح يطابق تمامًا اللي صار على بينانس
-        record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "manual_close")
+        record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "manual_close",
+                             entry_slippage_pct=trade.get("entry_slippage_pct", 0.0))
         with _lock:
             if symbol in open_trades:
                 del open_trades[symbol]
@@ -1771,11 +1845,21 @@ def buy_market(client, symbol, usdt_amount):
             actual_entry_price = price
             net_qty             = qty
 
+        # 🧠 الانزلاق الفعلي عند الدخول = الفرق بين السعر التقديري (قبل الأمر)
+        # وسعر التنفيذ الفعلي (weighted average من fills). يُخزَّن بالصفقة
+        # ليُستخدم لاحقاً بذاكرة العملات (coin_memory) عند إغلاقها.
+        entry_slippage_pct = abs(actual_entry_price - price) / price * 100 if price else 0.0
+
         log.info(
             f"✅ شراء {symbol} | سعر تقديري: {price} | سعر تنفيذ فعلي: {actual_entry_price:.8f} | "
-            f"الكمية الفعلية: {net_qty}"
+            f"الكمية الفعلية: {net_qty} | انزلاق: {entry_slippage_pct:.3f}%"
         )
-        return {"qty": net_qty, "entry_price": actual_entry_price, "order_id": order["orderId"]}
+        return {
+            "qty": net_qty,
+            "entry_price": actual_entry_price,
+            "order_id": order["orderId"],
+            "entry_slippage_pct": round(entry_slippage_pct, 4),
+        }
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
             register_api_block(f"buy_market({symbol})")
@@ -2332,7 +2416,7 @@ def start_dashboard():
 # ──────────────────────────────────────────────
 def run_bot():
     global consecutive_losses, pause_until, trading_enabled
-    global _binance_client, _regime_detector
+    global _binance_client, _regime_detector, _last_correlation_update
     global current_strategy
 
     os.makedirs(DATA_DIR, exist_ok=True)   # 📁 تأكد إن مجلد البيانات (Volume) موجود
@@ -2479,7 +2563,10 @@ def run_bot():
                     coin  = symbol.replace("USDT", "")
 
                     if not trade["trailing_active"]:
-                        if price >= trade["entry_price"] * (1 + TRAIL_ACTIVATE_PCT):
+                        # 🧠 لو الصفقة دخلت بوضع Strict Mode (عملة ذات تاريخ ضعيف بذاكرة العملات)،
+                        # نقطة تفعيل الـ Trailing تكون مضاعفة (تعويض تضييق الـ SL بمهلة ربح أوسع).
+                        trail_activate_pct = trade.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
+                        if price >= trade["entry_price"] * (1 + trail_activate_pct):
                             trade["trailing_active"] = True
                             trade["highest_price"]   = price
                             # ✅ إصلاح: حماية Breakeven — أول ما الصفقة تدخل بربح، الستوب
@@ -2504,7 +2591,8 @@ def run_bot():
                                 buy_amount  = round(trade["entry_price"] * sold_qty, 4)
                                 sell_amount = round(sell_price * sold_qty, 4)
                                 pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
-                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "trailing_stop")  # ✅ إصلاح #3
+                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "trailing_stop",
+                                                     entry_slippage_pct=trade.get("entry_slippage_pct", 0.0))  # ✅ إصلاح #3
                                 consecutive_losses = 0   # 🛑 صفقة رابحة → تصفير عدّاد الخسارات المتتالية
                                 save_circuit_state()
                                 send_telegram(
@@ -2530,7 +2618,8 @@ def run_bot():
                                 buy_amount  = round(trade["entry_price"] * sold_qty, 4)
                                 sell_amount = round(sell_price * sold_qty, 4)
                                 pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
-                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "stop_loss")  # ✅ إصلاح #3
+                                record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "stop_loss",
+                                                     entry_slippage_pct=trade.get("entry_slippage_pct", 0.0))  # ✅ إصلاح #3
                                 send_telegram(
                                     f"🚨 <b>ستوب لوز - {coin}</b>\n"
                                     f"📉 السعر: {sell_price:.6f}$\n"
@@ -2567,6 +2656,11 @@ def run_bot():
             if now - last_scan >= SCAN_INTERVAL:
                 scan_all_symbols(client)
                 last_scan = now
+
+            # 🧠 تحديث تصنيف ارتباط العملات مع BTC دورياً (وليس كل دورة) — ذاكرة العملات
+            if not is_api_blocked() and (now - _last_correlation_update >= CORRELATION_UPDATE_INTERVAL):
+                update_symbol_correlations(client, list(SYMBOLS))
+                _last_correlation_update = now
 
             # ── 3. فحص مكثف للمرشحين ───
             with _lock:
@@ -2653,13 +2747,40 @@ def run_bot():
 
                     time.sleep(0.2)
 
-                # ══ المرحلة 2: ترتيب المرشحين حسب قوة الزخم (الأقوى أولاً) وتنفيذ الشراء ══
+                # ══ المرحلة 2: ترتيب المرشحين — ذاكرة العملات أولاً (تاريخ نظيف يتقدّم)، والزخم كمُرجِّح ثانوي ══
                 if candidates:
-                    candidates.sort(key=lambda c: c[0], reverse=True)
-                    if len(candidates) > 1:
-                        log.info(f"🏆 {len(candidates)} مرشح بنفس الدورة — رتبناهم بالزخم: {[c[1] for c in candidates]}")
+                    cand_map = {c[1]: c for c in candidates}   # symbol -> (momentum, symbol, price, atr_value, signal_info)
 
-                    for momentum_score, symbol, price, atr_value, signal_info in candidates:
+                    # 🌡️ حالة السوق الحالية (BULL/BEAR/SIDEWAYS) — نحسبها أولاً، مرة واحدة لكل دورة،
+                    # ونمرّرها لمحرك الترتيب عشان يُفعّل فعليًا مكافأة/عقوبة تصنيف الارتباط مع BTC:
+                    # وقت هبوط BTC (BEAR) تُفضَّل العملات المصنّفة INVERSE_STRENGTH (تقاوم/تبرز)،
+                    # ووقت صعوده (BULL) تُفضَّل العملات المصنّفة TREND_FOLLOWER (تتماشى معه).
+                    regime_label = _regime_detector.get_regime_label() if _regime_detector else "SIDEWAYS"
+                    try:
+                        market_regime = MarketRegime(regime_label)
+                    except ValueError:
+                        market_regime = MarketRegime.SIDEWAYS
+
+                    # 🧠 لا نختار مباشرة بالزخم فقط؛ نرجع لذاكرة العملات لتصنيف كل مرشح
+                    # (تاريخ نظيف / تاريخ ضعيف يتطلب Strict Mode / بدون سجل كافٍ بعد) + مكافأة الارتباط مع BTC
+                    ranked = smart_ranker.rank(list(cand_map.keys()), btc_trend=regime_label)
+
+                    # ترتيب نهائي: غير-الـ Strict أولاً (تاريخ نظيف)، وداخل كل مجموعة الأعلى score
+                    # ثم الأعلى زخماً كمُرجِّح أخير عند تساوي score تقريباً
+                    ranked.sort(key=lambda r: (r.strict_mode, -r.score, -cand_map[r.symbol][0]))
+
+                    if len(ranked) > 1:
+                        log.info(
+                            "🏆 %d مرشح بنفس الدورة — الترتيب الذكي (%s): %s",
+                            len(ranked), regime_label,
+                            [(r.symbol, round(r.score, 2), "STRICT" if r.strict_mode else "OK") for r in ranked],
+                        )
+
+                    for ranked_symbol in ranked:
+                        symbol = ranked_symbol.symbol
+                        momentum_score, _, price, atr_value, signal_info = cand_map[symbol]
+                        is_strict = ranked_symbol.strict_mode
+
                         if is_api_blocked():
                             break
                         if count_active_trades() >= MAX_TRADES:
@@ -2679,39 +2800,55 @@ def run_bot():
                             if res:
                                 res["trailing_active"] = False
                                 res["highest_price"]   = res["entry_price"]
+                                res["strict_mode"]     = is_strict
 
-                                # 📐 ستوب لوس متحرك حسب ATR (تقلب العملة الطبيعي)، مع احتياطي بنسبة ثابتة
-                                stop_price   = None
-                                used_atr     = None
+                                # 📐 صمام أمان ATR/SL: مرتبط بحالة السوق (BULL/BEAR/SIDEWAYS)، مع سقف
+                                # صلب لا يتجاوز 2.5%-3% من سعر الدخول مهما كانت قيمة ATR، ويُخفَّف الضربات
+                                # تلقائياً في Strict Mode (تاريخ ضعيف) مع مضاعفة نقطة تفعيل الربح (Trailing) تعويضاً.
+                                with _lock:
+                                    multiplier = ATR_MULTIPLIER
                                 if atr_value:
-                                    with _lock:
-                                        multiplier = ATR_MULTIPLIER
-                                    candidate_stop = res["entry_price"] - (multiplier * atr_value)
-                                    # حماية: ما نسمح بستوب أوسع من 15% ولا أضيق من 0.3% من سعر الدخول
-                                    min_price = res["entry_price"] * 0.997
-                                    max_price = res["entry_price"] * 0.85
-                                    if max_price < candidate_stop < min_price:
-                                        stop_price = candidate_stop
-                                        used_atr   = atr_value   # نخزنه بالصفقة عشان نعيد استخدامه بالـ Trailing لاحقاً
-                                if stop_price is None:
-                                    stop_price = res["entry_price"] * (1 - STOP_LOSS_PCT)   # احتياطي
+                                    sl_info = atr_guard.compute_stop_loss(
+                                        entry_price=res["entry_price"],
+                                        raw_atr_value=atr_value,
+                                        market_regime=market_regime,
+                                        strict_mode=is_strict,
+                                        atr_sl_multiple=multiplier,
+                                    )
+                                    stop_price = sl_info["sl_price"]
+                                    used_atr   = atr_value
+                                    stop_method = f"ATR×{sl_info['applied_atr_multiplier']}"
+                                    if sl_info["capped"]:
+                                        stop_method += " (سقف صلب)"
+                                else:
+                                    # لا يوجد ATR متاح: احتياطي بنسبة ثابتة، مقيّد بنفس السقف الصلب لضمان الاتساق
+                                    fallback_pct = min(STOP_LOSS_PCT * 100, atr_guard.HARD_CAP_PCT) / 100
+                                    stop_price   = res["entry_price"] * (1 - fallback_pct)
+                                    used_atr     = None
+                                    stop_method  = "ثابت (سقف صلب)"
 
                                 res["stop_loss"] = round(stop_price, 8)
                                 res["atr"]       = used_atr   # None لو استخدمنا الاحتياطي الثابت
+
+                                # 🧠 مضاعفة نقطة تفعيل Trailing (تقبّليات أوسع) بوضع Strict Mode فقط
+                                tp_multiplier = atr_guard.get_take_profit_multiplier(is_strict)
+                                res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
+
                                 open_trades[symbol]    = res
                                 save_trades()
                                 watch_list.discard(symbol)
 
                                 coin_name   = symbol.replace("USDT", "")
                                 sl_value    = res["stop_loss"]
-                                stop_method = "ATR" if used_atr else "ثابت"
-                                momentum_line = f"🏆 زخم: {momentum_score:.2f}\n" if len(candidates) > 1 else ""
+                                strict_line = "\n⚠️ Strict Mode: تاريخ ضعيف/غير مختبر — ATR مخفّض وتقبّل مضاعف" if is_strict else ""
+                                momentum_line = f"🏆 زخم: {momentum_score:.2f}\n" if len(ranked) > 1 else ""
                                 send_telegram(
                                     f"🟢 <b>شراء {coin_name}</b>\n"
                                     f"{signal_info}\n"
                                     f"{momentum_line}"
                                     f"💵 السعر: {res['entry_price']}\n"
-                                    f"🛡️ Stop Loss ({stop_method}): {sl_value}\n"
+                                    f"🛡️ Stop Loss ({stop_method}): {sl_value}"
+                                    f"{strict_line}\n"
                                     f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}"
                                 )
                         else:
