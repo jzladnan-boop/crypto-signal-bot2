@@ -251,6 +251,29 @@ class MarketRegimeDetector:
         self.last_switch_time = now
         return proposed_strategy, reason, True
 
+    # ──────────────────────────────────────────────
+    # 🧩 تصنيف مبسّط لصمام أمان ATR (coin_memory.ATRGuard)
+    # يعيد "BULL" / "BEAR" / "SIDEWAYS" بالاعتماد على نفس تحليل الترند
+    # المستخدم أصلاً بـ decide() — بدون أي طلب API إضافي.
+    # ──────────────────────────────────────────────
+    def get_regime_label(self):
+        """
+        يرجع str من {"BULL", "BEAR", "SIDEWAYS"} لاستخدامه مباشرة مع
+        coin_memory.ATRGuard.compute_stop_loss(market_regime=...).
+        - BULL     : اتجاه صاعد واضح (نفس شرط trend_stoch: السعر فوق MA50 بهامش كافٍ)
+        - BEAR     : اتجاه هابط واضح (تحت MA50 بهامش سلبي واضح)
+        - SIDEWAYS : غير ذلك (ترند غير واضح، أو تعذر التحليل)
+        """
+        is_uptrend, trend_margin = self._get_trend_state()
+        if is_uptrend is None or trend_margin is None:
+            return "SIDEWAYS"   # تعذر التحليل — نتعامل بحذر افتراضي
+
+        if is_uptrend and trend_margin >= self.trend_margin_pct:
+            return "BULL"
+        if (not is_uptrend) and abs(trend_margin) >= self.trend_margin_pct:
+            return "BEAR"
+        return "SIDEWAYS"
+
     def set_inverse_btc_enabled(self, enabled, decline_threshold=0.03):
         """
         يفعّل/يطفي استراتيجية Inverse BTC بالتبديل التلقائي.
