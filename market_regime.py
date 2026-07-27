@@ -188,14 +188,17 @@ class MarketRegimeDetector:
         effective_trend_margin = self.trend_margin_pct * (2 if is_extreme_sentiment else 1)
 
         # 🔄 فحص Inverse BTC (ضمن التنقل التلقائي): لو BTC نازل بقوة → نحوّل لـ inverse_btc
-        # هذا القرار تلقائي — مش يدوي. لو المستخدم ما بدّه inverse_btc، يطفي التبديل التلقائي
-        btc_decline = self._get_btc_decline_for_inverse()
-        if btc_decline is not None and btc_decline <= -self.inverse_btc_decline_threshold:
-            reason = (
-                f"BTC نازل {abs(btc_decline)*100:.2f}% (24 ساعة) — "
-                f"البحث عن عملات مقاومة{fg_suffix}"
-            )
-            return "inverse_btc", reason
+        # ✅ إصلاح خلل: كان الفحص يصير دايماً بغض النظر عن self.inverse_btc_enabled —
+        # يعني حتى لو المستخدم طفّى الإذن، البوت كان يحوّل لـ inverse_btc تلقائياً برضه.
+        # هلق نحترم الإذن فعلياً: لو مطفي، نتجاهل هذا الفحص كلياً ونكمل للاستراتيجيات الثانية.
+        if self.inverse_btc_enabled:
+            btc_decline = self._get_btc_decline_for_inverse()
+            if btc_decline is not None and btc_decline <= -self.inverse_btc_decline_threshold:
+                reason = (
+                    f"BTC نازل {abs(btc_decline)*100:.2f}% (24 ساعة) — "
+                    f"البحث عن عملات مقاومة{fg_suffix}"
+                )
+                return "inverse_btc", reason
 
         # ترند واضح: BTC فوق MA50 (فريم 4 ساعات) بهامش أكبر من الحد المطلوب
         if is_uptrend and trend_margin >= effective_trend_margin:
