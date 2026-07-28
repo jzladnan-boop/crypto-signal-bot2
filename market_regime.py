@@ -53,6 +53,9 @@ class MarketRegimeDetector:
         fear_greed_extreme_low=20,    # تحت هذا الرقم = خوف شديد
         fear_greed_extreme_high=80,   # فوق هذا الرقم = جشع شديد
         fear_greed_cache_minutes=10,  # نكاش قيمة المؤشر عشان ما نضرب الـ API كل فحص
+        inverse_btc_trend_margin_pct=0.02,
+        inverse_btc_confirmations_required=2,
+        inverse_btc_recovery_threshold_pct=0.015,
     ):
         self.client = client
         self.symbol = symbol
@@ -70,6 +73,11 @@ class MarketRegimeDetector:
         # 🔄 إعدادات Inverse BTC للتبديل التلقائي
         self.inverse_btc_enabled = False   # يُحدد من bot.py
         self.inverse_btc_decline_threshold = 0.03  # 3% نزول BTC
+        self.inverse_btc_trend_margin_pct = inverse_btc_trend_margin_pct
+        self.inverse_btc_confirmations_required = max(1, int(inverse_btc_confirmations_required))
+        self.inverse_btc_recovery_threshold_pct = inverse_btc_recovery_threshold_pct
+        self._inverse_confirmation_count = 0
+        self._inverse_exit_requested = False
 
         self.current_strategy = None   # آخر استراتيجية قررها الكاشف
         self.last_switch_time = 0      # timestamp لآخر تبديل فعلي طُبّق
@@ -164,6 +172,33 @@ class MarketRegimeDetector:
         except Exception:
             return None
 
+    def _get_inverse_btc_market_state(self, is_uptrend, trend_margin):
+        """يرجع حالة سوق Inverse BTC: دخول مؤكد، خروج/تعافٍ، ونسبة تغير BTC."""
+        if not self.inverse_btc_enabled:
+            self._inverse_confirmation_count = 0
+            return False, False, None
+
+        btc_decline = self._get_btc_decline_for_inverse()
+        if btc_decline is None or trend_margin is None or is_uptrend is None:
+            return False, False, btc_decline
+
+        # الدخول: نزول 24 ساعة قوي + BTC تحت MA50 بهامش واضح على 4 ساعات.
+        strong_downtrend = (
+            (not is_uptrend)
+            and trend_margin <= -self.inverse_btc_trend_margin_pct
+            and btc_decline <= -self.inverse_btc_decline_threshold
+        )
+
+        # الخروج أهدأ من الدخول (Hysteresis): لا نخرج من Inverse عند ارتداد صغير،
+        # لكن نخرج فوراً عند تعافي واضح أو عودة السعر فوق MA50.
+        recovery_margin = self.inverse_btc_trend_margin_pct * 0.5
+        market_recovered = (
+            btc_decline > -self.inverse_btc_recovery_threshold_pct
+            or is_uptrend
+            or trend_margin > -recovery_margin
+        )
+        return strong_downtrend, market_recovered, btc_decline
+
     # ──────────────────────────────────────────────
     # القرار الخام (بدون فترة تبريد)
     # ──────────────────────────────────────────────
@@ -187,18 +222,33 @@ class MarketRegimeDetector:
         # نطلب هامش ترند أوضح (ضعف الطبيعي) قبل ما نثق فيه ونحوّل لـ trend_stoch
         effective_trend_margin = self.trend_margin_pct * (2 if is_extreme_sentiment else 1)
 
-        # 🔄 فحص Inverse BTC (ضمن التنقل التلقائي): لو BTC نازل بقوة → نحوّل لـ inverse_btc
-        # ✅ إصلاح خلل: كان الفحص يصير دايماً بغض النظر عن self.inverse_btc_enabled —
-        # يعني حتى لو المستخدم طفّى الإذن، البوت كان يحوّل لـ inverse_btc تلقائياً برضه.
-        # هلق نحترم الإذن فعلياً: لو مطفي، نتجاهل هذا الفحص كلياً ونكمل للاستراتيجيات الثانية.
-        if self.inverse_btc_enabled:
-            btc_decline = self._get_btc_decline_for_inverse()
-            if btc_decline is not None and btc_decline <= -self.inverse_btc_decline_threshold:
+        # Inverse BTC: لا يكفي نزول 24 ساعة وحده. نطلب اتجاه هابط واضح على 4 ساعات
+        # وتأكيده في أكثر من فحص متتالٍ حتى لا ننتقل بسبب حركة مؤقتة.
+        self._inverse_exit_requested = False
+        inverse_market, inverse_recovered, btc_decline = self._get_inverse_btc_market_state(
+            is_uptrend, trend_margin
+        )
+        if self.current_strategy == "inverse_btc":
+            if not inverse_recovered:
+                decline_text = f"{abs(btc_decline)*100:.2f}%" if btc_decline is not None else "غير متاح"
+                return "inverse_btc", f"ما زال BTC هابطاً بقوة ({decline_text}) — استمرار Inverse BTC{fg_suffix}"
+            self._inverse_exit_requested = True
+        elif inverse_market:
+            self._inverse_confirmation_count += 1
+            required = self.inverse_btc_confirmations_required
+            if self._inverse_confirmation_count >= required:
                 reason = (
-                    f"BTC نازل {abs(btc_decline)*100:.2f}% (24 ساعة) — "
-                    f"البحث عن عملات مقاومة{fg_suffix}"
+                    f"هبوط BTC مؤكد: {abs(btc_decline)*100:.2f}% خلال 24 ساعة، "
+                    f"وتحت MA50 بـ {abs(trend_margin)*100:.2f}% "
+                    f"({self._inverse_confirmation_count}/{required} تأكيد) — البحث عن عملات مقاومة{fg_suffix}"
                 )
                 return "inverse_btc", reason
+        else:
+            self._inverse_confirmation_count = 0
+
+        # سوق هابط لكن شروط Inverse القوية لم تكتمل: لا ندخل صفقات شراء عادية.
+        if (not is_uptrend) and trend_margin <= -self.trend_margin_pct:
+            return "defensive", f"BTC تحت MA50 بـ {abs(trend_margin)*100:.2f}% — إيقاف صفقات الشراء الجديدة{fg_suffix}"
 
         # ترند واضح: BTC فوق MA50 (فريم 4 ساعات) بهامش أكبر من الحد المطلوب
         if is_uptrend and trend_margin >= effective_trend_margin:
@@ -242,6 +292,14 @@ class MarketRegimeDetector:
         if proposed_strategy == self.current_strategy:
             return self.current_strategy, reason, False
 
+        # Inverse يدخل فقط بعد تأكيدات متعددة، ويخرج فوراً إذا تعافى السوق؛
+        # لذلك لا نحبسه ضمن فترة التبريد العامة.
+        if proposed_strategy == "inverse_btc" or self._inverse_exit_requested:
+            self.current_strategy = proposed_strategy
+            self.last_switch_time = now
+            self._inverse_confirmation_count = 0
+            return proposed_strategy, reason, True
+
         # اقتراح مختلف — نتأكد من انتهاء فترة التبريد قبل التبديل
         if (now - self.last_switch_time) < (self.cooldown_minutes * 60):
             return self.current_strategy, reason, False   # لسا بفترة تبريد، نتجاهل الاقتراح مؤقتاً
@@ -274,10 +332,22 @@ class MarketRegimeDetector:
             return "BEAR"
         return "SIDEWAYS"
 
-    def set_inverse_btc_enabled(self, enabled, decline_threshold=0.03):
+    def set_inverse_btc_enabled(
+        self,
+        enabled,
+        decline_threshold=0.03,
+        trend_margin_pct=0.02,
+        confirmations_required=2,
+        recovery_threshold_pct=0.015,
+    ):
         """
         يفعّل/يطفي استراتيجية Inverse BTC بالتبديل التلقائي.
         يُستدعى من bot.py لما المستخدم يغيّر الإعداد.
         """
         self.inverse_btc_enabled = enabled
         self.inverse_btc_decline_threshold = decline_threshold
+        self.inverse_btc_trend_margin_pct = max(float(trend_margin_pct), 0.0)
+        self.inverse_btc_confirmations_required = max(1, int(confirmations_required))
+        self.inverse_btc_recovery_threshold_pct = max(float(recovery_threshold_pct), 0.0)
+        if not enabled:
+            self._inverse_confirmation_count = 0
