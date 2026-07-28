@@ -22,12 +22,20 @@ from binance.client import Client
 # ── إعدادات افتراضية (قابلة للتعديل من التطبيق) ─────────────────────────
 DEFAULT_CONFIG = {
     "btc_symbol": "BTCUSDT",
-    "btc_decline_threshold_pct": 1.0,   # ✅ BTC لازم ينزل 1% على الأقل (24 ساعة)
-    "rs_min_threshold_pct": 1.0,        # ✅ العملة لازم تكون صاعدة 1% على الأقل
+    # شروط سوق BTC للتفعيل التلقائي. تُستخدم أيضاً من market_regime.py.
+    "btc_decline_threshold_pct": 3.0,   # BTC لازم ينزل 3% على الأقل خلال 24 ساعة
+    "btc_trend_margin_pct": 2.0,        # BTC تحت MA50 (4 ساعات) بهامش 2% على الأقل
+    "market_confirmations_required": 2, # عدد فحوص السوق المتتالية قبل التحويل لـ Inverse
+    "market_recovery_threshold_pct": 1.5, # الخروج من Inverse عند تعافي BTC فوق -1.5%
+    # شروط اختيار العملة والدخول بعد ارتداد مؤكد.
+    "rs_min_threshold_pct": 5.0,        # العملة لازم تكون صاعدة 5% على الأقل
     "rsi_max_for_entry": 40,            # RSI لازم يكون تحت 40
-    "stoch_k_max_for_entry": 30,        # StochRSI K تحت 30
+    "rsi_rebound_min": 30,              # RSI لازم يرتد صعوداً ويصل لهذا الحد
+    "stoch_k_max_for_entry": 30,        # StochRSI K السابق كان بمنطقة التشبع
+    "stoch_k_rebound_min": 20,          # StochRSI K الحالي لازم يرتد فوق هذا الحد
     "volume_ma_period": 20,             # فترة متوسط الفوليوم
     "min_volume_ratio": 1.2,            # الفوليوم الحالي 1.2× المتوسط
+    "max_price_below_ma20_pct": 0.5,    # لا نشتري لو السعر تحت MA20 بأكثر من هذه النسبة
 }
 
 _current_config = dict(DEFAULT_CONFIG)
@@ -125,42 +133,61 @@ def get_inverse_indicators(client, symbol, interval=Client.KLINE_INTERVAL_30MINU
     """
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=100)
+        cfg = get_config()
+        min_required = max(20, cfg["volume_ma_period"]) + 3
+        if not klines or len(klines) < min_required:
+            return None
         closes = pd.Series([float(k[4]) for k in klines])
         highs = pd.Series([float(k[2]) for k in klines])
         lows = pd.Series([float(k[3]) for k in klines])
         volumes = pd.Series([float(k[5]) for k in klines])
 
+        # نعتمد آخر شمعة مغلقة فقط، والشمعة التي قبلها للمقارنة.
+        # هذا يمنع دخولاً بسبب إشارة تختفي قبل إغلاق الشمعة الحالية.
+        closed_idx = -2
+        previous_idx = -3
+
         # RSI
-        rsi = ta.momentum.RSIIndicator(close=closes, window=14).rsi().iloc[-1]
+        rsi_series = ta.momentum.RSIIndicator(close=closes, window=14).rsi()
+        rsi = rsi_series.iloc[closed_idx]
+        rsi_prev = rsi_series.iloc[previous_idx]
 
         # StochRSI
         stoch = ta.momentum.StochRSIIndicator(close=closes, window=14, smooth1=3, smooth2=3)
-        k_line = stoch.stochrsi_k().iloc[-1] * 100
-        d_line = stoch.stochrsi_d().iloc[-1] * 100
+        k_series = stoch.stochrsi_k() * 100
+        d_series = stoch.stochrsi_d() * 100
+        k_line = k_series.iloc[closed_idx]
+        d_line = d_series.iloc[closed_idx]
+        k_prev = k_series.iloc[previous_idx]
+        d_prev = d_series.iloc[previous_idx]
 
         # MA20
-        ma20 = closes.rolling(window=20).mean().iloc[-1]
+        ma20 = closes.rolling(window=20).mean().iloc[closed_idx]
 
         # ATR
         atr = ta.volatility.AverageTrueRange(
             high=highs, low=lows, close=closes, window=14
-        ).average_true_range().iloc[-1]
+        ).average_true_range().iloc[closed_idx]
 
         # Volume
-        cfg = get_config()
-        vol_ma = volumes.rolling(window=cfg["volume_ma_period"]).mean().iloc[-1]
-        vol_ratio = volumes.iloc[-1] / vol_ma if vol_ma > 0 else 0
+        vol_ma = volumes.rolling(window=cfg["volume_ma_period"]).mean().iloc[closed_idx]
+        vol_ratio = volumes.iloc[closed_idx] / vol_ma if vol_ma > 0 else 0
 
-        price = float(closes.iloc[-1])
+        price = float(closes.iloc[closed_idx])
+        price_prev = float(closes.iloc[previous_idx])
 
         return {
             "rsi": round(float(rsi), 2) if not pd.isna(rsi) else None,
+            "rsi_prev": round(float(rsi_prev), 2) if not pd.isna(rsi_prev) else None,
             "stoch_k": round(float(k_line), 2) if not pd.isna(k_line) else None,
             "stoch_d": round(float(d_line), 2) if not pd.isna(d_line) else None,
+            "stoch_k_prev": round(float(k_prev), 2) if not pd.isna(k_prev) else None,
+            "stoch_d_prev": round(float(d_prev), 2) if not pd.isna(d_prev) else None,
             "ma20": round(float(ma20), 8) if not pd.isna(ma20) else None,
             "atr": float(atr) if not pd.isna(atr) and atr > 0 else None,
             "vol_ratio": round(float(vol_ratio), 2),
             "price": price,
+            "price_prev": price_prev,
         }
 
     except Exception:
@@ -195,16 +222,37 @@ def check_inverse_btc(client, symbol):
     if ind is None:
         return None
 
-    # RSI لازم يكون تحت الحد
-    if ind["rsi"] is None or ind["rsi"] >= cfg["rsi_max_for_entry"]:
+    # ندخل فقط بعد ارتداد RSI صعوداً داخل منطقة دخول منضبطة.
+    if (
+        ind["rsi"] is None or ind["rsi_prev"] is None
+        or not (cfg["rsi_rebound_min"] <= ind["rsi"] <= cfg["rsi_max_for_entry"])
+        or ind["rsi"] <= ind["rsi_prev"]
+    ):
         return None
 
-    # StochRSI لازم يكون بمنطقة تشبع بيعي
-    if ind["stoch_k"] is None or ind["stoch_k"] >= cfg["stoch_k_max_for_entry"]:
+    # تأكيد ارتداد: K كان بمنطقة التشبع، ثم عبر D وصعد فوق مستوى الارتداد.
+    if (
+        ind["stoch_k"] is None or ind["stoch_d"] is None
+        or ind["stoch_k_prev"] is None or ind["stoch_d_prev"] is None
+        or ind["stoch_k_prev"] > cfg["stoch_k_max_for_entry"]
+        or ind["stoch_k"] < cfg["stoch_k_rebound_min"]
+        or ind["stoch_k"] <= ind["stoch_d"]
+        or ind["stoch_k_prev"] > ind["stoch_d_prev"]
+        or ind["stoch_k"] <= ind["stoch_k_prev"]
+    ):
         return None
 
     # فوليوم أعلى من المتوسط
     if ind["vol_ratio"] < cfg["min_volume_ratio"]:
+        return None
+
+    # ✅ تأكيد الارتداد: الشمعة الأخيرة المغلقة لازم تكون صاعدة
+    # (السعر الحالي أعلى من السعر السابق) — هذا يضمن إن العملة بدأت ترتد فعلياً
+    if ind["price"] <= ind["price_prev"]:
+        return None
+
+    # لا نشتري عملة ما زالت بعيدة تحت متوسطها؛ نسمح بهامش صغير فقط.
+    if ind["ma20"] is None or ind["price"] < ind["ma20"] * (1 - cfg["max_price_below_ma20_pct"] / 100):
         return None
 
     # ── كل الشروط تحققت ──
@@ -226,7 +274,7 @@ def check_inverse_btc(client, symbol):
             f"🔄 <b>Inverse BTC — {coin_name}</b>\n"
             f"📉 BTC نازل {abs(btc_decline)*100:.1f}% (24 ساعة) | العملة صاعدة: +{coin_return*100:.1f}%\n"
             f"💪 قوة نسبية: +{rs_display}% (أقوى من BTC)\n"
-            f"📊 RSI: {ind['rsi']} | Stoch K: {ind['stoch_k']}\n"
+            f"📊 ارتداد مؤكد — RSI: {ind['rsi_prev']} → {ind['rsi']} | Stoch K: {ind['stoch_k_prev']} → {ind['stoch_k']}\n"
             f"📈 فوليوم: {ind['vol_ratio']:.1f}× المتوسط"
         ),
     }
