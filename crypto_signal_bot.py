@@ -2148,7 +2148,7 @@ def api_get_settings():
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             "vwap_filter_enabled": VWAP_FILTER_ENABLED,
             "bb_filter_enabled": BB_FILTER_ENABLED,
-            "inverse_btc_enabled": INVERSE_BTC_ENABLED,   # ✅ التبديل التلقائي فقط
+            "inverse_btc_enabled": current_strategy == "inverse_btc",
             "current_strategy": current_strategy,
             # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
             "inverse_btc_threshold": inv_cfg.get("btc_decline_threshold_pct", 3.0),
@@ -2213,11 +2213,12 @@ def api_set_settings():
             current_strategy = "stoch_rsi"
         if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
             current_strategy = "trend_stoch"
-        if "inverse_btc_enabled" in data:
-            INVERSE_BTC_ENABLED = bool(data["inverse_btc_enabled"])
+        if "inverse_btc_enabled" in data and data["inverse_btc_enabled"]:
+            current_strategy = "inverse_btc"
 
         # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
         # (بما فيها inverse_btc — كانت ناقصة من القائمة، وهذا سبب "الزرار يضل مثبت")
+        INVERSE_BTC_ENABLED = (current_strategy == "inverse_btc")
         if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled", "inverse_btc_enabled")):
             if _regime_detector:
                 _regime_detector.current_strategy = current_strategy
@@ -2264,8 +2265,8 @@ def api_set_settings():
             VWAP_FILTER_ENABLED = bool(data["vwap_filter_enabled"])
         if "bb_filter_enabled" in data:
             BB_FILTER_ENABLED = bool(data["bb_filter_enabled"])
-        if "inverse_btc_enabled" in data:
-            INVERSE_BTC_ENABLED = bool(data["inverse_btc_enabled"])
+        if "inverse_btc_enabled" in data and data["inverse_btc_enabled"]:
+            current_strategy = "inverse_btc"
 
         # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
         if "inverse_btc_threshold" in data:
@@ -2547,10 +2548,10 @@ def run_bot():
                 auto_on = AUTO_STRATEGY_ENABLED
                 inv_enabled = INVERSE_BTC_ENABLED
                 inv_cfg = dict(INVERSE_BTC_CONFIG)
-            # 🧠 نزامن حالة وإعدادات Inverse BTC بالكاشف (لو تغيّرت من التطبيق)
-            # ✅ إصلاح خلل: كان الشرط يقارن الزرار (on/off) بس، فلو غيّر المستخدم نسبة "حد نزول BTC"
-            # بدون ما يطفي/يشغّل الزرار من جديد، القيمة الجديدة ما كانت توصل لكاشف حالة السوق أبداً
-            # (يضل شغال بآخر عتبة كانت مضبوطة وقت آخر تفعيل فعلي للزرار).
+            # 🧠 نزامن حالة Inverse BTC بالكاشف — تلقائي حسب الاستراتيجية الحالية
+            # (لو المستخدم اختار Inverse BTC يدوياً أو التبديل التلقائي دخلها)
+            inv_enabled = (current_strategy == "inverse_btc")
+            INVERSE_BTC_ENABLED = inv_enabled
             new_threshold = inv_cfg.get("btc_decline_threshold_pct", 3.0) / 100.0
             if _regime_detector and (
                 _regime_detector.inverse_btc_enabled != inv_enabled
