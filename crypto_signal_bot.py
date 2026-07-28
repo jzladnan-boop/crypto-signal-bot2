@@ -2218,7 +2218,6 @@ def api_set_settings():
 
         # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
         # (بما فيها inverse_btc — كانت ناقصة من القائمة، وهذا سبب "الزرار يضل مثبت")
-        INVERSE_BTC_ENABLED = (current_strategy == "inverse_btc")
         if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled", "inverse_btc_enabled")):
             if _regime_detector:
                 _regime_detector.current_strategy = current_strategy
@@ -2459,7 +2458,7 @@ def start_dashboard():
 def run_bot():
     global consecutive_losses, pause_until, trading_enabled
     global _binance_client, _regime_detector, _last_correlation_update
-    global current_strategy
+    global current_strategy, INVERSE_BTC_ENABLED
 
     os.makedirs(DATA_DIR, exist_ok=True)   # 📁 تأكد إن مجلد البيانات (Volume) موجود
     log.info(f"📁 مجلد البيانات: {DATA_DIR}")
@@ -2546,10 +2545,8 @@ def run_bot():
             # 🧠 فحص حالة السوق وتبديل الاستراتيجية تلقائياً (لو مفعّل)
             with _lock:
                 auto_on = AUTO_STRATEGY_ENABLED
-                inv_enabled = INVERSE_BTC_ENABLED
                 inv_cfg = dict(INVERSE_BTC_CONFIG)
             # 🧠 نزامن حالة Inverse BTC بالكاشف — تلقائي حسب الاستراتيجية الحالية
-            # (لو المستخدم اختار Inverse BTC يدوياً أو التبديل التلقائي دخلها)
             inv_enabled = (current_strategy == "inverse_btc")
             INVERSE_BTC_ENABLED = inv_enabled
             new_threshold = inv_cfg.get("btc_decline_threshold_pct", 3.0) / 100.0
