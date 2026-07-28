@@ -2807,10 +2807,12 @@ def run_bot():
                                 res["strict_mode"]     = is_strict
 
                                 # 📐 صمام أمان ATR/SL: مرتبط بحالة السوق (BULL/BEAR/SIDEWAYS)، مع سقف
-                                # صلب لا يتجاوز 2.5%-3% من سعر الدخول مهما كانت قيمة ATR، ويُخفَّف الضربات
-                                # تلقائياً في Strict Mode (تاريخ ضعيف) مع مضاعفة نقطة تفعيل الربح (Trailing) تعويضاً.
+                                # صلب لا يتجاوز 3% مطلقًا. سقف Strict Mode تحديدًا يتبع مباشرة إعداد
+                                # "حد الخسارة الثابت" (STOP_LOSS_PCT) اللي المستخدم متحكم فيه من التطبيق/تيليغرام،
+                                # بدل رقم مبرمج بالكود — فيخفف الضربات تلقائيًا حسب حالة السوق فوق هالسقف.
                                 with _lock:
                                     multiplier = ATR_MULTIPLIER
+                                    strict_cap_pct = STOP_LOSS_PCT * 100
                                 if atr_value:
                                     sl_info = atr_guard.compute_stop_loss(
                                         entry_price=res["entry_price"],
@@ -2818,6 +2820,7 @@ def run_bot():
                                         market_regime=market_regime,
                                         strict_mode=is_strict,
                                         atr_sl_multiple=multiplier,
+                                        strict_cap_pct=strict_cap_pct,
                                     )
                                     stop_price = sl_info["sl_price"]
                                     used_atr   = atr_value
