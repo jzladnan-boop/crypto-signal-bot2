@@ -427,6 +427,7 @@ class ATRGuard:
         market_regime: MarketRegime,
         strict_mode: bool = False,
         atr_sl_multiple: float = 1.5,
+        strict_cap_pct: Optional[float] = None,
     ) -> Dict[str, float]:
         """
         يرجّع:
@@ -434,6 +435,11 @@ class ATRGuard:
           - sl_pct: نسبته من سعر الدخول
           - applied_atr_multiplier: معامل ATR المطبَّق فعليًا
           - capped: هل تم تفعيل السقف الصلب (Hard Cap)؟
+
+        strict_cap_pct: سقف مخصّص (%) لصفقات Strict Mode فقط — لو انمرّر، يُستخدم مباشرة
+        بدل الافتراضي الداخلي (DEFAULT_CAP_PCT × 0.85). هيك بيصير سقف Strict تابع مباشرة
+        لإعداد "حد الخسارة الثابت" (STOP_LOSS_PCT) يلي المستخدم متحكم فيه من التطبيق،
+        بدل ما يكون رقم ثابت مبرمج هون. يبقى دائماً مقيّد بالسقف الصلب المطلق (HARD_CAP_PCT).
         """
         regime_multiplier = self.REGIME_ATR_MULTIPLIER[market_regime]
 
@@ -445,10 +451,13 @@ class ATRGuard:
         effective_atr = raw_atr_value * regime_multiplier * atr_sl_multiple
         raw_sl_pct = (effective_atr / entry_price) * 100
 
-        # ✅ إصلاح: سقف Strict Mode لازم يكون أضيق من السقف العادي (حماية أشد لعملة
-        # غير مضمونة)، مو أوسع. سابقًا كان HARD_CAP_PCT × 0.85 = 2.55% > DEFAULT_CAP_PCT (2.5%)
-        # يعني عكس المطلوب تمامًا بحالات التقلب العالي.
-        cap = (self.DEFAULT_CAP_PCT * 0.85) if strict_mode else self.DEFAULT_CAP_PCT
+        if strict_mode:
+            # لو انمرّر سقف مخصّص من المستخدم (STOP_LOSS_PCT بالإعدادات) نستخدمه مباشرة،
+            # وإلا نرجع للاحتياطي الداخلي (أضيق من السقف العادي بـ 15%)
+            cap = strict_cap_pct if strict_cap_pct is not None else (self.DEFAULT_CAP_PCT * 0.85)
+            cap = max(cap, 0.1)   # حد أدنى بسيط لتفادي سقف صفري/سالب بالغلط
+        else:
+            cap = self.DEFAULT_CAP_PCT
         cap = min(cap, self.HARD_CAP_PCT)  # لا يمكن تجاوز السقف الصلب أبدًا مهما حصل
 
         capped = raw_sl_pct > cap
