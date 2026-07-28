@@ -445,7 +445,10 @@ class ATRGuard:
         effective_atr = raw_atr_value * regime_multiplier * atr_sl_multiple
         raw_sl_pct = (effective_atr / entry_price) * 100
 
-        cap = self.DEFAULT_CAP_PCT if not strict_mode else self.HARD_CAP_PCT * 0.85
+        # ✅ إصلاح: سقف Strict Mode لازم يكون أضيق من السقف العادي (حماية أشد لعملة
+        # غير مضمونة)، مو أوسع. سابقًا كان HARD_CAP_PCT × 0.85 = 2.55% > DEFAULT_CAP_PCT (2.5%)
+        # يعني عكس المطلوب تمامًا بحالات التقلب العالي.
+        cap = (self.DEFAULT_CAP_PCT * 0.85) if strict_mode else self.DEFAULT_CAP_PCT
         cap = min(cap, self.HARD_CAP_PCT)  # لا يمكن تجاوز السقف الصلب أبدًا مهما حصل
 
         capped = raw_sl_pct > cap
@@ -462,10 +465,11 @@ class ATRGuard:
 
     def get_take_profit_multiplier(self, strict_mode: bool) -> float:
         """
-        في Strict Mode: مضاعفة مستوى التقبّل (TP) لتعويض تضييق SL،
-        بحيث تبقى نسبة المخاطرة/العائد (R:R) معقولة رغم دخول عملة ذات تاريخ ضعيف.
+        نقطة تفعيل Trailing (TP) تبقى نفسها (1×) بكل الحالات، بما فيها Strict Mode —
+        الحماية بوضع Strict تعتمد فقط على تضييق الـ SL (compute_stop_loss)، بدون
+        تعويض بمضاعفة صبر جني الربح.
         """
-        return 2.0 if strict_mode else 1.0
+        return 1.0
 
 
 # ----------------------------------------------------------------------
