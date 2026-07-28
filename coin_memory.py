@@ -444,7 +444,8 @@ class ATRGuard:
         regime_multiplier = self.REGIME_ATR_MULTIPLIER[market_regime]
 
         # في Strict Mode: تقليل إضافي لـ ATR (تقليل الضربات) لتجنب اصطياد
-        # SL على عملة ذات تاريخ سيء، مع تعويض ذلك بمضاعفة تقبّليات (TP) خارج هذه الدالة.
+        # SL على عملة ذات تاريخ سيء. (نقطة تفعيل الـ Trailing حاليًا 1× بكل الحالات،
+        # ما فيه مضاعفة — راجع get_take_profit_multiplier أدناه).
         if strict_mode:
             regime_multiplier *= 0.7
 
