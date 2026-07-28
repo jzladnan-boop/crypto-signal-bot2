@@ -2503,12 +2503,16 @@ def run_bot():
                 auto_on = AUTO_STRATEGY_ENABLED
                 inv_enabled = INVERSE_BTC_ENABLED
                 inv_cfg = dict(INVERSE_BTC_CONFIG)
-            # نزامن حالة Inverse BTC بالكاشف (لو تغيّرت من التطبيق)
-            if _regime_detector and _regime_detector.inverse_btc_enabled != inv_enabled:
-                _regime_detector.set_inverse_btc_enabled(
-                    inv_enabled,
-                    inv_cfg.get("btc_decline_threshold_pct", 3.0) / 100.0
-                )
+            # 🧠 نزامن حالة وإعدادات Inverse BTC بالكاشف (لو تغيّرت من التطبيق)
+            # ✅ إصلاح خلل: كان الشرط يقارن الزرار (on/off) بس، فلو غيّر المستخدم نسبة "حد نزول BTC"
+            # بدون ما يطفي/يشغّل الزرار من جديد، القيمة الجديدة ما كانت توصل لكاشف حالة السوق أبداً
+            # (يضل شغال بآخر عتبة كانت مضبوطة وقت آخر تفعيل فعلي للزرار).
+            new_threshold = inv_cfg.get("btc_decline_threshold_pct", 3.0) / 100.0
+            if _regime_detector and (
+                _regime_detector.inverse_btc_enabled != inv_enabled
+                or abs(_regime_detector.inverse_btc_decline_threshold - new_threshold) > 1e-9
+            ):
+                _regime_detector.set_inverse_btc_enabled(inv_enabled, new_threshold)
             if auto_on and _regime_detector and (now - last_regime_check >= AUTO_STRATEGY_INTERVAL):
                 last_regime_check = now
                 try:
