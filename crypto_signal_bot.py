@@ -28,7 +28,7 @@ import ta
 from flask import Flask, request, jsonify, session, send_from_directory
 from functools import wraps
 from market_regime import MarketRegimeDetector
-from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config
+from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config, get_24h_change_pct
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_beta
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
@@ -249,7 +249,7 @@ BB_LOWER_MARGIN_PCT = 0.01    # هامش القرب المسموح من الحد
 # ──────────────────────────────────────────────
 INVERSE_BTC_ENABLED = False   # 🔘 مطفي افتراضياً — تفعّله من التطبيق أو تيليغرام
 INVERSE_BTC_CONFIG = {
-    "btc_decline_threshold_pct": 1.0,   # BTC لازم ينزل 1% على الأقل
+    "btc_decline_threshold_pct": 3.0,   # BTC لازم ينزل 3% على الأقل
     "rs_min_threshold_pct": 5.0,        # العملة أقوى من BTC بـ 5%
     "rsi_max_for_entry": 40,            # RSI تحت 40
     "stoch_k_max_for_entry": 30,        # Stoch K تحت 30
@@ -1388,27 +1388,67 @@ def get_rsi_quick(client, symbol):
         return None
 
 def scan_all_symbols(client):
-    """المرحلة 1: فحص خفيف لكل العملات"""
+    """المرحلة 1: فحص خفيف لكل العملات حسب الاستراتيجية الحالية"""
     global watch_list
     if is_api_blocked():
         log.warning("🚦 تخطي دورة الفحص الخفيف — البوت بفترة إيقاف مؤقت بسبب حظر -1003")
         return
     new_watch = set()
-    log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
-    for symbol in list(SYMBOLS):
-        if is_api_blocked():
-            log.warning("🚦 تم اكتشاف حظر أثناء الفحص — إيقاف باقي الدورة الحالية")
-            break
-        if symbol in open_trades:
-            continue
-        rsi = get_rsi_quick(client, symbol)
-        if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
-            new_watch.add(symbol)
-        time.sleep(0.35)  # ✅ إصلاح: تأخير أكبر بين كل طلب لتقليل الوزن المستهلك بالدقيقة وتفادي -1003
+
+    with _lock:
+        strategy = current_strategy
+
+    if strategy == "inverse_btc":
+        # 🔄 فحص خفيف لـ Inverse BTC: العملات الصاعدة رغم نزول BTC
+        try:
+            btc_change = get_24h_change_pct(client, "BTCUSDT")
+            if btc_change is None or btc_change > -3.0:
+                # BTC ما نازل 3%+ — لا داعي للمراقبة
+                with _lock:
+                    watch_list = set()
+                log.info("🔄 Inverse BTC: BTC ما نازل 3%+ — إفراغ قائمة المراقبة")
+                return
+
+            # جلب كل التغيرات بطلب واحد
+            tickers = client.get_ticker()
+            ticker_map = {t["symbol"]: float(t.get("priceChangePercent", 0)) for t in tickers}
+
+            for symbol in SYMBOLS:
+                if symbol in open_trades:
+                    continue
+                change_pct = ticker_map.get(symbol)
+                if change_pct is None:
+                    continue
+                # مرشح خفيف: العملة صاعدة 1%+ (الفحص المكثف بيفحص 5%+)
+                if change_pct >= 1.0:
+                    new_watch.add(symbol)
+
+            log.info(f"🔄 مرشحون Inverse BTC: {len(new_watch)} عملة صاعدة رغم نزول BTC {btc_change:.1f}%")
+        except Exception as e:
+            log.error(f"❌ فحص Inverse BTC: {e}")
+    elif strategy == "defensive":
+        # ⛔ سوق هابط واضح — لا تفتح صفقات جديدة
+        with _lock:
+            watch_list = set()
+        log.info("🛡️ defensive mode: سوق هابط واضح — إيقاف الفحص والشراء")
+        return
+    else:
+        log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
+        for symbol in list(SYMBOLS):
+            if is_api_blocked():
+                log.warning("🚦 تم اكتشاف حظر أثناء الفحص — إيقاف باقي الدورة الحالية")
+                break
+            if symbol in open_trades:
+                continue
+            rsi = get_rsi_quick(client, symbol)
+            if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
+                new_watch.add(symbol)
+            time.sleep(0.35)
+
     added = new_watch - watch_list
     if added:
         log.info(f"👀 مرشحون جدد: {[s.replace('USDT','') for s in added]}")
-    with _lock:   # ✅ إصلاح #3: حماية watch_list من التعديل المتزامن
+    with _lock:
         watch_list = new_watch
 
 # ──────────────────────────────────────────────
@@ -2108,7 +2148,8 @@ def api_get_settings():
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             "vwap_filter_enabled": VWAP_FILTER_ENABLED,
             "bb_filter_enabled": BB_FILTER_ENABLED,
-            "inverse_btc_enabled": current_strategy == "inverse_btc",   # ✅ إصلاح: كان يرجع INVERSE_BTC_ENABLED (إذن التبديل التلقائي) بدل الحالة الفعلية
+            "inverse_btc_enabled": INVERSE_BTC_ENABLED,   # ✅ التبديل التلقائي فقط
+            "current_strategy": current_strategy,
             # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
             "inverse_btc_threshold": inv_cfg.get("btc_decline_threshold_pct", 3.0),
             "inverse_btc_rs_min": inv_cfg.get("rs_min_threshold_pct", 5.0),
@@ -2172,8 +2213,8 @@ def api_set_settings():
             current_strategy = "stoch_rsi"
         if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
             current_strategy = "trend_stoch"
-        if "inverse_btc_enabled" in data and data["inverse_btc_enabled"]:
-            current_strategy = "inverse_btc"
+        if "inverse_btc_enabled" in data:
+            INVERSE_BTC_ENABLED = bool(data["inverse_btc_enabled"])
 
         # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
         # (بما فيها inverse_btc — كانت ناقصة من القائمة، وهذا سبب "الزرار يضل مثبت")
@@ -2431,6 +2472,9 @@ def run_bot():
     load_circuit_state()   # 🛑 استرجاع حالة التوقف التلقائي لو موجودة
     load_settings()        # ⚙️ استرجاع الإعدادات المحفوظة (حجم الصفقة، الاستراتيجية، ...) لو موجودة
 
+    # تزامن إعدادات Inverse BTC مع المكتبة (فرض القيم الصحيحة)
+    set_inverse_config(**INVERSE_BTC_CONFIG)
+
     # 🧠 إنشاء كاشف حالة السوق (يُستخدم فقط لو AUTO_STRATEGY_ENABLED مفعّل)
     _regime_detector = MarketRegimeDetector(client, cooldown_minutes=45)
     # تفعيل/إطفاء Inverse BTC بالتبديل التلقائي حسب الإعدادات المحفوظة
@@ -2567,9 +2611,8 @@ def run_bot():
                     coin  = symbol.replace("USDT", "")
 
                     if not trade["trailing_active"]:
-                        # 🧠 نقطة تفعيل الـ Trailing مخزّنة بالصفقة نفسها (trail_activate_pct)، وتساوي
-                        # TRAIL_ACTIVATE_PCT العام حاليًا لكل الصفقات (عادي وStrict على حد سواء) —
-                        # ما فيه فرق بينهم بهاي النقطة، الفرق الوحيد بين الوضعين هو ضيق الـ Stop Loss.
+                        # 🧠 لو الصفقة دخلت بوضع Strict Mode (عملة ذات تاريخ ضعيف بذاكرة العملات)،
+                        # نقطة تفعيل الـ Trailing تكون مضاعفة (تعويض تضييق الـ SL بمهلة ربح أوسع).
                         trail_activate_pct = trade.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
                         if price >= trade["entry_price"] * (1 + trail_activate_pct):
                             trade["trailing_active"] = True
@@ -2679,6 +2722,14 @@ def run_bot():
                 # ══ المرحلة 1: تقييم كل المرشحين وتجميع من نجح منهم بإشارة شراء ══
                 # (بدل شراء أول مرشح نلاقيه، نجمعهم كلهم أول، ونرتبهم بعدين حسب قوة الزخم)
                 candidates = []   # كل عنصر: (momentum_score, symbol, price, atr_value, signal_info)
+
+                # ⛔ defensive mode: لا تشتري حتى لو فيه مرشحين
+                if strategy == "defensive":
+                    log.info("🛡️ defensive mode: لا يتم فحص المرشحين — سوق هابط واضح")
+                    with _lock:
+                        watch_list.clear()
+                    time.sleep(5)  # نام شوي وانتظر الدورة الجاية
+                    continue
 
                 for symbol in list(watch_list):
                     if is_api_blocked():
@@ -2838,8 +2889,7 @@ def run_bot():
                                 res["stop_loss"] = round(stop_price, 8)
                                 res["atr"]       = used_atr   # None لو استخدمنا الاحتياطي الثابت
 
-                                # 🧠 نقطة تفعيل Trailing: تبقى 1× بكل الحالات (عادي وStrict على حد سواء) —
-                                # get_take_profit_multiplier ترجع دائمًا 1.0 حاليًا، ما فيه مضاعفة إطلاقًا
+                                # 🧠 مضاعفة نقطة تفعيل Trailing (تقبّليات أوسع) بوضع Strict Mode فقط
                                 tp_multiplier = atr_guard.get_take_profit_multiplier(is_strict)
                                 res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
 
@@ -2849,7 +2899,7 @@ def run_bot():
 
                                 coin_name   = symbol.replace("USDT", "")
                                 sl_value    = res["stop_loss"]
-                                strict_line = "\n⚠️ Strict Mode: تاريخ ضعيف/غير مختبر — ATR وStop Loss مخفّضين لحماية إضافية" if is_strict else ""
+                                strict_line = "\n⚠️ Strict Mode: تاريخ ضعيف/غير مختبر — ATR مخفّض وتقبّل مضاعف" if is_strict else ""
                                 momentum_line = f"🏆 زخم: {momentum_score:.2f}\n" if len(ranked) > 1 else ""
                                 send_telegram(
                                     f"🟢 <b>شراء {coin_name}</b>\n"
