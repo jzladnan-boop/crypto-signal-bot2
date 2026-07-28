@@ -2567,8 +2567,9 @@ def run_bot():
                     coin  = symbol.replace("USDT", "")
 
                     if not trade["trailing_active"]:
-                        # 🧠 لو الصفقة دخلت بوضع Strict Mode (عملة ذات تاريخ ضعيف بذاكرة العملات)،
-                        # نقطة تفعيل الـ Trailing تكون مضاعفة (تعويض تضييق الـ SL بمهلة ربح أوسع).
+                        # 🧠 نقطة تفعيل الـ Trailing مخزّنة بالصفقة نفسها (trail_activate_pct)، وتساوي
+                        # TRAIL_ACTIVATE_PCT العام حاليًا لكل الصفقات (عادي وStrict على حد سواء) —
+                        # ما فيه فرق بينهم بهاي النقطة، الفرق الوحيد بين الوضعين هو ضيق الـ Stop Loss.
                         trail_activate_pct = trade.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
                         if price >= trade["entry_price"] * (1 + trail_activate_pct):
                             trade["trailing_active"] = True
@@ -2837,7 +2838,8 @@ def run_bot():
                                 res["stop_loss"] = round(stop_price, 8)
                                 res["atr"]       = used_atr   # None لو استخدمنا الاحتياطي الثابت
 
-                                # 🧠 مضاعفة نقطة تفعيل Trailing (تقبّليات أوسع) بوضع Strict Mode فقط
+                                # 🧠 نقطة تفعيل Trailing: تبقى 1× بكل الحالات (عادي وStrict على حد سواء) —
+                                # get_take_profit_multiplier ترجع دائمًا 1.0 حاليًا، ما فيه مضاعفة إطلاقًا
                                 tp_multiplier = atr_guard.get_take_profit_multiplier(is_strict)
                                 res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
 
@@ -2847,7 +2849,7 @@ def run_bot():
 
                                 coin_name   = symbol.replace("USDT", "")
                                 sl_value    = res["stop_loss"]
-                                strict_line = "\n⚠️ Strict Mode: تاريخ ضعيف/غير مختبر — ATR مخفّض وتقبّل مضاعف" if is_strict else ""
+                                strict_line = "\n⚠️ Strict Mode: تاريخ ضعيف/غير مختبر — ATR وStop Loss مخفّضين لحماية إضافية" if is_strict else ""
                                 momentum_line = f"🏆 زخم: {momentum_score:.2f}\n" if len(ranked) > 1 else ""
                                 send_telegram(
                                     f"🟢 <b>شراء {coin_name}</b>\n"
