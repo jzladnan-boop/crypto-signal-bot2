@@ -80,6 +80,17 @@ RSI_BUY_CURR       = 30
 STOP_LOSS_PCT      = 0.02
 TRAIL_PCT          = 0.01
 TRAIL_ACTIVATE_PCT = 0.01
+
+# ──────────────────────────────────────────────
+# 🛡️ حماية التعادل (Breakeven Stop) — أرضية دائمة تُفعّل قبل التريلينج الكامل
+# لما تربح الصفقة نسبة بسيطة، الستوب ينتقل لسعر الدخول + هامش يغطي العمولة،
+# ويُخزَّن كـ"أرضية" لا يقدر أي حساب لاحق (حتى التريلينج) ينزل تحتها أبداً.
+# هذا يمنع الحالة يلي الستوب بينقفل بالضبط على سعر الدخول (بدون هامش)
+# ويتحول لخسارة بسيطة بعد العمولة والانزلاق عند التنفيذ الفعلي.
+# ──────────────────────────────────────────────
+BREAKEVEN_ACTIVATE_PCT = 0.005   # 0.5% ربح → تفعيل أرضية التعادل
+BREAKEVEN_MARGIN_PCT   = 0.002   # 0.2% فوق سعر الدخول (يغطي عمولة بينانس القياسية 0.1%×2)
+
 TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي بناءً على طلب المستخدم (كان 2.0)
 MAX_TRADES         = 2   # 🎯 أقصى عدد صفقات "نشطة" (لسا ما فعّلت Trailing) بالتزامن — لا يوجد سقف على العدد الكلي للصفقات المفتوحة
@@ -313,6 +324,17 @@ def load_trades():
                     trade["trailing_active"] = False
                 if "highest_price" not in trade:
                     trade["highest_price"] = trade["entry_price"]
+                if "breakeven_floor" not in trade:
+                    # 🛡️ صفقة قديمة من قبل إضافة حماية التعادل: لو الستوب المحفوظ فعلياً
+                    # أعلى من أو يساوي سعر الدخول (يعني كانت وصلت مرحلة "قفل على الدخول"
+                    # القديمة بدون هامش)، نرقّيها فوراً لأرضية تعادل صحيحة بهامش العمولة،
+                    # بدل ما تضل عالقة عند سعر الدخول الخام بدون حماية فعلية.
+                    trade["breakeven_floor"] = None
+                    if trade.get("stop_loss") and trade["stop_loss"] >= trade["entry_price"]:
+                        floor_price = round(trade["entry_price"] * (1 + BREAKEVEN_MARGIN_PCT), 8)
+                        trade["breakeven_floor"] = floor_price
+                        trade["stop_loss"] = max(trade["stop_loss"], floor_price)
+                        log.info(f"🛡️ ترقية صفقة قديمة {coin} لأرضية تعادل صحيحة: {floor_price}")
                 log.info(
                     f"📂 صفقة محملة: {coin} | دخول: {trade['entry_price']:.4f}$ | "
                     f"ستوب: {trade['stop_loss']:.4f}$ | Trailing: {trade['trailing_active']}"
@@ -375,6 +397,7 @@ def save_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
+    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -388,6 +411,8 @@ def save_settings():
                 "current_strategy" : current_strategy,
                 "stop_loss_pct"    : STOP_LOSS_PCT,
                 "trail_activate_pct": TRAIL_ACTIVATE_PCT,
+                "breakeven_activate_pct": BREAKEVEN_ACTIVATE_PCT,
+                "breakeven_margin_pct"  : BREAKEVEN_MARGIN_PCT,
                 "rsi_buy_prev"     : RSI_BUY_PREV,
                 "rsi_buy_curr"     : RSI_BUY_CURR,
                 "atr_period"       : ATR_PERIOD,
@@ -409,6 +434,7 @@ def load_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
+    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -432,6 +458,8 @@ def load_settings():
         current_strategy    = s.get("current_strategy", current_strategy)
         STOP_LOSS_PCT       = s.get("stop_loss_pct", STOP_LOSS_PCT)
         TRAIL_ACTIVATE_PCT  = s.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
+        BREAKEVEN_ACTIVATE_PCT = s.get("breakeven_activate_pct", BREAKEVEN_ACTIVATE_PCT)
+        BREAKEVEN_MARGIN_PCT   = s.get("breakeven_margin_pct", BREAKEVEN_MARGIN_PCT)
         RSI_BUY_PREV        = s.get("rsi_buy_prev", RSI_BUY_PREV)
         RSI_BUY_CURR        = s.get("rsi_buy_curr", RSI_BUY_CURR)
         ATR_PERIOD          = s.get("atr_period", ATR_PERIOD)
@@ -667,6 +695,7 @@ def telegram_command_listener(client):
     global SYMBOLS, trading_enabled, ma20_enabled, current_interval, current_strategy
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
+    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
@@ -871,6 +900,28 @@ def telegram_command_listener(client):
                                 send_admin(f"✅ نقطة تفعيل Trailing: {TRAIL_ACTIVATE_PCT*100}%\nيعني البوت ما يبدأ يتتبع السعر إلا لما يربح {TRAIL_ACTIVATE_PCT*100}% أول.")
                         except:
                             send_admin("❌ مثال: /set_activate 0.5")
+
+                    # ── /set_breakeven ─────────────────────────
+                    elif text.startswith("/set_breakeven "):
+                        try:
+                            parts    = text.replace("/set_breakeven ", "").split()
+                            activate = float(parts[0]) / 100
+                            margin   = float(parts[1]) / 100
+                            if activate <= 0 or margin < 0:
+                                send_admin("❌ نقطة التفعيل لازم أكبر من صفر، والهامش أكبر من أو يساوي صفر.")
+                            else:
+                                with _lock:
+                                    BREAKEVEN_ACTIVATE_PCT = activate
+                                    BREAKEVEN_MARGIN_PCT   = margin
+                                save_settings()
+                                send_admin(
+                                    f"✅ حماية التعادل: تفعيل عند {BREAKEVEN_ACTIVATE_PCT*100}% ربح، "
+                                    f"هامش {BREAKEVEN_MARGIN_PCT*100}% فوق سعر الدخول\n"
+                                    f"يعني أول ما تربح الصفقة {BREAKEVEN_ACTIVATE_PCT*100}%، الستوب ينتقل فوراً "
+                                    f"لسعر الدخول + {BREAKEVEN_MARGIN_PCT*100}% (يغطي العمولة)، ولا ينزل تحته أبداً."
+                                )
+                        except:
+                            send_admin("❌ مثال: /set_breakeven 0.5 0.2  (تفعيل 0.5%، هامش 0.2%)")
 
                     # ── /set_rsi_range ────────────────────────
                     elif text.startswith("/set_rsi_range "):
@@ -1252,6 +1303,8 @@ def telegram_command_listener(client):
                             trail            = TRAIL_PCT * 100
                             stoploss         = STOP_LOSS_PCT * 100
                             activate         = TRAIL_ACTIVATE_PCT * 100
+                            be_activate      = BREAKEVEN_ACTIVATE_PCT * 100
+                            be_margin        = BREAKEVEN_MARGIN_PCT * 100
                             rsi_prev         = RSI_BUY_PREV
                             rsi_curr         = RSI_BUY_CURR
                             atr_period_val   = ATR_PERIOD
@@ -1272,6 +1325,7 @@ def telegram_command_listener(client):
                             f"💼 أقصى صفقات: {max_tr}\n"
                             f"🛑 حد الخسارة الاحتياطي (Stop Loss %): {stoploss}%\n"
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
+                            f"🛡️ حماية التعادل: تفعيل عند {be_activate}% ربح | هامش {be_margin}% فوق الدخول\n"
                             f"🔍 مساحة Trailing الاحتياطية: {trail}%\n"
                             f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}\n"
                             f"📐 ATR: فترة {atr_period_val} شمعة | مضاعف الستوب {atr_mult_val}x | مضاعف Trailing {trail_atr_val}x\n"
@@ -1321,6 +1375,7 @@ def telegram_command_listener(client):
                             "/set_trail 1.5 — مساحة تنفس Trailing Stop (كلما كبرت، أعطيت العملة مجال أكبر)\n"
                             "/set_stoploss 1.5 — حد الخسارة الثابت قبل تفعيل Trailing\n"
                             "/set_activate 0.5 — نسبة الربح المطلوبة لتفعيل Trailing Stop\n"
+                            "/set_breakeven 0.5 0.2 — تفعيل حماية التعادل عند 0.5% ربح، بهامش 0.2% فوق الدخول\n"
                             "/set_rsi_range 20 38 — نطاق RSI للمراقبة المكثفة\n"
                             "/set_interval 30 — الفريم الزمني للشموع (15/30/60/240 دقيقة)\n"
                             "/set_buy_rsi 25 30 — شرط الشراء: RSI السابق أصغر من 25 والحالي أكبر من 30\n\n"
@@ -2141,6 +2196,8 @@ def api_get_settings():
             "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
             "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
+            "breakeven_activate_pct": round(BREAKEVEN_ACTIVATE_PCT * 100, 4),
+            "breakeven_margin_pct": round(BREAKEVEN_MARGIN_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
             "rsi_buy_curr": RSI_BUY_CURR,
             "atr_period": ATR_PERIOD,
@@ -2170,6 +2227,7 @@ def api_set_settings():
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
+    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -2235,6 +2293,15 @@ def api_set_settings():
         if "activate_trailing_pct" in data:
             v = float(data["activate_trailing_pct"]) / 100
             if v >= 0: TRAIL_ACTIVATE_PCT = v
+
+        if "breakeven_activate_pct" in data:
+            v = float(data["breakeven_activate_pct"]) / 100
+            if v > 0: BREAKEVEN_ACTIVATE_PCT = v
+            else: errors.append("breakeven_activate_pct لازم أكبر من صفر")
+        if "breakeven_margin_pct" in data:
+            v = float(data["breakeven_margin_pct"]) / 100
+            if v >= 0: BREAKEVEN_MARGIN_PCT = v
+            else: errors.append("breakeven_margin_pct لازم صفر أو أكبر")
 
         if "rsi_buy_prev" in data or "rsi_buy_curr" in data:
             new_prev = float(data["rsi_buy_prev"]) if "rsi_buy_prev" in data else RSI_BUY_PREV
@@ -2608,6 +2675,27 @@ def run_bot():
                         continue
                     coin  = symbol.replace("USDT", "")
 
+                    # 🛡️ مرحلة حماية التعادل (Breakeven): تُفعّل بربح بسيط (BREAKEVEN_ACTIVATE_PCT)
+                    # قبل التريلينج الكامل بكتير. الستوب ينتقل لسعر الدخول + هامش يغطي العمولة،
+                    # ويُخزَّن كـ"أرضية" (breakeven_floor) بالصفقة — لا يقدر أي حساب لاحق (حتى
+                    # التريلينج نفسه لو مسافة ATR أوسع من الربح الحالي) ينزل تحتها أبداً طول عمر الصفقة.
+                    # هذا يمنع حالة "الستوب بينقفل بالضبط على سعر الدخول الخام (بدون هامش)"
+                    # يلي كانت بتتحول لخسارة بسيطة بعد العمولة والانزلاق عند التنفيذ الفعلي.
+                    if trade.get("breakeven_floor") is None:
+                        breakeven_activate_pct = trade.get("breakeven_activate_pct", BREAKEVEN_ACTIVATE_PCT)
+                        breakeven_margin_pct   = trade.get("breakeven_margin_pct", BREAKEVEN_MARGIN_PCT)
+                        if price >= trade["entry_price"] * (1 + breakeven_activate_pct):
+                            floor_price = round(trade["entry_price"] * (1 + breakeven_margin_pct), 8)
+                            trade["breakeven_floor"] = floor_price
+                            # الستوب ينتقل فوراً للأرضية الجديدة، بس فقط لو هيك بيرفعه (ما ينزل الستوب أبداً)
+                            if floor_price > trade["stop_loss"]:
+                                trade["stop_loss"] = floor_price
+                            log.info(f"🛡️ حماية تعادل مفعّلة لـ {coin} | أرضية: {floor_price} (دخول + هامش عمولة)")
+                            save_trades()
+
+                    # الأرضية الفعّالة لأي حساب ستوب لاحق: أرضية التعادل لو اتفعّلت، وإلا سعر الدخول الخام
+                    stop_floor = trade.get("breakeven_floor") or trade["entry_price"]
+
                     if not trade["trailing_active"]:
                         # 🧠 لو الصفقة دخلت بوضع Strict Mode (عملة ذات تاريخ ضعيف بذاكرة العملات)،
                         # نقطة تفعيل الـ Trailing تكون مضاعفة (تعويض تضييق الـ SL بمهلة ربح أوسع).
@@ -2615,18 +2703,17 @@ def run_bot():
                         if price >= trade["entry_price"] * (1 + trail_activate_pct):
                             trade["trailing_active"] = True
                             trade["highest_price"]   = price
-                            # ✅ إصلاح: حماية Breakeven — أول ما الصفقة تدخل بربح، الستوب
-                            # لا يمكن أبداً أن ينزل تحت سعر الدخول، حتى لو مسافة الـ Trailing
-                            # (ATR أو النسبة الثابتة) كانت أوسع من نقطة التفعيل نفسها.
-                            trade["stop_loss"]       = max(compute_trail_stop(price, trade), trade["entry_price"])
-                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']} (محمي عند الدخول كحد أدنى)")
+                            # ✅ الستوب وقت تفعيل التريلينج ما ينزل تحت أرضية التعادل (دخول+هامش)،
+                            # حتى لو مسافة الـ ATR كانت أوسع من الربح الحالي وقت التفعيل.
+                            trade["stop_loss"]       = max(compute_trail_stop(price, trade), stop_floor)
+                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']} (محمي عند {('أرضية التعادل' if trade.get('breakeven_floor') else 'سعر الدخول')} كحد أدنى)")
                             save_trades()
 
                     if trade["trailing_active"]:
                         if price > trade["highest_price"]:
                             trade["highest_price"] = price
-                            # ✅ نفس الحماية: الستوب بعد التفعيل ما ينزل تحت سعر الدخول أبداً
-                            trade["stop_loss"]     = max(compute_trail_stop(price, trade), trade["entry_price"])
+                            # ✅ نفس الحماية: الستوب بعد التفعيل ما ينزل تحت أرضية التعادل أبداً
+                            trade["stop_loss"]     = max(compute_trail_stop(price, trade), stop_floor)
                             save_trades()
                         elif price <= trade["stop_loss"]:
                             sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
@@ -2854,6 +2941,7 @@ def run_bot():
                             if res:
                                 res["trailing_active"] = False
                                 res["highest_price"]   = res["entry_price"]
+                                res["breakeven_floor"]  = None
                                 res["strict_mode"]     = is_strict
 
                                 # 📐 صمام أمان ATR/SL: مرتبط بحالة السوق (BULL/BEAR/SIDEWAYS)، مع سقف
@@ -2890,6 +2978,12 @@ def run_bot():
                                 # 🧠 مضاعفة نقطة تفعيل Trailing (تقبّليات أوسع) بوضع Strict Mode فقط
                                 tp_multiplier = atr_guard.get_take_profit_multiplier(is_strict)
                                 res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
+
+                                # 🛡️ قفل إعدادات حماية التعادل الحالية وقت الشراء بالصفقة نفسها،
+                                # عشان أي تعديل لاحق على الإعدادات العامة ما يأثر على صفقة مفتوحة أصلاً
+                                with _lock:
+                                    res["breakeven_activate_pct"] = BREAKEVEN_ACTIVATE_PCT
+                                    res["breakeven_margin_pct"]   = BREAKEVEN_MARGIN_PCT
 
                                 open_trades[symbol]    = res
                                 save_trades()
