@@ -1244,7 +1244,7 @@ def telegram_command_listener(client):
                             }
                             msg = f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}"
                             if auto_on:
-                                msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بعد فترة التبريد (45 دقيقة) لو حالة السوق تغيّرت. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
+                                msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بعد فترة التبريد (20 دقيقة) لو حالة السوق تغيّرت. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
                             send_admin(msg)
                         else:
                             send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch\n/set_strategy inverse_btc")
@@ -1288,7 +1288,7 @@ def telegram_command_listener(client):
                             f"📈 ترند واضح (BTC فوق MA50 على 4س) → Trend+StochRSI\n"
                             f"📊 جانبي + تذبذب عالٍ → Stochastic RSI\n"
                             f"😴 جانبي + هادئ → RSI العادي\n\n"
-                            f"فحص كل 15 دقيقة، مع فترة تبريد 45 دقيقة بين كل تبديل وتاني."
+                            f"فحص كل 15 دقيقة، مع فترة تبريد 20 دقيقة بين كل تبديل وتاني."
                         )
                         send_admin(msg)
 
@@ -2543,7 +2543,7 @@ def run_bot():
     set_inverse_config(**INVERSE_BTC_CONFIG)
 
     # 🧠 إنشاء كاشف حالة السوق (يُستخدم فقط لو AUTO_STRATEGY_ENABLED مفعّل)
-    _regime_detector = MarketRegimeDetector(client, cooldown_minutes=45)
+    _regime_detector = MarketRegimeDetector(client, cooldown_minutes=20)   # ⬅️ بطلب المستخدم: كانت 45، خُفّفت لـ 20 دقيقة
     # تفعيل/إطفاء Inverse BTC بالتبديل التلقائي حسب الإعدادات المحفوظة
     _regime_detector.set_inverse_btc_enabled(
         INVERSE_BTC_ENABLED,
