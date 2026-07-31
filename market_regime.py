@@ -48,8 +48,8 @@ class MarketRegimeDetector:
         trend_margin_pct=0.02,        # 2% هامش فوق MA50 عشان يعتبر "ترند واضح"
         volatility_interval=Client.KLINE_INTERVAL_1HOUR,
         atr_period=14,
-        high_volatility_pct=0.015,    # 1.5% (ATR/السعر) يعتبر تذبذب عالي
-        cooldown_minutes=45,
+        high_volatility_pct=0.010,    # ⬅️ بطلب المستخدم: كانت 1.5% — خُفّفت لـ 1.0% (ATR/السعر) عشان يدخل stoch_rsi بشكل أسهل وقت التذبذب المتوسط
+        cooldown_minutes=20,          # ⬅️ بطلب المستخدم: كانت 45 دقيقة — خُفّفت لـ 20 دقيقة بين الاستراتيجيات العادية فقط (RSI/Stoch/Trend). ما إلها أي تأثير على defensive أو inverse_btc، لأنهم يدخلوا/يطلعوا فوراً بدون تبريد أصلاً.
         fear_greed_extreme_low=20,    # تحت هذا الرقم = خوف شديد
         fear_greed_extreme_high=80,   # فوق هذا الرقم = جشع شديد
         fear_greed_cache_minutes=10,  # نكاش قيمة المؤشر عشان ما نضرب الـ API كل فحص
@@ -215,12 +215,10 @@ class MarketRegimeDetector:
             return None, "تعذر تحليل حالة السوق (بيانات غير كافية أو خطأ اتصال)"
 
         fg_suffix = f" | مزاج السوق: {fear_greed}/100" if fear_greed is not None else ""
-        is_extreme_sentiment = fear_greed is not None and (
-            fear_greed <= self.fear_greed_extreme_low or fear_greed >= self.fear_greed_extreme_high
-        )
-        # وقت مزاج متطرف (خوف شديد أو جشع شديد)، الأسواق أكثر عرضة لانعكاسات حادة —
-        # نطلب هامش ترند أوضح (ضعف الطبيعي) قبل ما نثق فيه ونحوّل لـ trend_stoch
-        effective_trend_margin = self.trend_margin_pct * (2 if is_extreme_sentiment else 1)
+        # ⬅️ بطلب المستخدم: تم إلغاء مضاعفة الهامش وقت المزاج المتطرف (خوف/جشع شديد).
+        # الهامش المطلوب لدخول trend_stoch ثابت دايماً = trend_margin_pct (2% افتراضياً)،
+        # بغض النظر عن قيمة Fear&Greed. المؤشر لسا يُحسب ويُعرض بالسبب (fg_suffix) فقط للمعلومية.
+        effective_trend_margin = self.trend_margin_pct
 
         # Inverse BTC: لا يكفي نزول 24 ساعة وحده. نطلب اتجاه هابط واضح على 4 ساعات
         # وتأكيده في أكثر من فحص متتالٍ حتى لا ننتقل بسبب حركة مؤقتة.
