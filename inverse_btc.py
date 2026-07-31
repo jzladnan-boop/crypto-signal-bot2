@@ -35,7 +35,8 @@ DEFAULT_CONFIG = {
     "stoch_k_rebound_min": 20,          # StochRSI K الحالي لازم يرتد فوق هذا الحد
     "volume_ma_period": 20,             # فترة متوسط الفوليوم
     "min_volume_ratio": 1.2,            # الفوليوم الحالي 1.2× المتوسط
-    "max_price_below_ma20_pct": 0.5,    # لا نشتري لو السعر تحت MA20 بأكثر من هذه النسبة
+    # ⬅️ ملاحظة: max_price_below_ma20_pct انحذف — الشرط اللي كان يستخدمه (رفض الصفقة
+    # لو السعر بعيد تحت MA20) أُلغي بالكامل بطلب المستخدم.
 }
 
 _current_config = dict(DEFAULT_CONFIG)
@@ -251,9 +252,9 @@ def check_inverse_btc(client, symbol):
     if ind["price"] <= ind["price_prev"]:
         return None
 
-    # لا نشتري عملة ما زالت بعيدة تحت متوسطها؛ نسمح بهامش صغير فقط.
-    if ind["ma20"] is None or ind["price"] < ind["ma20"] * (1 - cfg["max_price_below_ma20_pct"] / 100):
-        return None
+    # ⬅️ بطلب المستخدم: شرط "لا نشتري لو السعر تحت MA20 بأكثر من max_price_below_ma20_pct%" أُلغي بالكامل.
+    # صار مسموح تفتح الصفقة حتى لو السعر بعيد تحت MA20، طالما باقي الشروط
+    # (ارتداد RSI/Stoch، الفوليوم، الشمعة الصاعدة) متحققة.
 
     # ── كل الشروط تحققت ──
     coin_name = symbol.replace("USDT", "")
