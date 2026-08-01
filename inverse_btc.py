@@ -29,6 +29,8 @@ DEFAULT_CONFIG = {
     "market_recovery_threshold_pct": 1.5, # الخروج من Inverse عند تعافي BTC فوق -1.5%
     # شروط اختيار العملة والدخول بعد ارتداد مؤكد.
     "rs_min_threshold_pct": 5.0,        # العملة لازم تكون صاعدة 5% على الأقل
+    # ⬅️ ملاحظة: الإعدادات الأربعة التالية صارت غير مستخدمة بعد إلغاء شرطي RSI/StochRSI —
+    # تعديلها من التطبيق ما رح يأثر على شي، خليتها موجودة بس لو احتجتوا ترجعوا الشرط لاحقاً.
     "rsi_max_for_entry": 40,            # RSI لازم يكون تحت 40
     "rsi_rebound_min": 30,              # RSI لازم يرتد صعوداً ويصل لهذا الحد
     "stoch_k_max_for_entry": 30,        # StochRSI K السابق كان بمنطقة التشبع
@@ -223,25 +225,11 @@ def check_inverse_btc(client, symbol):
     if ind is None:
         return None
 
-    # ندخل فقط بعد ارتداد RSI صعوداً داخل منطقة دخول منضبطة.
-    if (
-        ind["rsi"] is None or ind["rsi_prev"] is None
-        or not (cfg["rsi_rebound_min"] <= ind["rsi"] <= cfg["rsi_max_for_entry"])
-        or ind["rsi"] <= ind["rsi_prev"]
-    ):
-        return None
+    # ⬅️ بطلب المستخدم: شرط "ارتداد RSI" أُلغي بالكامل — ما عاد فيه أي فحص لموقع RSI
+    # أو لاتجاهه (صاعد/هابط). العملة ممكن تُشترى حتى لو RSI فيها بمنطقة تشبع شرائي.
 
-    # تأكيد ارتداد: K كان بمنطقة التشبع، ثم عبر D وصعد فوق مستوى الارتداد.
-    if (
-        ind["stoch_k"] is None or ind["stoch_d"] is None
-        or ind["stoch_k_prev"] is None or ind["stoch_d_prev"] is None
-        or ind["stoch_k_prev"] > cfg["stoch_k_max_for_entry"]
-        or ind["stoch_k"] < cfg["stoch_k_rebound_min"]
-        or ind["stoch_k"] <= ind["stoch_d"]
-        or ind["stoch_k_prev"] > ind["stoch_d_prev"]
-        or ind["stoch_k"] <= ind["stoch_k_prev"]
-    ):
-        return None
+    # ⬅️ بطلب المستخدم: شرط "ارتداد StochRSI" أُلغي بالكامل — نفس الشي، ما عاد فيه
+    # فحص لموقع أو اتجاه K/D.
 
     # فوليوم أعلى من المتوسط
     if ind["vol_ratio"] < cfg["min_volume_ratio"]:
@@ -275,7 +263,7 @@ def check_inverse_btc(client, symbol):
             f"🔄 <b>Inverse BTC — {coin_name}</b>\n"
             f"📉 BTC نازل {abs(btc_decline)*100:.1f}% (24 ساعة) | العملة صاعدة: +{coin_return*100:.1f}%\n"
             f"💪 قوة نسبية: +{rs_display}% (أقوى من BTC)\n"
-            f"📊 ارتداد مؤكد — RSI: {ind['rsi_prev']} → {ind['rsi']} | Stoch K: {ind['stoch_k_prev']} → {ind['stoch_k']}\n"
+            f"📊 RSI: {ind['rsi']} | Stoch K: {ind['stoch_k']} (للمعلومية فقط، مو شرط دخول)\n"
             f"📈 فوليوم: {ind['vol_ratio']:.1f}× المتوسط"
         ),
     }
