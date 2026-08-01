@@ -25,16 +25,9 @@ DEFAULT_CONFIG = {
     # شروط سوق BTC للتفعيل التلقائي. تُستخدم أيضاً من market_regime.py.
     "btc_decline_threshold_pct": 3.0,   # BTC لازم ينزل 3% على الأقل خلال 24 ساعة
     "btc_trend_margin_pct": 2.0,        # BTC تحت MA50 (4 ساعات) بهامش 2% على الأقل
-    "market_confirmations_required": 2, # عدد فحوص السوق المتتالية قبل التحويل لـ Inverse
     "market_recovery_threshold_pct": 1.5, # الخروج من Inverse عند تعافي BTC فوق -1.5%
     # شروط اختيار العملة والدخول بعد ارتداد مؤكد.
     "rs_min_threshold_pct": 5.0,        # العملة لازم تكون صاعدة 5% على الأقل
-    # ⬅️ ملاحظة: الإعدادات الأربعة التالية صارت غير مستخدمة بعد إلغاء شرطي RSI/StochRSI —
-    # تعديلها من التطبيق ما رح يأثر على شي، خليتها موجودة بس لو احتجتوا ترجعوا الشرط لاحقاً.
-    "rsi_max_for_entry": 40,            # RSI لازم يكون تحت 40
-    "rsi_rebound_min": 30,              # RSI لازم يرتد صعوداً ويصل لهذا الحد
-    "stoch_k_max_for_entry": 30,        # StochRSI K السابق كان بمنطقة التشبع
-    "stoch_k_rebound_min": 20,          # StochRSI K الحالي لازم يرتد فوق هذا الحد
     "volume_ma_period": 20,             # فترة متوسط الفوليوم
     "min_volume_ratio": 1.2,            # الفوليوم الحالي 1.2× المتوسط
     # ⬅️ ملاحظة: max_price_below_ma20_pct انحذف — الشرط اللي كان يستخدمه (رفض الصفقة
@@ -153,16 +146,11 @@ def get_inverse_indicators(client, symbol, interval=Client.KLINE_INTERVAL_30MINU
         # RSI
         rsi_series = ta.momentum.RSIIndicator(close=closes, window=14).rsi()
         rsi = rsi_series.iloc[closed_idx]
-        rsi_prev = rsi_series.iloc[previous_idx]
 
         # StochRSI
         stoch = ta.momentum.StochRSIIndicator(close=closes, window=14, smooth1=3, smooth2=3)
         k_series = stoch.stochrsi_k() * 100
-        d_series = stoch.stochrsi_d() * 100
         k_line = k_series.iloc[closed_idx]
-        d_line = d_series.iloc[closed_idx]
-        k_prev = k_series.iloc[previous_idx]
-        d_prev = d_series.iloc[previous_idx]
 
         # MA20
         ma20 = closes.rolling(window=20).mean().iloc[closed_idx]
@@ -181,11 +169,7 @@ def get_inverse_indicators(client, symbol, interval=Client.KLINE_INTERVAL_30MINU
 
         return {
             "rsi": round(float(rsi), 2) if not pd.isna(rsi) else None,
-            "rsi_prev": round(float(rsi_prev), 2) if not pd.isna(rsi_prev) else None,
             "stoch_k": round(float(k_line), 2) if not pd.isna(k_line) else None,
-            "stoch_d": round(float(d_line), 2) if not pd.isna(d_line) else None,
-            "stoch_k_prev": round(float(k_prev), 2) if not pd.isna(k_prev) else None,
-            "stoch_d_prev": round(float(d_prev), 2) if not pd.isna(d_prev) else None,
             "ma20": round(float(ma20), 8) if not pd.isna(ma20) else None,
             "atr": float(atr) if not pd.isna(atr) and atr > 0 else None,
             "vol_ratio": round(float(vol_ratio), 2),
@@ -253,7 +237,6 @@ def check_inverse_btc(client, symbol):
         "atr": ind["atr"],
         "rsi": ind["rsi"],
         "stoch_k": ind["stoch_k"],
-        "stoch_d": ind["stoch_d"],
         "vol_ratio": ind["vol_ratio"],
         "btc_decline_pct": round(abs(btc_decline) * 100, 2),
         "coin_return_pct": round(coin_return * 100, 2),
