@@ -262,8 +262,6 @@ INVERSE_BTC_ENABLED = False   # 🔘 مطفي افتراضياً — تفعّل�
 INVERSE_BTC_CONFIG = {
     "btc_decline_threshold_pct": 3.0,   # BTC لازم ينزل 3% على الأقل
     "rs_min_threshold_pct": 5.0,        # العملة أقوى من BTC بـ 5%
-    "rsi_max_for_entry": 40,            # RSI تحت 40
-    "stoch_k_max_for_entry": 30,        # Stoch K تحت 30
     "min_volume_ratio": 1.2,            # فوليوم 1.2× المتوسط
 }
 
@@ -1039,7 +1037,7 @@ def telegram_command_listener(client):
                             parts = text.replace("/set_inverse_config ", "").strip().split()
                             key = parts[0]
                             val = float(parts[1])
-                            valid_keys = ["btc_decline_threshold_pct", "rs_min_threshold_pct", "rsi_max_for_entry", "stoch_k_max_for_entry", "min_volume_ratio"]
+                            valid_keys = ["btc_decline_threshold_pct", "rs_min_threshold_pct", "min_volume_ratio"]
                             if key not in valid_keys:
                                 send_admin(f"❌ المفتاح غير صحيح. الصح: {', '.join(valid_keys)}")
                             else:
@@ -1063,8 +1061,6 @@ def telegram_command_listener(client):
                             f"الإعدادات:\n"
                             f"📉 حد نزول BTC: {cfg['btc_decline_threshold_pct']}%\n"
                             f"💪 قوة نسبية min: {cfg['rs_min_threshold_pct']}%\n"
-                            f"📊 RSI max: {cfg['rsi_max_for_entry']}\n"
-                            f"📈 Stoch K max: {cfg['stoch_k_max_for_entry']}\n"
                             f"🔊 فوليوم min: {cfg['min_volume_ratio']}×\n\n"
                             f"المنطق: لما BTC ينزل {cfg['btc_decline_threshold_pct']}% أو أكثر، "
                             f"البوت يبحث عن عملات أقوى من BTC بـ {cfg['rs_min_threshold_pct']}% على الأقل."
@@ -1397,8 +1393,6 @@ def telegram_command_listener(client):
                             "/set_inverse_btc on — تفعيل/إطفاء الاستراتيجية\n"
                             "/set_inverse_config btc_decline_threshold_pct 3.0 — تعديل حد نزول BTC\n"
                             "/set_inverse_config rs_min_threshold_pct 5.0 — تعديل الحد الأدنى للقوة النسبية\n"
-                            "/set_inverse_config rsi_max_for_entry 40 — تعديل حد RSI\n"
-                            "/set_inverse_config stoch_k_max_for_entry 30 — تعديل حد Stoch K\n"
                             "/set_inverse_config min_volume_ratio 1.2 — تعديل حد الفوليوم\n"
                             "/inverse_status — عرض إعدادات Inverse BTC\n\n"
                             "<b>📐 فلاتر تأكيد إضافية:</b>\n"
@@ -1481,12 +1475,6 @@ def scan_all_symbols(client):
             log.info(f"🔄 مرشحون Inverse BTC: {len(new_watch)} عملة صاعدة رغم نزول BTC {btc_change:.1f}%")
         except Exception as e:
             log.error(f"❌ فحص Inverse BTC: {e}")
-    elif strategy == "defensive":
-        # ⛔ سوق هابط واضح — لا تفتح صفقات جديدة
-        with _lock:
-            watch_list = set()
-        log.info("🛡️ defensive mode: سوق هابط واضح — إيقاف الفحص والشراء")
-        return
     else:
         log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
         for symbol in list(SYMBOLS):
@@ -2210,8 +2198,6 @@ def api_get_settings():
             # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
             "inverse_btc_threshold": inv_cfg.get("btc_decline_threshold_pct", 3.0),
             "inverse_btc_rs_min": inv_cfg.get("rs_min_threshold_pct", 5.0),
-            "inverse_btc_rsi_max": inv_cfg.get("rsi_max_for_entry", 40),
-            "inverse_btc_stoch_max": inv_cfg.get("stoch_k_max_for_entry", 30),
             "inverse_btc_volume_min": inv_cfg.get("min_volume_ratio", 1.2),
             # ✅ للتوافق مع النسخ القديمة من التطبيق
             "inverse_btc_config": inv_cfg,
@@ -2339,10 +2325,6 @@ def api_set_settings():
             INVERSE_BTC_CONFIG["btc_decline_threshold_pct"] = float(data["inverse_btc_threshold"])
         if "inverse_btc_rs_min" in data:
             INVERSE_BTC_CONFIG["rs_min_threshold_pct"] = float(data["inverse_btc_rs_min"])
-        if "inverse_btc_rsi_max" in data:
-            INVERSE_BTC_CONFIG["rsi_max_for_entry"] = float(data["inverse_btc_rsi_max"])
-        if "inverse_btc_stoch_max" in data:
-            INVERSE_BTC_CONFIG["stoch_k_max_for_entry"] = float(data["inverse_btc_stoch_max"])
         if "inverse_btc_volume_min" in data:
             INVERSE_BTC_CONFIG["min_volume_ratio"] = float(data["inverse_btc_volume_min"])
 
@@ -2807,14 +2789,6 @@ def run_bot():
                 # ══ المرحلة 1: تقييم كل المرشحين وتجميع من نجح منهم بإشارة شراء ══
                 # (بدل شراء أول مرشح نلاقيه، نجمعهم كلهم أول، ونرتبهم بعدين حسب قوة الزخم)
                 candidates = []   # كل عنصر: (momentum_score, symbol, price, atr_value, signal_info)
-
-                # ⛔ defensive mode: لا تشتري حتى لو فيه مرشحين
-                if strategy == "defensive":
-                    log.info("🛡️ defensive mode: لا يتم فحص المرشحين — سوق هابط واضح")
-                    with _lock:
-                        watch_list.clear()
-                    time.sleep(5)  # نام شوي وانتظر الدورة الجاية
-                    continue
 
                 for symbol in list(watch_list):
                     if is_api_blocked():
