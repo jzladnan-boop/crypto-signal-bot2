@@ -54,7 +54,7 @@ class MarketRegimeDetector:
         fear_greed_extreme_high=80,   # فوق هذا الرقم = جشع شديد
         fear_greed_cache_minutes=10,  # نكاش قيمة المؤشر عشان ما نضرب الـ API كل فحص
         inverse_btc_trend_margin_pct=0.02,
-        inverse_btc_confirmations_required=2,
+        inverse_btc_confirmations_required=1,  # ⬅️ بطلب المستخدم: كانت 2 (تنتظر فحصين = ~15-30 دقيقة قبل الدخول)، صارت 1 = دخول فوري أول ما الشرط يتحقق، بدون انتظار بـ defensive وفوات فرصة الارتداد
         inverse_btc_recovery_threshold_pct=0.015,
     ):
         self.client = client
@@ -244,9 +244,9 @@ class MarketRegimeDetector:
         else:
             self._inverse_confirmation_count = 0
 
-        # سوق هابط لكن شروط Inverse القوية لم تكتمل: لا ندخل صفقات شراء عادية.
-        if (not is_uptrend) and trend_margin <= -self.trend_margin_pct:
-            return "defensive", f"BTC تحت MA50 بـ {abs(trend_margin)*100:.2f}% — إيقاف صفقات الشراء الجديدة{fg_suffix}"
+        # ⬅️ بطلب المستخدم: حالة "defensive" (إيقاف الشراء وقت الهبوط) أُلغيت بالكامل.
+        # الحماية الوحيدة من الهبوط هلق هي inverse_btc (فوق). لو شروطها ما تحققت،
+        # البوت بيكمل عادي بالاستراتيجيات الثلاث العادية حتى لو BTC هابط.
 
         # ترند واضح: BTC فوق MA50 (فريم 4 ساعات) بهامش أكبر من الحد المطلوب
         if is_uptrend and trend_margin >= effective_trend_margin:
@@ -335,7 +335,7 @@ class MarketRegimeDetector:
         enabled,
         decline_threshold=0.03,
         trend_margin_pct=0.02,
-        confirmations_required=2,
+        confirmations_required=1,  # ⬅️ بطلب المستخدم: كانت 2، صارت 1 (دخول فوري) — هذا الديفولت هو اللي فعلياً بيطبق، لأن bot.py بينادي هالدالة بدون ما يمرر القيمة صراحة
         recovery_threshold_pct=0.015,
     ):
         """
