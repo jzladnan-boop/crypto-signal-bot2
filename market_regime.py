@@ -53,7 +53,6 @@ class MarketRegimeDetector:
         fear_greed_extreme_low=20,    # تحت هذا الرقم = خوف شديد
         fear_greed_extreme_high=80,   # فوق هذا الرقم = جشع شديد
         fear_greed_cache_minutes=10,  # نكاش قيمة المؤشر عشان ما نضرب الـ API كل فحص
-        inverse_btc_trend_margin_pct=0.02,
         inverse_btc_confirmations_required=1,  # ⬅️ بطلب المستخدم: كانت 2 (تنتظر فحصين = ~15-30 دقيقة قبل الدخول)، صارت 1 = دخول فوري أول ما الشرط يتحقق، بدون انتظار بـ defensive وفوات فرصة الارتداد
         inverse_btc_recovery_threshold_pct=0.015,
     ):
@@ -73,7 +72,6 @@ class MarketRegimeDetector:
         # 🔄 إعدادات Inverse BTC للتبديل التلقائي
         self.inverse_btc_enabled = False   # يُحدد من bot.py
         self.inverse_btc_decline_threshold = 0.03  # 3% نزول BTC
-        self.inverse_btc_trend_margin_pct = inverse_btc_trend_margin_pct
         self.inverse_btc_confirmations_required = max(1, int(inverse_btc_confirmations_required))
         self.inverse_btc_recovery_threshold_pct = inverse_btc_recovery_threshold_pct
         self._inverse_confirmation_count = 0
@@ -182,20 +180,21 @@ class MarketRegimeDetector:
         if btc_decline is None or trend_margin is None or is_uptrend is None:
             return False, False, btc_decline
 
-        # الدخول: نزول 24 ساعة قوي + BTC تحت MA50 بهامش واضح على 4 ساعات.
+        # ⬅️ بطلب المستخدم: شرط "تحت MA50 بهامش 2% على 4 ساعات" أُلغي بالكامل.
+        # كان شرط مخفي غير ظاهر بالتطبيق (لا يوجد له حقل بالإعدادات)، فكان ممكن BTC
+        # ينزل 2%+ خلال 24 ساعة (الشرط الظاهر يلي المستخدم ضابطه فعلياً) بدون ما يتفعّل
+        # inverse_btc، لأن المتوسط المتحرك (MA50) بيتحرك أبطأ من السعر وما لحق ينزل معه.
+        # هلق الدخول يعتمد فقط على نزول BTC خلال 24 ساعة (inverse_btc_decline_threshold).
         strong_downtrend = (
             (not is_uptrend)
-            and trend_margin <= -self.inverse_btc_trend_margin_pct
             and btc_decline <= -self.inverse_btc_decline_threshold
         )
 
         # الخروج أهدأ من الدخول (Hysteresis): لا نخرج من Inverse عند ارتداد صغير،
-        # لكن نخرج فوراً عند تعافي واضح أو عودة السعر فوق MA50.
-        recovery_margin = self.inverse_btc_trend_margin_pct * 0.5
+        # لكن نخرج فوراً عند تعافي واضح أو عودة السعر لترند صاعد.
         market_recovered = (
             btc_decline > -self.inverse_btc_recovery_threshold_pct
             or is_uptrend
-            or trend_margin > -recovery_margin
         )
         return strong_downtrend, market_recovered, btc_decline
 
@@ -236,8 +235,7 @@ class MarketRegimeDetector:
             required = self.inverse_btc_confirmations_required
             if self._inverse_confirmation_count >= required:
                 reason = (
-                    f"هبوط BTC مؤكد: {abs(btc_decline)*100:.2f}% خلال 24 ساعة، "
-                    f"وتحت MA50 بـ {abs(trend_margin)*100:.2f}% "
+                    f"هبوط BTC مؤكد: {abs(btc_decline)*100:.2f}% خلال 24 ساعة "
                     f"({self._inverse_confirmation_count}/{required} تأكيد) — البحث عن عملات مقاومة{fg_suffix}"
                 )
                 return "inverse_btc", reason
@@ -334,7 +332,6 @@ class MarketRegimeDetector:
         self,
         enabled,
         decline_threshold=0.03,
-        trend_margin_pct=0.02,
         confirmations_required=1,  # ⬅️ بطلب المستخدم: كانت 2، صارت 1 (دخول فوري) — هذا الديفولت هو اللي فعلياً بيطبق، لأن bot.py بينادي هالدالة بدون ما يمرر القيمة صراحة
         recovery_threshold_pct=0.015,
     ):
@@ -344,7 +341,6 @@ class MarketRegimeDetector:
         """
         self.inverse_btc_enabled = enabled
         self.inverse_btc_decline_threshold = decline_threshold
-        self.inverse_btc_trend_margin_pct = max(float(trend_margin_pct), 0.0)
         self.inverse_btc_confirmations_required = max(1, int(confirmations_required))
         self.inverse_btc_recovery_threshold_pct = max(float(recovery_threshold_pct), 0.0)
         if not enabled:
