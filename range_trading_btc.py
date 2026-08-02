@@ -27,14 +27,13 @@ from binance.exceptions import BinanceAPIException
 DEFAULT_CONFIG = {
     "symbol": "BTCUSDT",
     "interval": Client.KLINE_INTERVAL_30MINUTE,
-    "lookback_candles": 96,        # 96 شمعة × 30 دقيقة = 48 ساعة نافذة البحث عن الدعم/المقاومة
+    "lookback_candles": 12,         # ⬅️ بطلب المستخدم: كانت 96 (48 ساعة) → 12 شمعة × 30 دقيقة = 6 ساعات فقط (تفعيل أسرع بكثير)
     "swing_order": 3,              # القمة/القاع لازم تكون أعلى/أدنى من 3 شمعات على كل جنب (فراكتال)
     "cluster_tolerance_pct": 0.3,  # القمم/القيعان اللي فرق بينها أقل من 0.3% تعتبر نفس المنطقة
-    "min_range_width_pct": 1.0,    # لازم المسافة بين الدعم والمقاومة 1% على الأقل (نطاق حقيقي، مش عشوائي)
+    "min_range_width_pct": 0.5,     # ⬅️ بطلب المستخدم: كانت 1.0% → 0.5% (نطاقات أضيق تنعتبر حقيقية الآن)
     "touch_tolerance_pct": 0.3,    # "لمس" الدعم = السعر وصل لحدود دعم±0.3%
     "confirm_margin_pct": 0.15,    # قفل الشمعة لازم يكون 0.15% فوق الدعم على الأقل (تأكيد ارتداد حقيقي)
     "rsi_period": 14,
-    "rsi_oversold": 35,            # RSI لازم يكون كان تحت هالرقم قبل الارتداد
     "stop_loss_below_support_pct": 0.3,     # وقف الخسارة تحت مستوى الدعم (مو تحت سعر الدخول)
     "resistance_touch_tolerance_pct": 0.3,  # "لمس" المقاومة = وصل لحدود مقاومة±0.3% → بيع فوري
     "usdt_per_trade": 15.0,        # المبلغ الثابت لكل صفقة
@@ -304,8 +303,9 @@ class RangeTradingBTC:
             return None
         if not (last_close >= support * (1 + confirm_margin)):
             return None
-        if not (rsi_prev <= self.cfg["rsi_oversold"] and rsi_now > rsi_prev):
-            return None
+        # ⬅️ بطلب المستخدم: شرط "RSI كان بتشبع بيعي وارتد" أُلغي بالكامل — الدخول
+        # هلق يعتمد بس على لمسة الدعم + قفل الشمعة فوقه بهامش واضح. RSI لسا محسوب
+        # ومعروض بالإشارة للمعلومية بس، مو شرط دخول.
         if last_close <= last_open:
             return None
 
@@ -328,7 +328,7 @@ class RangeTradingBTC:
                 f"📊 <b>Range Trading BTC — ارتداد من الدعم</b>\n"
                 f"💰 السعر: {last_close:.2f} | الدعم: {support:.2f} ({levels['support_touches']} لمسات)\n"
                 f"🎯 المقاومة: {resistance:.2f} ({levels['resistance_touches']} لمسات) | هامش ربح محتمل: {potential_gain_pct:.2f}%\n"
-                f"📈 RSI: {rsi_prev:.1f} → {rsi_now:.1f} (ارتداد من تشبع بيعي)\n"
+                f"📈 RSI: {rsi_now:.1f} (للمعلومية فقط، مو شرط دخول)\n"
                 f"🛡️ وقف الخسارة: {stop_loss_price:.2f} (تحت الدعم بـ {self.cfg['stop_loss_below_support_pct']}%)"
             ),
         }
