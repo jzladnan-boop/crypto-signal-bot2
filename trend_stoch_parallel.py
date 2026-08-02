@@ -1,0 +1,552 @@
+"""
+📈 Trend + StochRSI — استراتيجية موازية ومستقلة (نفس منطق الدخول والحماية الحقيقي)
+======================================================================================
+استراتيجية منفصلة تماماً عن حلقة الفحص الرئيسية بـ crypto_signal_bot.py — بس بتستخدم
+بالضبط نفس منطق الدخول (Trend + StochRSI + فوليوم + فلتر Beta) ونفس نظام الحماية
+(ATR Stop Loss + Breakeven + Trailing) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون
+سلوك الحماية مطابق ومجرب.
+
+⚠️ استقلالية "المشتركات المتغيّرة" (Shared Mutable State): هالملف ما بيلمس أي من
+open_trades / current_strategy / coin_memory (تاريخ العملة يلي بيتحكم بـ Strict Mode)
+أو نسخة market_regime المستخدمة بالتبديل التلقائي — عنده صفقته الخاصة وملف حالته
+الخاص. بس بستورد دوال رياضية بحتة بلا حالة (indicators.py) وحاسبة الـ ATR/SL بلا حالة
+(ATRGuard من coin_memory.py، نسخة جديدة لحاله) — هذول أدوات حساب بحتة، استيرادها آمن
+100% ولا يأثر على أي استراتيجية تانية.
+
+المنطق:
+--------
+1) الدخول (نفس check_trend_stoch بالضبط):
+   - StochRSI: K وD كانوا بمنطقة تشبع بيعي (تحت 20)، وK عبر D صعوداً وطلع فوق 20
+   - السعر فوق MA20
+   - الفوليوم الحالي أعلى من متوسطه (فلتر تأكيد)
+   - Beta العملة مقابل BTC ≥ 1.2 (تتحرك أعنف من BTC — استغلال الزخم)
+   لو أكتر من عملة حققت الشروط بنفس دورة الفحص، نختار الأعلى "درجة زخم" (Momentum Score)
+   — نفس منطق ترتيب المرشحين بالبوت الأساسي.
+
+2) الحماية (نفس نظام البوت بالضبط):
+   - Stop Loss أولي: ATR × مضاعف، مربوط بحالة السوق (BULL/BEAR/SIDEWAYS) عبر
+     نفس ATRGuard، بسقف صلب 3% ما ينكسر أبداً
+   - Breakeven: عند ربح 0.5%، الستوب ينتقل لسعر الدخول + 0.2% (يغطي العمولة) — أرضية
+     ما تنزل تحتها أبداً طول عمر الصفقة
+   - Trailing: يتفعّل عند ربح 1%، وبعدها يلاحق أعلى سعر بمسافة ATR × 1.5 (أو نسبة
+     ثابتة احتياطية لو ATR غير متاح)
+
+3) صفقة وحدة بس بأي لحظة، بمبلغ ثابت 15 USDT.
+
+الاستخدام: نفس نمط range_trading_btc.py — TrendStochParallel(client, notify_fn=...).run(...)
+"""
+
+import time
+import json
+import os
+import pandas as pd
+import ta
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+
+from indicators import calculate_beta, calculate_bollinger_bands, calculate_vwap, calculate_momentum_score
+from coin_memory import ATRGuard
+from market_regime import MarketRegimeDetector
+
+
+DEFAULT_CONFIG = {
+    "interval": Client.KLINE_INTERVAL_1HOUR,   # ⬅️ بطلب المستخدم: فريم ساعة
+    "symbols": None,   # None = يجيب قائمة عملات USDT Spot النشطة تلقائياً (نفس نطاق البوت)
+    "exclude_leveraged": True,   # يستبعد UP/DOWN/BULL/BEAR (توكنز رافعة مالية)
+
+    # ── شروط الدخول (نفس check_trend_stoch بالضبط) ──
+    "ma_period": 20,
+    "stoch_window": 14, "stoch_smooth1": 3, "stoch_smooth2": 3,
+    "stoch_entry_level": 20,
+    "volume_ma_length": 20,
+    "volume_multiplier": 1.0,
+    "beta_threshold": 1.2,
+    "beta_lookback": 30,
+    "atr_period": 14,
+
+    # ── الحماية (نفس نظام البوت بالضبط) ──
+    "atr_multiplier": 2.0,             # مضاعف ATR للستوب الأولي
+    "trail_atr_multiplier": 1.5,       # مضاعف ATR لمسافة الـ Trailing
+    "trail_activate_pct": 0.01,        # 1% ربح → تفعيل Trailing
+    "breakeven_activate_pct": 0.005,   # 0.5% ربح → تفعيل أرضية التعادل
+    "breakeven_margin_pct": 0.002,     # 0.2% فوق الدخول (يغطي عمولة بينانس 0.1%×2)
+    "stop_loss_fallback_pct": 0.02,    # احتياطي لو ما قدرنا نحسب ATR
+    "fallback_trail_pct": 0.01,        # احتياطي Trailing لو ما قدرنا نحسب ATR
+
+    "usdt_per_trade": 15.0,
+    "live_trading": False,             # ⚠️ لازم True صراحة لتنفيذ صفقات حقيقية
+    "state_file": "trend_stoch_state.json",
+    "history_file": "trend_stoch_history.json",
+    "scan_pause_seconds": 0.4,         # ⬅️ بطلب المستخدم: كانت 0.15 — بطّأنا الفحص (144 عملة كل ساعة) لتخفيف الضغط على مفتاح API المشترك مع البوت الأساسي
+}
+
+
+# ──────────────────────────────────────────────
+# 🔧 تنفيذ شراء/بيع مستقل (نفس نمط range_trading_btc.py — بدون استيراد من bot.py)
+# ──────────────────────────────────────────────
+def _get_step_size(client, symbol):
+    try:
+        info = client.get_symbol_info(symbol)
+        if not info:
+            return None
+        for f in info["filters"]:
+            if f["filterType"] == "LOT_SIZE":
+                return float(f["stepSize"])
+    except Exception:
+        pass
+    return None
+
+
+def _get_quantity(client, symbol, usdt_amount):
+    step_size = _get_step_size(client, symbol)
+    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+    qty = usdt_amount / price
+    if step_size:
+        precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+        qty = round(qty - (qty % step_size), precision)
+    return qty, price
+
+
+def _buy_market(client, symbol, usdt_amount):
+    try:
+        qty, price = _get_quantity(client, symbol, usdt_amount)
+        if qty <= 0:
+            return None
+        order = client.order_market_buy(symbol=symbol, quantity=qty)
+        fills = order.get("fills", [])
+        if fills:
+            total_qty = sum(float(f["qty"]) for f in fills)
+            total_spent = sum(float(f["price"]) * float(f["qty"]) for f in fills)
+            asset = symbol.replace("USDT", "")
+            commission_in_asset = sum(
+                float(f.get("commission", 0)) for f in fills
+                if f.get("commissionAsset") == asset
+            )
+            net_qty = total_qty - commission_in_asset
+            actual_price = total_spent / total_qty if total_qty > 0 else price
+            if net_qty <= 0:
+                net_qty = qty
+        else:
+            actual_price = price
+            net_qty = qty
+        return {"qty": net_qty, "entry_price": actual_price, "order_id": order["orderId"]}
+    except Exception:
+        return None
+
+
+def _sell_market(client, symbol, qty):
+    try:
+        asset = symbol.replace("USDT", "")
+        balance = client.get_asset_balance(asset=asset)
+        actual_qty = float(balance["free"])
+        step_size = _get_step_size(client, symbol)
+        sell_qty = min(qty, actual_qty)
+        if step_size:
+            precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+            sell_qty = round(sell_qty - (sell_qty % step_size), precision)
+        if sell_qty <= 0:
+            return None, None
+        order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
+        fills = order.get("fills", [])
+        if fills:
+            executed_qty = sum(float(f["qty"]) for f in fills)
+            price = sum(float(f["price"]) * float(f["qty"]) for f in fills) / executed_qty
+        else:
+            executed_qty = sell_qty
+            price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+        return price, executed_qty
+    except Exception:
+        return None, None
+
+
+def _calculate_atr(highs, lows, closes, period):
+    try:
+        atr_series = ta.volatility.AverageTrueRange(high=highs, low=lows, close=closes, window=period).average_true_range()
+        value = atr_series.iloc[-1]
+        if pd.isna(value) or value <= 0:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+class TrendStochParallel:
+    def __init__(self, client, notify_fn=None, config_fn=None, **config_overrides):
+        """
+        config_fn: دالة اختيارية بدون معاملات، ترجع dict فيه قيم حية (زي
+        atr_multiplier, trail_atr_multiplier, trail_activate_pct, breakeven_activate_pct,
+        breakeven_margin_pct) — بتُستدعى بأول كل دورة فحص، فأي تغيير عالإعدادات
+        بالتطبيق/تيليغرام (على البوت الأساسي) بينعكس هون فوراً بدون إعادة تشغيل.
+        """
+        self.client = client
+        self.notify_fn = notify_fn
+        self.config_fn = config_fn
+        self.cfg = dict(DEFAULT_CONFIG)
+        self.cfg.update(config_overrides)
+
+        self.atr_guard = ATRGuard()                    # نسخة خاصة، بدون أي علاقة بنسخة bot.py
+        self.regime_detector = MarketRegimeDetector(client)   # نفس الشي — نسخة خاصة لحالها
+
+        self.position = None   # صفقة وحدة بس بأي لحظة
+        self._load_state()
+
+        self._symbols_cache = None
+        self._symbols_cache_time = 0
+
+    def _notify(self, text):
+        if self.notify_fn:
+            try:
+                self.notify_fn(text)
+            except Exception:
+                pass
+
+    # ──────────────────────────────────────────────
+    # 💾 حفظ/استرجاع الحالة
+    # ──────────────────────────────────────────────
+    def _load_state(self):
+        path = self.cfg["state_file"]
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self.position = json.load(f)
+            except Exception:
+                self.position = None
+
+    def _save_state(self):
+        path = self.cfg["state_file"]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.position, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _log_history(self, record):
+        path = self.cfg["history_file"]
+        history = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+        history.append(record)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # ──────────────────────────────────────────────
+    # 🌐 قائمة العملات (نفس نطاق البوت — USDT Spot النشطة، بدون توكنز رافعة مالية)
+    # ──────────────────────────────────────────────
+    def _get_symbols(self):
+        if self.cfg["symbols"]:
+            return self.cfg["symbols"]
+
+        # نكاش القائمة لمدة ساعة (ما تتغير كتير) — تقليل ضغط API
+        if self._symbols_cache and (time.time() - self._symbols_cache_time) < 3600:
+            return self._symbols_cache
+
+        try:
+            info = self.client.get_exchange_info()
+            symbols = []
+            for s in info["symbols"]:
+                if (s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+                        and s.get("isSpotTradingAllowed", True)):
+                    base = s["baseAsset"]
+                    if self.cfg["exclude_leveraged"] and any(tag in base for tag in ("UP", "DOWN", "BULL", "BEAR")):
+                        continue
+                    symbols.append(s["symbol"])
+            self._symbols_cache = symbols
+            self._symbols_cache_time = time.time()
+            return symbols
+        except Exception:
+            return self._symbols_cache or []
+
+    def _get_btc_closes(self):
+        try:
+            klines = self.client.get_klines(symbol="BTCUSDT", interval=self.cfg["interval"], limit=self.cfg["beta_lookback"] + 5)
+            return pd.Series([float(k[4]) for k in klines])
+        except Exception:
+            return None
+
+    # ──────────────────────────────────────────────
+    # 🟢 فحص إشارة الدخول لعملة وحدة (نفس check_trend_stoch بالضبط)
+    # ──────────────────────────────────────────────
+    def check_symbol_entry(self, symbol, btc_closes):
+        try:
+            klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=100)
+            if not klines or len(klines) < 30:
+                return None
+            closes  = pd.Series([float(k[4]) for k in klines])
+            highs   = pd.Series([float(k[2]) for k in klines])
+            lows    = pd.Series([float(k[3]) for k in klines])
+            volumes = pd.Series([float(k[5]) for k in klines])
+
+            stoch = ta.momentum.StochRSIIndicator(
+                close=closes, window=self.cfg["stoch_window"],
+                smooth1=self.cfg["stoch_smooth1"], smooth2=self.cfg["stoch_smooth2"],
+            )
+            k_line = stoch.stochrsi_k() * 100
+            d_line = stoch.stochrsi_d() * 100
+
+            k_curr, k_prev = round(k_line.iloc[-1], 2), round(k_line.iloc[-2], 2)
+            d_curr, d_prev = round(d_line.iloc[-1], 2), round(d_line.iloc[-2], 2)
+            price = float(closes.iloc[-1])
+            ma20  = round(closes.rolling(window=self.cfg["ma_period"]).mean().iloc[-1], 8)
+            level = self.cfg["stoch_entry_level"]
+
+            base_condition = (
+                k_prev < level and d_prev < level and
+                k_curr >= level and
+                k_prev < d_prev and k_curr > d_curr and
+                price > ma20
+            )
+            if not base_condition:
+                return None
+
+            vol_ma = volumes.rolling(window=self.cfg["volume_ma_length"]).mean().iloc[-1]
+            if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * self.cfg["volume_multiplier"]):
+                return None
+
+            if btc_closes is None or len(btc_closes) < self.cfg["beta_lookback"]:
+                return None
+            coin_closes_for_beta = closes.iloc[-len(btc_closes):]
+            beta_value = calculate_beta(coin_closes_for_beta, btc_closes)
+            if beta_value is None or beta_value < self.cfg["beta_threshold"]:
+                return None
+
+            atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
+
+            return {
+                "symbol": symbol, "price": price, "ma20": ma20,
+                "k_curr": k_curr, "d_curr": d_curr, "beta": beta_value, "atr": atr_value,
+                "momentum_score": calculate_momentum_score(closes, volumes),
+            }
+        except BinanceAPIException:
+            return None
+        except Exception:
+            return None
+
+    def scan_for_entry(self):
+        """يفحص كل العملات، ويرجع أفضل إشارة (أعلى momentum_score) أو None."""
+        symbols = self._get_symbols()
+        if not symbols:
+            return None
+        btc_closes = self._get_btc_closes()
+
+        best_signal = None
+        for symbol in symbols:
+            if symbol == "BTCUSDT":
+                continue
+            signal = self.check_symbol_entry(symbol, btc_closes)
+            if signal and (best_signal is None or signal["momentum_score"] > best_signal["momentum_score"]):
+                best_signal = signal
+            time.sleep(self.cfg["scan_pause_seconds"])
+        return best_signal
+
+    # ──────────────────────────────────────────────
+    # ⚡ تنفيذ الشراء (مع نفس نظام حساب الستوب الأولي بالضبط)
+    # ──────────────────────────────────────────────
+    def _execute_buy(self, signal):
+        symbol = signal["symbol"]
+        amount = self.cfg["usdt_per_trade"]
+
+        if self.cfg["live_trading"]:
+            result = _buy_market(self.client, symbol, amount)
+            if result is None:
+                self._notify(f"❌ Trend+Stoch: فشل تنفيذ أمر الشراء لـ {symbol}")
+                return
+            entry_price, qty = result["entry_price"], result["qty"]
+        else:
+            entry_price = signal["price"]
+            qty = round(amount / entry_price, 6)
+
+        # 📐 نفس صمام أمان ATR/SL بالضبط (ATRGuard، مربوط بحالة السوق، strict_mode=False
+        # دائماً هون — ما بنربط هالاستراتيجية بتاريخ العملة بذاكرة البوت الأساسي)
+        market_regime = self.regime_detector.get_regime_label()
+        atr_value = signal.get("atr")
+        if atr_value:
+            sl_info = self.atr_guard.compute_stop_loss(
+                entry_price=entry_price,
+                raw_atr_value=atr_value,
+                market_regime=market_regime,
+                strict_mode=False,
+                atr_sl_multiple=self.cfg["atr_multiplier"],
+                strict_cap_pct=self.cfg["stop_loss_fallback_pct"] * 100,
+            )
+            stop_loss = sl_info["sl_price"]
+        else:
+            stop_loss = entry_price * (1 - self.cfg["stop_loss_fallback_pct"])
+
+        self.position = {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "qty": qty,
+            "atr": atr_value,
+            "stop_loss": round(stop_loss, 8),
+            "trailing_active": False,
+            "highest_price": entry_price,
+            "breakeven_floor": None,
+            "entry_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "market_regime_at_entry": market_regime,
+        }
+        self._save_state()
+
+        mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
+        self._notify(
+            f"🟢 <b>Trend+Stoch{mode_tag} — دخول {symbol.replace('USDT','')}</b>\n"
+            f"💰 السعر: {entry_price:.6f} | Beta: {signal['beta']:.2f} | حالة السوق: {market_regime}\n"
+            f"🛡️ وقف الخسارة الأولي: {stop_loss:.6f}\n"
+            f"💵 المبلغ: {amount} USDT"
+        )
+
+    # ──────────────────────────────────────────────
+    # 🔄 حساب ستوب الـ Trailing (نفس compute_trail_stop بالضبط)
+    # ──────────────────────────────────────────────
+    def _compute_trail_stop(self, price):
+        atr_val = self.position.get("atr")
+        if atr_val:
+            candidate = price - (self.cfg["trail_atr_multiplier"] * atr_val)
+            if 0 < candidate < price:
+                return round(candidate, 8)
+        return round(price * (1 - self.cfg["fallback_trail_pct"]), 8)
+
+    # ──────────────────────────────────────────────
+    # 🔍 إدارة الصفقة المفتوحة (Breakeven + Trailing + Stop Loss — نفس منطق البوت بالضبط)
+    # ──────────────────────────────────────────────
+    def manage_open_position(self):
+        symbol = self.position["symbol"]
+        try:
+            price = float(self.client.get_symbol_ticker(symbol=symbol)["price"])
+        except Exception:
+            return
+
+        # 🛡️ Breakeven
+        if self.position.get("breakeven_floor") is None:
+            if price >= self.position["entry_price"] * (1 + self.cfg["breakeven_activate_pct"]):
+                floor_price = round(self.position["entry_price"] * (1 + self.cfg["breakeven_margin_pct"]), 8)
+                self.position["breakeven_floor"] = floor_price
+                if floor_price > self.position["stop_loss"]:
+                    self.position["stop_loss"] = floor_price
+                self._save_state()
+
+        stop_floor = self.position.get("breakeven_floor") or self.position["entry_price"]
+
+        # 🎯 تفعيل Trailing
+        if not self.position["trailing_active"]:
+            if price >= self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"]):
+                self.position["trailing_active"] = True
+                self.position["highest_price"] = price
+                self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
+                self._save_state()
+                self._notify(f"🎯 Trend+Stoch: تفعيل Trailing لـ {symbol.replace('USDT','')} | ستوب: {self.position['stop_loss']}")
+
+        # تحديث/فحص الخروج
+        if self.position["trailing_active"]:
+            if price > self.position["highest_price"]:
+                self.position["highest_price"] = price
+                self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
+                self._save_state()
+            elif price <= self.position["stop_loss"]:
+                self._execute_sell(price, "trailing_stop")
+        else:
+            if price <= self.position["stop_loss"]:
+                self._execute_sell(price, "stop_loss")
+
+    def _execute_sell(self, current_price, reason):
+        symbol = self.position["symbol"]
+        entry_price = self.position["entry_price"]
+        qty = self.position["qty"]
+
+        if self.cfg["live_trading"]:
+            exit_price, executed_qty = _sell_market(self.client, symbol, qty)
+            if exit_price is None:
+                self._notify(f"❌ Trend+Stoch: فشل تنفيذ أمر البيع لـ {symbol} (السبب: {reason})")
+                return
+            final_qty = executed_qty
+        else:
+            exit_price = current_price
+            final_qty = qty
+
+        pnl = round((exit_price - entry_price) * final_qty, 4)
+        pnl_pct = round((exit_price - entry_price) / entry_price * 100, 3)
+
+        self._log_history({
+            "symbol": symbol, "entry_price": entry_price, "exit_price": exit_price,
+            "qty": final_qty, "pnl": pnl, "pnl_pct": pnl_pct, "reason": reason,
+            "entry_time": self.position.get("entry_time"),
+            "exit_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "live": self.cfg["live_trading"],
+        })
+
+        icon = "✅" if pnl > 0 else "❌"
+        reason_ar = "Trailing Stop" if reason == "trailing_stop" else "وقف خسارة"
+        mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
+        self._notify(
+            f"{icon} <b>Trend+Stoch{mode_tag} — خروج {symbol.replace('USDT','')} ({reason_ar})</b>\n"
+            f"💰 دخول: {entry_price:.6f} → خروج: {exit_price:.6f}\n"
+            f"📊 PnL: {pnl:+.4f} USDT ({pnl_pct:+.3f}%)"
+        )
+
+        self.position = None
+        self._save_state()
+
+    def _refresh_live_config(self):
+        """يجيب أحدث قيم من البوت الأساسي (لو config_fn متوفرة) ويحدّث self.cfg بيهم."""
+        if self.config_fn is None:
+            return
+        try:
+            live_values = self.config_fn()
+            if live_values:
+                self.cfg.update(live_values)
+        except Exception:
+            pass   # لو فشل الجلب لأي سبب، نكمل بآخر قيم معروفة بدل ما نوقف الاستراتيجية
+
+    # ──────────────────────────────────────────────
+    # 🔄 دورة فحص/تنفيذ واحدة
+    # ──────────────────────────────────────────────
+    def check_and_act(self):
+        self._refresh_live_config()   # ⬅️ نتأكد إننا شغالين بآخر إعدادات ATR/Trailing/Breakeven من البوت الأساسي
+
+        if self.position is not None:
+            self.manage_open_position()
+            return {"status": "holding" if self.position else "exited"}
+
+        signal = self.scan_for_entry()
+        if signal is not None:
+            self._execute_buy(signal)
+            return {"status": "entered", "signal": signal}
+        return {"status": "waiting_for_entry"}
+
+    def run(self, poll_seconds=3600, max_iterations=None, is_enabled_fn=None):
+        mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
+        print(f"📈 بدء Trend+Stoch المستقلة — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: ساعة")
+
+        iteration = 0
+        while max_iterations is None or iteration < max_iterations:
+            if is_enabled_fn is None or is_enabled_fn():
+                try:
+                    self.check_and_act()
+                except Exception as e:
+                    print(f"❌ خطأ بدورة الفحص: {e}")
+                sleep_time = poll_seconds
+            else:
+                sleep_time = 10
+            iteration += 1
+            if max_iterations is None or iteration < max_iterations:
+                time.sleep(sleep_time)
+
+
+if __name__ == "__main__":
+    api_key = os.environ.get("BINANCE_API_KEY", "")
+    api_secret = os.environ.get("BINANCE_API_SECRET", "")
+    client = Client(api_key, api_secret)
+
+    strategy = TrendStochParallel(client, usdt_per_trade=15.0, live_trading=False)
+    print("🔍 فحص فوري لأفضل إشارة دخول حالياً (قد يأخذ دقيقة لكل العملات)...")
+    signal = strategy.scan_for_entry()
+    if signal:
+        print(f"✅ إشارة: {signal['symbol']} @ {signal['price']} | Beta: {signal['beta']:.2f} | Score: {signal['momentum_score']}")
+    else:
+        print("⚠️ مافي إشارة دخول حالياً")
