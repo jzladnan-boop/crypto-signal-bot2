@@ -30,6 +30,24 @@ from functools import wraps
 from market_regime import MarketRegimeDetector
 from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config, get_24h_change_pct
 from range_trading_btc import RangeTradingBTC
+from trend_stoch_parallel import TrendStochParallel
+
+
+def _get_live_risk_config():
+    """
+    يرجع أحدث قيم ATR/Trailing/Breakeven من إعدادات البوت الأساسي الحية —
+    تُمرَّر لاستراتيجية Trend+Stoch الموازية (trend_stoch_parallel.py) عشان
+    تشتغل دايماً بنفس القيم الحية، بدون ما تحتاج إعادة تشغيل عند أي تعديل
+    من التطبيق أو تيليغرام.
+    """
+    with _lock:
+        return {
+            "atr_multiplier": ATR_MULTIPLIER,
+            "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
+            "trail_activate_pct": TRAIL_ACTIVATE_PCT,
+            "breakeven_activate_pct": BREAKEVEN_ACTIVATE_PCT,
+            "breakeven_margin_pct": BREAKEVEN_MARGIN_PCT,
+        }
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_beta
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
@@ -276,6 +294,16 @@ RANGE_TRADING_USDT_PER_TRADE = 15.0   # المبلغ الثابت لكل صفق�
 _range_trading_strategy = None   # ⬅️ نسخة RangeTradingBTC الوحيدة — تتنشئ عند تشغيل البوت (main)
 
 # ──────────────────────────────────────────────
+# 📈 استراتيجية Trend + StochRSI الموازية المستقلة (ملف trend_stoch_parallel.py)
+# نفس منطق دخول Trend+Stoch الأصلي + نفس نظام ATR/Breakeven/Trailing الحقيقي،
+# بس بصفقة وحدة بمبلغ ثابت 15 USDT، مستقلة كلياً عن حلقة الفحص الرئيسية.
+# مطفية افتراضياً — تفعّل/تطفى من تيليغرام (/set_trend_parallel on|off) أو التطبيق.
+# ──────────────────────────────────────────────
+TREND_PARALLEL_ENABLED = False
+TREND_PARALLEL_USDT_PER_TRADE = 15.0
+_trend_parallel_strategy = None   # ⬅️ نسخة TrendStochParallel الوحيدة
+
+# ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
 logging.basicConfig(
@@ -407,6 +435,7 @@ def save_settings():
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global RANGE_TRADING_ENABLED
+    global TREND_PARALLEL_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -433,6 +462,7 @@ def save_settings():
                 "inverse_btc_enabled": INVERSE_BTC_ENABLED,
                 "inverse_btc_config" : INVERSE_BTC_CONFIG,
                 "range_trading_enabled": RANGE_TRADING_ENABLED,
+                "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -446,6 +476,7 @@ def load_settings():
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global RANGE_TRADING_ENABLED
+    global TREND_PARALLEL_ENABLED
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -485,6 +516,7 @@ def load_settings():
             INVERSE_BTC_CONFIG.update(loaded_inv_config)
             set_inverse_config(**loaded_inv_config)
         RANGE_TRADING_ENABLED = s.get("range_trading_enabled", RANGE_TRADING_ENABLED)
+        TREND_PARALLEL_ENABLED = s.get("trend_parallel_enabled", TREND_PARALLEL_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -713,6 +745,7 @@ def telegram_command_listener(client):
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     global RANGE_TRADING_ENABLED
+    global TREND_PARALLEL_ENABLED
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -1035,6 +1068,42 @@ def telegram_command_listener(client):
                             )
                         else:
                             send_admin("❌ مثال: /set_range_trading on  أو  /set_range_trading off")
+
+                    # ── /set_trend_parallel (تشغيل/إيقاف استراتيجية Trend+Stoch الموازية المستقلة) ──
+                    elif text.startswith("/set_trend_parallel "):
+                        value = text.replace("/set_trend_parallel ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                TREND_PARALLEL_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّلة" if TREND_PARALLEL_ENABLED else "❌ متوقفة"
+                            send_admin(
+                                f"{status_txt} استراتيجية Trend+Stoch الموازية\n"
+                                f"↳ صفقات حقيقية بمبلغ {TREND_PARALLEL_USDT_PER_TRADE} USDT/صفقة، فريم ساعة، صفقة وحدة بس بأي لحظة"
+                                if TREND_PARALLEL_ENABLED else
+                                "❌ تم إيقاف Trend+Stoch الموازية — أي صفقة مفتوحة حالياً بتضل تكمل لحد ما توقف عادي (ستوب/ترايلنك)، بس ما رح تنفتح صفقة جديدة"
+                            )
+                        else:
+                            send_admin("❌ مثال: /set_trend_parallel on  أو  /set_trend_parallel off")
+
+                    # ── /trend_parallel_status ──────────────────────
+                    elif text == "/trend_parallel_status":
+                        with _lock:
+                            tp_status = "✅ مفعّلة" if TREND_PARALLEL_ENABLED else "❌ متوقفة"
+                        pos = _trend_parallel_strategy.position if _trend_parallel_strategy else None
+                        if pos:
+                            pos_line = (
+                                f"📍 صفقة مفتوحة: {pos['symbol'].replace('USDT','')} | دخول {pos['entry_price']:.6f} | "
+                                f"ستوب حالي {pos['stop_loss']:.6f} | Trailing: {'مفعّل' if pos['trailing_active'] else 'غير مفعّل'}"
+                            )
+                        else:
+                            pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
+                        send_admin(
+                            f"📈 <b>Trend+Stoch الموازية</b>\n"
+                            f"الحالة: {tp_status}\n"
+                            f"المبلغ لكل صفقة: {TREND_PARALLEL_USDT_PER_TRADE} USDT\n"
+                            f"{pos_line}"
+                        )
 
                     # ── /range_trading_status ──────────────────────
                     elif text == "/range_trading_status":
@@ -1455,6 +1524,10 @@ def telegram_command_listener(client):
                             "/set_range_trading on — تشغيل (صفقات حقيقية 15 USDT، BTC فقط، فريم 30 دقيقة)\n"
                             "/set_range_trading off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/range_trading_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
+                            "<b>📈 Trend+Stoch الموازية (استراتيجية موازية مستقلة):</b>\n"
+                            "/set_trend_parallel on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم ساعة)\n"
+                            "/set_trend_parallel off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
+                            "/trend_parallel_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
                             "<b>المؤشرات:</b>\n"
                             "/enable_ma20 — تشغيل فيلتر MA20 (مستقل عن الاستراتيجية)\n"
                             "/disable_ma20 — تعطيل فيلتر MA20\n\n"
@@ -2261,6 +2334,10 @@ def api_get_settings():
             "range_trading_enabled": RANGE_TRADING_ENABLED,
             "range_trading_usdt_per_trade": RANGE_TRADING_USDT_PER_TRADE,
             "range_trading_position": _range_trading_strategy.position if _range_trading_strategy else None,
+            # ✅ Trend+Stoch الموازية — استراتيجية موازية مستقلة (صفقات حقيقية، سلة العملات، فريم ساعة)
+            "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
+            "trend_parallel_usdt_per_trade": TREND_PARALLEL_USDT_PER_TRADE,
+            "trend_parallel_position": _trend_parallel_strategy.position if _trend_parallel_strategy else None,
         })
 
 
@@ -2275,6 +2352,7 @@ def api_set_settings():
     global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global RANGE_TRADING_ENABLED
+    global TREND_PARALLEL_ENABLED
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -2403,6 +2481,10 @@ def api_set_settings():
         # ✅ Range Trading BTC — تشغيل/إيقاف من التطبيق (صفقة حقيقية بمبلغ ثابت مسبقاً)
         if "range_trading_enabled" in data:
             RANGE_TRADING_ENABLED = bool(data["range_trading_enabled"])
+
+        # ✅ Trend+Stoch الموازية — تشغيل/إيقاف من التطبيق
+        if "trend_parallel_enabled" in data:
+            TREND_PARALLEL_ENABLED = bool(data["trend_parallel_enabled"])
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
@@ -2635,6 +2717,24 @@ def run_bot():
         daemon=True,
     )
     range_trading_thread.start()
+
+    # ── 📈 Trend+Stoch الموازية — Thread مستقل تماماً كمان ──
+    global _trend_parallel_strategy
+    _trend_parallel_strategy = TrendStochParallel(
+        client,
+        notify_fn=send_telegram,
+        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing/Breakeven حية من إعدادات البوت الأساسي
+        usdt_per_trade=TREND_PARALLEL_USDT_PER_TRADE,
+        live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ TREND_PARALLEL_ENABLED (مطفي افتراضياً)
+        state_file=os.path.join(DATA_DIR, "trend_stoch_state.json"),
+        history_file=os.path.join(DATA_DIR, "trend_stoch_history.json"),
+    )
+    trend_parallel_thread = threading.Thread(
+        target=_trend_parallel_strategy.run,
+        kwargs={"poll_seconds": 3600, "is_enabled_fn": lambda: TREND_PARALLEL_ENABLED},
+        daemon=True,
+    )
+    trend_parallel_thread.start()
 
     last_heartbeat = time.time()
     last_scan      = 0
