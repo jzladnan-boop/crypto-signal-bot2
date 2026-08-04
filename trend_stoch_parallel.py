@@ -2,7 +2,7 @@
 📈 Trend + StochRSI — استراتيجية موازية ومستقلة (نفس منطق الدخول والحماية الحقيقي)
 ======================================================================================
 استراتيجية منفصلة تماماً عن حلقة الفحص الرئيسية بـ crypto_signal_bot.py — بس بتستخدم
-بالضبط نفس منطق الدخول (Trend + StochRSI + فوليوم + فلتر Beta) ونفس نظام الحماية
+بالضبط نفس منطق الدخول (Trend + StochRSI + فوليوم) ونفس نظام الحماية
 (ATR Stop Loss + Breakeven + Trailing) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون
 سلوك الحماية مطابق ومجرب.
 
@@ -19,7 +19,8 @@ open_trades / current_strategy / coin_memory (تاريخ العملة يلي ب�
    - StochRSI: K وD كانوا بمنطقة تشبع بيعي (تحت 20)، وK عبر D صعوداً وطلع فوق 20
    - السعر فوق MA20
    - الفوليوم الحالي أعلى من متوسطه (فلتر تأكيد)
-   - Beta العملة مقابل BTC ≥ 1.2 (تتحرك أعنف من BTC — استغلال الزخم)
+   # ⬅️ بطلب المستخدم: شرط "Beta العملة مقابل BTC" أُلغي بالكامل — الاستراتيجية
+   # هلق تفحص كل عملة بمعزل تام عن BTC، بدون أي مقارنة بحركته
    لو أكتر من عملة حققت الشروط بنفس دورة الفحص، نختار الأعلى "درجة زخم" (Momentum Score)
    — نفس منطق ترتيب المرشحين بالبوت الأساسي.
 
@@ -44,7 +45,7 @@ import ta
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-from indicators import calculate_beta, calculate_bollinger_bands, calculate_vwap, calculate_momentum_score
+from indicators import calculate_bollinger_bands, calculate_vwap, calculate_momentum_score
 from coin_memory import ATRGuard
 from market_regime import MarketRegimeDetector
 
@@ -60,8 +61,7 @@ DEFAULT_CONFIG = {
     "stoch_entry_level": 20,
     "volume_ma_length": 20,
     "volume_multiplier": 1.0,
-    "beta_threshold": 1.2,
-    "beta_lookback": 30,
+    # ⬅️ بطلب المستخدم: فلتر Beta (مقارنة الزخم بـ BTC) أُلغي بالكامل من شروط الدخول
     "atr_period": 14,
 
     # ── الحماية (نفس نظام البوت بالضبط) ──
@@ -108,10 +108,11 @@ def _get_quantity(client, symbol, usdt_amount):
 
 
 def _buy_market(client, symbol, usdt_amount):
+    """يرجع (result_dict, error_message) — نفس نمط range_trading_btc.py."""
     try:
         qty, price = _get_quantity(client, symbol, usdt_amount)
         if qty <= 0:
-            return None
+            return None, f"الكمية المحسوبة صفر أو أقل (السعر: {price}, المبلغ: {usdt_amount})"
         order = client.order_market_buy(symbol=symbol, quantity=qty)
         fills = order.get("fills", [])
         if fills:
@@ -129,12 +130,15 @@ def _buy_market(client, symbol, usdt_amount):
         else:
             actual_price = price
             net_qty = qty
-        return {"qty": net_qty, "entry_price": actual_price, "order_id": order["orderId"]}
-    except Exception:
-        return None
+        return {"qty": net_qty, "entry_price": actual_price, "order_id": order["orderId"]}, None
+    except BinanceAPIException as e:
+        return None, f"Binance API error {e.code}: {e.message}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _sell_market(client, symbol, qty):
+    """يرجع (price, executed_qty, error_message) — نفس نمط range_trading_btc.py."""
     try:
         asset = symbol.replace("USDT", "")
         balance = client.get_asset_balance(asset=asset)
@@ -145,7 +149,7 @@ def _sell_market(client, symbol, qty):
             precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
             sell_qty = round(sell_qty - (sell_qty % step_size), precision)
         if sell_qty <= 0:
-            return None, None
+            return None, None, f"الكمية المتاحة للبيع صفر أو أقل (رصيد {asset}: {actual_qty}, مطلوب: {qty})"
         order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
         fills = order.get("fills", [])
         if fills:
@@ -154,9 +158,11 @@ def _sell_market(client, symbol, qty):
         else:
             executed_qty = sell_qty
             price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        return price, executed_qty
-    except Exception:
-        return None, None
+        return price, executed_qty, None
+    except BinanceAPIException as e:
+        return None, None, f"Binance API error {e.code}: {e.message}"
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {e}"
 
 
 def _calculate_atr(highs, lows, closes, period):
@@ -263,17 +269,10 @@ class TrendStochParallel:
         except Exception:
             return self._symbols_cache or []
 
-    def _get_btc_closes(self):
-        try:
-            klines = self.client.get_klines(symbol="BTCUSDT", interval=self.cfg["interval"], limit=self.cfg["beta_lookback"] + 5)
-            return pd.Series([float(k[4]) for k in klines])
-        except Exception:
-            return None
-
     # ──────────────────────────────────────────────
-    # 🟢 فحص إشارة الدخول لعملة وحدة (نفس check_trend_stoch بالضبط)
+    # 🟢 فحص إشارة الدخول لعملة وحدة (نفس check_trend_stoch، بدون فلتر Beta)
     # ──────────────────────────────────────────────
-    def check_symbol_entry(self, symbol, btc_closes):
+    def check_symbol_entry(self, symbol):
         try:
             klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=100)
             if not klines or len(klines) < 30:
@@ -309,18 +308,11 @@ class TrendStochParallel:
             if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * self.cfg["volume_multiplier"]):
                 return None
 
-            if btc_closes is None or len(btc_closes) < self.cfg["beta_lookback"]:
-                return None
-            coin_closes_for_beta = closes.iloc[-len(btc_closes):]
-            beta_value = calculate_beta(coin_closes_for_beta, btc_closes)
-            if beta_value is None or beta_value < self.cfg["beta_threshold"]:
-                return None
-
             atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
 
             return {
                 "symbol": symbol, "price": price, "ma20": ma20,
-                "k_curr": k_curr, "d_curr": d_curr, "beta": beta_value, "atr": atr_value,
+                "k_curr": k_curr, "d_curr": d_curr, "atr": atr_value,
                 "momentum_score": calculate_momentum_score(closes, volumes),
             }
         except BinanceAPIException:
@@ -333,13 +325,12 @@ class TrendStochParallel:
         symbols = self._get_symbols()
         if not symbols:
             return None
-        btc_closes = self._get_btc_closes()
 
         best_signal = None
         for symbol in symbols:
-            if symbol == "BTCUSDT":
+            if symbol == "BTCUSDT":   # مستبعدة أصلاً — مغطاة بستراتيجية Range Trading BTC المنفصلة
                 continue
-            signal = self.check_symbol_entry(symbol, btc_closes)
+            signal = self.check_symbol_entry(symbol)
             if signal and (best_signal is None or signal["momentum_score"] > best_signal["momentum_score"]):
                 best_signal = signal
             time.sleep(self.cfg["scan_pause_seconds"])
@@ -353,9 +344,9 @@ class TrendStochParallel:
         amount = self.cfg["usdt_per_trade"]
 
         if self.cfg["live_trading"]:
-            result = _buy_market(self.client, symbol, amount)
+            result, error = _buy_market(self.client, symbol, amount)
             if result is None:
-                self._notify(f"❌ Trend+Stoch: فشل تنفيذ أمر الشراء لـ {symbol}")
+                self._notify(f"❌ <b>Trend+Stoch — فشل تنفيذ أمر الشراء لـ {symbol}</b>\n⚠️ السبب: {error}")
                 return
             entry_price, qty = result["entry_price"], result["qty"]
         else:
@@ -396,7 +387,7 @@ class TrendStochParallel:
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
             f"🟢 <b>Trend+Stoch{mode_tag} — دخول {symbol.replace('USDT','')}</b>\n"
-            f"💰 السعر: {entry_price:.6f} | Beta: {signal['beta']:.2f} | حالة السوق: {market_regime}\n"
+            f"💰 السعر: {entry_price:.6f} | حالة السوق: {market_regime}\n"
             f"🛡️ وقف الخسارة الأولي: {stop_loss:.6f}\n"
             f"💵 المبلغ: {amount} USDT"
         )
@@ -460,9 +451,9 @@ class TrendStochParallel:
         qty = self.position["qty"]
 
         if self.cfg["live_trading"]:
-            exit_price, executed_qty = _sell_market(self.client, symbol, qty)
+            exit_price, executed_qty, error = _sell_market(self.client, symbol, qty)
             if exit_price is None:
-                self._notify(f"❌ Trend+Stoch: فشل تنفيذ أمر البيع لـ {symbol} (السبب: {reason})")
+                self._notify(f"❌ <b>Trend+Stoch — فشل تنفيذ أمر البيع لـ {symbol}</b>\nالسبب المحاول: {reason}\n⚠️ الخطأ: {error}")
                 return
             final_qty = executed_qty
         else:
@@ -547,6 +538,6 @@ if __name__ == "__main__":
     print("🔍 فحص فوري لأفضل إشارة دخول حالياً (قد يأخذ دقيقة لكل العملات)...")
     signal = strategy.scan_for_entry()
     if signal:
-        print(f"✅ إشارة: {signal['symbol']} @ {signal['price']} | Beta: {signal['beta']:.2f} | Score: {signal['momentum_score']}")
+        print(f"✅ إشارة: {signal['symbol']} @ {signal['price']} | Score: {signal['momentum_score']}")
     else:
         print("⚠️ مافي إشارة دخول حالياً")
