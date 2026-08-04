@@ -16,6 +16,7 @@ Crypto Trading Bot - RSI Auto Trader
 
 import os
 import time
+import datetime
 import json
 import logging
 import requests
@@ -555,6 +556,35 @@ def load_all_profit_log():
         log.error(f"❌ خطأ تحميل كل الأرباح: {e}")
     return all_records
 
+def utc_now_iso():
+    """
+    ⬅️ إصلاح مشكلة توقيت GMT بالتطبيق: بدل time.strftime("%Y-%m-%d %H:%M:%S")
+    يلي بيطبع وقت السيرفر (UTC على Railway) كنص عادي بدون أي إشارة على إنه UTC —
+    فالتطبيق كان يعرضه زي ما هو (GMT) بدل ما يحوّله لتوقيت الجهاز المحلي.
+    هلق نستخدم صيغة ISO 8601 صريحة بعلامة UTC (Z بالآخر)، حتى Date() بالـ
+    JavaScript/React Native تقدر تفهم إنه UTC وتحوّله للتوقيت المحلي تلقائياً.
+    """
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_record_time_epoch(time_str):
+    """
+    يحوّل نص وقت مسجّل (سواء الصيغة الجديدة ISO+Z أو الصيغة القديمة "YYYY-MM-DD HH:MM:SS"
+    من سجلات قبل هذا التعديل) لـ epoch timestamp. يرجع 0 لو تعذر التحويل بأي صيغة.
+    """
+    try:
+        return datetime.datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:
+        pass
+    try:
+        # صيغة قديمة (بدون معلومة منطقة زمنية) — كانت وقت سيرفر UTC، نتعامل معها كذلك
+        return datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:
+        return 0
+
+
 def save_profit_log(log_data, month=None):
     path = get_profit_file(month)
     try:
@@ -583,7 +613,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
         "sell_amount": sell_amount,
         "pct"        : pct,
         "reason"     : reason,
-        "time"       : time.strftime("%Y-%m-%d %H:%M:%S")
+        "time"       : utc_now_iso()
     })
     save_profit_log(profit_log, month)
 
@@ -640,7 +670,7 @@ def save_notification_log(title, body):
             "id"  : str(int(time.time() * 1000)),
             "title": title,
             "body" : body,
-            "time" : time.strftime("%Y-%m-%d %H:%M:%S"),
+            "time" : utc_now_iso(),
         }
         notifications = [new_item] + notifications
         notifications = notifications[:MAX_NOTIFICATIONS]
@@ -2286,7 +2316,7 @@ def api_history():
     elif period == "week":
         cutoff  = time.time() - 7 * 86400
         records = [r for r in load_all_profit_log()
-                   if time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S")) >= cutoff]
+                   if parse_record_time_epoch(r["time"]) >= cutoff]
     else:
         records = load_all_profit_log()   # ✅ كل الشهور
     records = sorted(records, key=lambda r: r["time"], reverse=True)
