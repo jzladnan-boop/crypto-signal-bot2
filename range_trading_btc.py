@@ -70,11 +70,16 @@ def _get_quantity(client, symbol, usdt_amount):
 
 
 def _buy_market(client, symbol, usdt_amount):
-    """يشتري بمبلغ USDT ثابت، ويرجع dict فيه qty/entry_price الفعليين من رد المنصة، أو None عند الفشل."""
+    """
+    يشتري بمبلغ USDT ثابت.
+    يرجع (result_dict, error_message):
+      - نجاح: ({"qty":.., "entry_price":.., "order_id":..}, None)
+      - فشل : (None, "نص الخطأ الفعلي من Binance أو من الكود")
+    """
     try:
         qty, price = _get_quantity(client, symbol, usdt_amount)
         if qty <= 0:
-            return None
+            return None, f"الكمية المحسوبة صفر أو أقل (السعر: {price}, المبلغ: {usdt_amount})"
         order = client.order_market_buy(symbol=symbol, quantity=qty)
         fills = order.get("fills", [])
         if fills:
@@ -92,13 +97,20 @@ def _buy_market(client, symbol, usdt_amount):
         else:
             actual_price = price
             net_qty = qty
-        return {"qty": net_qty, "entry_price": actual_price, "order_id": order["orderId"]}
-    except Exception:
-        return None
+        return {"qty": net_qty, "entry_price": actual_price, "order_id": order["orderId"]}, None
+    except BinanceAPIException as e:
+        return None, f"Binance API error {e.code}: {e.message}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _sell_market(client, symbol, qty):
-    """يبيع كمية محددة (بحد أقصى الرصيد الفعلي المتاح)، ويرجع (price, executed_qty) أو (None, None)."""
+    """
+    يبيع كمية محددة (بحد أقصى الرصيد الفعلي المتاح).
+    يرجع (price, executed_qty, error_message):
+      - نجاح: (السعر, الكمية المنفذة, None)
+      - فشل : (None, None, "نص الخطأ الفعلي")
+    """
     try:
         asset = symbol.replace("USDT", "")
         balance = client.get_asset_balance(asset=asset)
@@ -109,7 +121,7 @@ def _sell_market(client, symbol, qty):
             precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
             sell_qty = round(sell_qty - (sell_qty % step_size), precision)
         if sell_qty <= 0:
-            return None, None
+            return None, None, f"الكمية المتاحة للبيع صفر أو أقل (رصيد {asset}: {actual_qty}, مطلوب: {qty})"
         order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
         fills = order.get("fills", [])
         if fills:
@@ -118,9 +130,11 @@ def _sell_market(client, symbol, qty):
         else:
             executed_qty = sell_qty
             price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        return price, executed_qty
-    except Exception:
-        return None, None
+        return price, executed_qty, None
+    except BinanceAPIException as e:
+        return None, None, f"Binance API error {e.code}: {e.message}"
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {e}"
 
 
 class RangeTradingBTC:
@@ -374,9 +388,13 @@ class RangeTradingBTC:
         amount = self.cfg["usdt_per_trade"]
 
         if self.cfg["live_trading"]:
-            result = _buy_market(self.client, symbol, amount)
+            result, error = _buy_market(self.client, symbol, amount)
             if result is None:
-                self._notify(f"❌ Range Trading BTC: فشل تنفيذ أمر الشراء (السعر {signal['price']:.2f})")
+                self._notify(
+                    f"❌ <b>Range Trading BTC — فشل تنفيذ أمر الشراء</b>\n"
+                    f"السعر وقت الإشارة: {signal['price']:.2f}\n"
+                    f"⚠️ السبب: {error}"
+                )
                 return
             entry_price = result["entry_price"]
             qty = result["qty"]
@@ -408,9 +426,13 @@ class RangeTradingBTC:
         qty = self.position["qty"]
 
         if self.cfg["live_trading"]:
-            exit_price, executed_qty = _sell_market(self.client, symbol, qty)
+            exit_price, executed_qty, error = _sell_market(self.client, symbol, qty)
             if exit_price is None:
-                self._notify(f"❌ Range Trading BTC: فشل تنفيذ أمر البيع (السبب: {signal['reason']})")
+                self._notify(
+                    f"❌ <b>Range Trading BTC — فشل تنفيذ أمر البيع</b>\n"
+                    f"السبب المحاول: {signal['reason']}\n"
+                    f"⚠️ الخطأ: {error}"
+                )
                 return   # ما نصفّر الصفقة — نحاول تاني بالدورة الجاية
             final_qty = executed_qty
         else:
