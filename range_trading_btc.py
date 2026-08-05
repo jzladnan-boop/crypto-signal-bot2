@@ -68,25 +68,42 @@ DEFAULT_CONFIG = {
 # 🔧 تنفيذ شراء/بيع مستقل (نفس نمط trend_stoch_parallel.py)
 # ──────────────────────────────────────────────
 def _get_step_size(client, symbol):
+    """
+    يرجع stepSize كـ string بدقة كاملة (مثل '0.00001000') بدلاً من float
+    لتفادي الـ scientific notation اللي بتخرب حساب الـ precision.
+    """
     try:
         info = client.get_symbol_info(symbol)
         if not info:
             return None
         for f in info["filters"]:
             if f["filterType"] == "LOT_SIZE":
-                return float(f["stepSize"])
+                return f["stepSize"]  # ← string خام من Binance
     except Exception:
         pass
     return None
 
 
 def _get_quantity(client, symbol, usdt_amount):
-    step_size = _get_step_size(client, symbol)
+    step_size_raw = _get_step_size(client, symbol)
     price = float(client.get_symbol_ticker(symbol=symbol)["price"])
     qty = usdt_amount / price
-    if step_size:
-        precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
-        qty = round(qty - (qty % step_size), precision)
+    if step_size_raw:
+        # استخرج precision من string مباشرة (آمن من scientific notation)
+        s = str(step_size_raw).rstrip("0")
+        precision = len(s.split(".")[-1]) if "." in s else 0
+
+        # تقريب لأسفل لأقرب مضاعف من step_size باستخدام Decimal (دقّة عالية)
+        try:
+            from decimal import Decimal
+            step_d = Decimal(str(step_size_raw))
+            qty_d = Decimal(str(qty))
+            qty_d = (qty_d // step_d) * step_d
+            qty = float(qty_d)
+        except Exception:
+            # fallback للحسبة القديمة لو فشل Decimal لأي سبب
+            step_f = float(step_size_raw)
+            qty = round(qty - (qty % step_f), precision)
     return qty, price
 
 
