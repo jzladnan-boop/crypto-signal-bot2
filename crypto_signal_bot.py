@@ -1094,7 +1094,7 @@ def telegram_command_listener(client):
                                 f"{status_txt} استراتيجية Range Trading BTC\n"
                                 f"↳ صفقات حقيقية على BTCUSDT بمبلغ {RANGE_TRADING_USDT_PER_TRADE} USDT/صفقة، صفقة وحدة بس بأي لحظة"
                                 if RANGE_TRADING_ENABLED else
-                                "❌ تم إيقاف Range Trading BTC — أي صفقة مفتوحة حالياً بتضل مفتوحة لحد ما توقف عادي (مقاومة/وقف خسارة)، بس ما رح تنفتح صفقة جديدة"
+                                "❌ تم إيقاف Range Trading BTC — أي صفقة مفتوحة حالياً بتضل مفتوحة لحد ما توقف عادي (وقف خسارة/Trailing)، بس ما رح تنفتح صفقة جديدة"
                             )
                         else:
                             send_admin("❌ مثال: /set_range_trading on  أو  /set_range_trading off")
@@ -1143,8 +1143,8 @@ def telegram_command_listener(client):
                         if pos:
                             pos_line = (
                                 f"📍 صفقة مفتوحة: دخول {pos['entry_price']:.2f} | "
-                                f"دعم {pos['support']:.2f} | مقاومة {pos['resistance']:.2f} | "
-                                f"وقف خسارة {pos['stop_loss_price']:.2f}"
+                                f"وقف خسارة حالي {pos['stop_loss']:.2f} | "
+                                f"Trailing: {'مفعّل' if pos.get('trailing_active') else 'غير مفعّل'}"
                             )
                         else:
                             pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
@@ -2286,10 +2286,22 @@ def api_status():
 def api_trades():
     result       = []
     trades_copy  = dict(open_trades)
+
+    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Range Trading BTC / Trend+Stoch)
+    # لنفس القائمة، حتى تظهر بشاشة "الصفقات" العادية متل أي صفقة تانية.
+    range_pos = _range_trading_strategy.position if _range_trading_strategy else None
+    trend_pos = _trend_parallel_strategy.position if _trend_parallel_strategy else None
+
+    extra_symbols = set()
+    if range_pos:
+        extra_symbols.add(range_pos.get("symbol", "BTCUSDT"))
+    if trend_pos:
+        extra_symbols.add(trend_pos["symbol"])
+
     # ✅ إصلاح: جلب كل الأسعار بطلب واحد بدل طلب لكل عملة بحلقة
     # ✅ كاش قصير المدة: أي عدد أجهزة فاتحة بنفس اللحظة بتشارك نفس النداء لبينانس
     def _fetch_prices():
-        return get_all_prices(_binance_client, set(trades_copy.keys())) if _binance_client else {}
+        return get_all_prices(_binance_client, set(trades_copy.keys()) | extra_symbols) if _binance_client else {}
     all_prices   = get_cached_or_fetch("all_open_trade_prices", _fetch_prices)
     for symbol, t in trades_copy.items():
         current_price = all_prices.get(symbol, t["entry_price"])
@@ -2301,7 +2313,37 @@ def api_trades():
             "trailing_active": t.get("trailing_active", False),
             "stop_loss": t.get("stop_loss"),
             "pnl_pct": pnl_pct,
+            "strategy": t.get("strategy", current_strategy),
         })
+
+    if range_pos:
+        symbol = range_pos.get("symbol", "BTCUSDT")
+        current_price = all_prices.get(symbol, range_pos["entry_price"])
+        pnl_pct = round((current_price - range_pos["entry_price"]) / range_pos["entry_price"] * 100, 2)
+        result.append({
+            "symbol": symbol,
+            "entry_price": range_pos["entry_price"],
+            "current_price": current_price,
+            "trailing_active": range_pos.get("trailing_active", False),
+            "stop_loss": range_pos.get("stop_loss"),
+            "pnl_pct": pnl_pct,
+            "strategy": "range_trading_btc",
+        })
+
+    if trend_pos:
+        symbol = trend_pos["symbol"]
+        current_price = all_prices.get(symbol, trend_pos["entry_price"])
+        pnl_pct = round((current_price - trend_pos["entry_price"]) / trend_pos["entry_price"] * 100, 2)
+        result.append({
+            "symbol": symbol,
+            "entry_price": trend_pos["entry_price"],
+            "current_price": current_price,
+            "trailing_active": trend_pos.get("trailing_active", False),
+            "stop_loss": trend_pos.get("stop_loss"),
+            "pnl_pct": pnl_pct,
+            "strategy": "trend_stoch_parallel",
+        })
+
     return jsonify(result)
 
 
@@ -2604,7 +2646,32 @@ def api_close_trade():
         return jsonify({"error": "symbol مفقود"}), 400
     if not _binance_client:
         return jsonify({"error": "البوت غير متصل ببينانس"}), 503
-    sell_price, status = close_trade(_binance_client, f"{symbol}USDT")
+
+    full_symbol = symbol if symbol.endswith("USDT") else f"{symbol}USDT"
+
+    # ✅ لو الصفقة تعود لاستراتيجية موازية مستقلة (مش من open_trades العادية)،
+    # نغلقها من نفس الاستراتيجية يلي فاتحتها — مش عبر close_trade() العادية،
+    # لأنها مش مسجّلة أصلاً بـ open_trades.
+    if full_symbol not in open_trades:
+        if _range_trading_strategy and _range_trading_strategy.position and \
+                _range_trading_strategy.position.get("symbol", "BTCUSDT") == full_symbol:
+            sell_price, status = _range_trading_strategy.close_manually()
+        elif _trend_parallel_strategy and _trend_parallel_strategy.position and \
+                _trend_parallel_strategy.position["symbol"] == full_symbol:
+            sell_price, status = _trend_parallel_strategy.close_manually()
+        else:
+            return jsonify({"error": "لا توجد صفقة مفتوحة لهذه العملة"}), 404
+
+        if status == "ok":
+            return jsonify({"ok": True, "sell_price": sell_price})
+        elif status == "sell_failed":
+            return jsonify({"error": "فشل إغلاق الصفقة (راجع تنبيهات تيليغرام لتفاصيل الخطأ)"}), 500
+        elif status == "price_fetch_failed":
+            return jsonify({"error": "تعذر جلب السعر الحالي، حاول مرة تانية"}), 500
+        else:
+            return jsonify({"error": "لا توجد صفقة مفتوحة لهذه العملة"}), 404
+
+    sell_price, status = close_trade(_binance_client, full_symbol)
     if status == "not_found":
         return jsonify({"error": "لا توجد صفقة مفتوحة لهذه العملة"}), 404
     elif status == "sell_failed":
@@ -2736,6 +2803,7 @@ def run_bot():
     _range_trading_strategy = RangeTradingBTC(
         client,
         notify_fn=send_telegram,
+        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing/Breakeven حية من إعدادات البوت الأساسي
         usdt_per_trade=RANGE_TRADING_USDT_PER_TRADE,
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ RANGE_TRADING_ENABLED (مطفي افتراضياً)
         state_file=os.path.join(DATA_DIR, "range_trading_state.json"),
