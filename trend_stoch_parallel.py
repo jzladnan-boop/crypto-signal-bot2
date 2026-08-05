@@ -445,6 +445,24 @@ class TrendStochParallel:
             if price <= self.position["stop_loss"]:
                 self._execute_sell(price, "stop_loss")
 
+    def close_manually(self):
+        """
+        إغلاق يدوي (من التطبيق/API) — يبيع فوراً بالسعر الحالي بغض النظر عن
+        الستوب أو الترايلنك. يرجع (sell_price, status).
+        """
+        if self.position is None:
+            return None, "not_found"
+        symbol = self.position["symbol"]
+        try:
+            current_price = float(self.client.get_symbol_ticker(symbol=symbol)["price"])
+        except Exception:
+            return None, "price_fetch_failed"
+
+        self._execute_sell(current_price, "manual_close")
+        if self.position is not None:
+            return None, "sell_failed"
+        return current_price, "ok"
+
     def _execute_sell(self, current_price, reason):
         symbol = self.position["symbol"]
         entry_price = self.position["entry_price"]
@@ -472,7 +490,8 @@ class TrendStochParallel:
         })
 
         icon = "✅" if pnl > 0 else "❌"
-        reason_ar = "Trailing Stop" if reason == "trailing_stop" else "وقف خسارة"
+        reason_map = {"trailing_stop": "Trailing Stop", "stop_loss": "وقف خسارة", "manual_close": "إغلاق يدوي"}
+        reason_ar = reason_map.get(reason, reason)
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
             f"{icon} <b>Trend+Stoch{mode_tag} — خروج {symbol.replace('USDT','')} ({reason_ar})</b>\n"
