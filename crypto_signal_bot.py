@@ -1092,7 +1092,7 @@ def telegram_command_listener(client):
                             status_txt = "✅ مفعّلة" if RANGE_TRADING_ENABLED else "❌ متوقفة"
                             send_admin(
                                 f"{status_txt} استراتيجية Range Trading BTC\n"
-                                f"↳ صفقات حقيقية على BTCUSDT بمبلغ {RANGE_TRADING_USDT_PER_TRADE} USDT/صفقة، صفقة وحدة بس بأي لحظة"
+                                f"↳ صفقات حقيقية على سلة عملات (BTC/ETH/SOL/XRP/CFX/HEI) بمبلغ {RANGE_TRADING_USDT_PER_TRADE} USDT/صفقة، صفقة وحدة بس عبر كل السلة بأي لحظة"
                                 if RANGE_TRADING_ENABLED else
                                 "❌ تم إيقاف Range Trading BTC — أي صفقة مفتوحة حالياً بتضل مفتوحة لحد ما توقف عادي (وقف خسارة/Trailing)، بس ما رح تنفتح صفقة جديدة"
                             )
@@ -1142,14 +1142,15 @@ def telegram_command_listener(client):
                         pos = _range_trading_strategy.position if _range_trading_strategy else None
                         if pos:
                             pos_line = (
-                                f"📍 صفقة مفتوحة: دخول {pos['entry_price']:.2f} | "
-                                f"وقف خسارة حالي {pos['stop_loss']:.2f} | "
+                                f"📍 صفقة مفتوحة: {pos.get('symbol', 'BTCUSDT').replace('USDT','')} | "
+                                f"دخول {pos['entry_price']:.6f} | "
+                                f"وقف خسارة حالي {pos['stop_loss']:.6f} | "
                                 f"Trailing: {'مفعّل' if pos.get('trailing_active') else 'غير مفعّل'}"
                             )
                         else:
                             pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
                         send_admin(
-                            f"📊 <b>Range Trading BTC</b>\n"
+                            f"📊 <b>Range Trading (سلة عملات)</b>\n"
                             f"الحالة: {rt_status}\n"
                             f"المبلغ لكل صفقة: {RANGE_TRADING_USDT_PER_TRADE} USDT\n"
                             f"{pos_line}"
@@ -1551,7 +1552,7 @@ def telegram_command_listener(client):
                             "/set_bb_filter on — الشراء يشترط قرب السعر من حد بولينجر السفلي\n"
                             "/filters_status — عرض حالة الفلاتر وشرح ترتيب الزخم\n\n"
                             "<b>📊 Range Trading BTC (استراتيجية موازية مستقلة):</b>\n"
-                            "/set_range_trading on — تشغيل (صفقات حقيقية 15 USDT، BTC فقط، فريم 30 دقيقة)\n"
+                            "/set_range_trading on — تشغيل (صفقات حقيقية 15 USDT، سلة BTC/ETH/SOL/XRP/CFX/HEI، فريم 30 دقيقة)\n"
                             "/set_range_trading off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/range_trading_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
                             "<b>📈 Trend+Stoch الموازية (استراتيجية موازية مستقلة):</b>\n"
@@ -2007,7 +2008,7 @@ def get_quantity(client, symbol, usdt_amount):
     price     = float(client.get_symbol_ticker(symbol=symbol)["price"])
     qty = usdt_amount / price
     if step_size:
-        precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+        precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
         qty = round(qty - (qty % step_size), precision)
     return qty, price
 
@@ -2137,7 +2138,7 @@ def sell_market(client, symbol, qty):
         sell_qty = min(qty, actual_qty)
 
         if step_size:
-            precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+            precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
             sell_qty  = round(sell_qty - (sell_qty % step_size), precision)
 
         if sell_qty <= 0:
