@@ -2349,6 +2349,45 @@ def api_trades():
 
 
 # ── سجل الصفقات المغلقة ──────────────────────────
+def load_parallel_strategies_history():
+    """
+    يقرأ سجلات الصفقات المغلقة من الاستراتيجيتين الموازيتين المستقلتين
+    (Range Trading و Trend+Stoch الموازية) — كل وحدة إلها ملف history خاص فيها،
+    منفصل تماماً عن profit_log تبع البوت الأساسي — ويحوّلهم لنفس شكل السجل
+    العادي (symbol/entry_price/exit_price/profit/pct/reason/time) حتى يظهروا
+    بشاشة "الصفقات > السجل" بالتطبيق متل أي صفقة عادية.
+    """
+    records = []
+    sources = [
+        (os.path.join(DATA_DIR, "range_trading_history.json"), "range_trading_btc"),
+        (os.path.join(DATA_DIR, "trend_stoch_history.json"), "trend_stoch_parallel"),
+    ]
+    for path, strategy_name in sources:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except Exception:
+            continue
+        for e in entries:
+            try:
+                records.append({
+                    "symbol": e.get("symbol", "BTCUSDT"),
+                    "entry_price": e["entry_price"],
+                    "exit_price": e["exit_price"],
+                    "qty": e.get("qty"),
+                    "profit": e.get("pnl", 0),
+                    "pct": e.get("pnl_pct", 0),
+                    "reason": e.get("reason", ""),
+                    "time": e.get("exit_time") or e.get("entry_time") or "",
+                    "strategy": strategy_name,
+                })
+            except Exception:
+                continue   # سجل تالف/ناقص — نتجاهله بدل ما نكسر كل القائمة
+    return records
+
+
 @app.route("/api/history")
 @login_required
 def api_history():
@@ -2356,12 +2395,15 @@ def api_history():
     now    = time.strftime("%Y-%m-%d")
     if period == "today":
         records = [r for r in load_profit_log() if r["time"].startswith(now)]
+        records += [r for r in load_parallel_strategies_history() if r["time"].startswith(now)]
     elif period == "week":
         cutoff  = time.time() - 7 * 86400
         records = [r for r in load_all_profit_log()
                    if parse_record_time_epoch(r["time"]) >= cutoff]
+        records += [r for r in load_parallel_strategies_history()
+                    if parse_record_time_epoch(r["time"]) >= cutoff]
     else:
-        records = load_all_profit_log()   # ✅ كل الشهور
+        records = load_all_profit_log() + load_parallel_strategies_history()   # ✅ كل الشهور + الاستراتيجيتين الموازيتين
     records = sorted(records, key=lambda r: r["time"], reverse=True)
     return jsonify(records)
 
