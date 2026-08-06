@@ -27,6 +27,7 @@ market_regime.py)، ما بنلمس open_trades ولا أي حالة مشترك�
 """
 
 import time
+import datetime
 import json
 import os
 import pandas as pd
@@ -147,6 +148,11 @@ def _sell_market(client, symbol, qty):
         return None, None, f"Binance API error {e.code}: {e.message}"
     except Exception as e:
         return None, None, f"{type(e).__name__}: {e}"
+
+
+def _utc_now_iso():
+    """نفس آلية utc_now_iso() بـ crypto_signal_bot.py — إصلاح مشكلة عرض GMT بالتطبيق."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _calculate_atr(highs, lows, closes, period):
@@ -368,7 +374,7 @@ class RangeTradingBTC:
             "trailing_active": False,
             "highest_price": entry_price,
             "breakeven_floor": None,
-            "entry_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "entry_time": _utc_now_iso(),
             "market_regime_at_entry": market_regime,
             "range_low_at_entry": signal["range_low"],
             "range_high_at_entry": signal["range_high"],
@@ -456,10 +462,10 @@ class RangeTradingBTC:
         pnl_pct = round((exit_price - entry_price) / entry_price * 100, 3)
 
         self._log_history({
-            "entry_price": entry_price, "exit_price": exit_price,
+            "symbol": symbol, "entry_price": entry_price, "exit_price": exit_price,
             "qty": final_qty, "pnl": pnl, "pnl_pct": pnl_pct, "reason": reason,
             "entry_time": self.position.get("entry_time"),
-            "exit_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "exit_time": _utc_now_iso(),
             "live": self.cfg["live_trading"],
         })
 
