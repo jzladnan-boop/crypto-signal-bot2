@@ -102,7 +102,7 @@ def _get_quantity(client, symbol, usdt_amount):
     price = float(client.get_symbol_ticker(symbol=symbol)["price"])
     qty = usdt_amount / price
     if step_size:
-        precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+        precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
         qty = round(qty - (qty % step_size), precision)
     return qty, price
 
@@ -146,7 +146,7 @@ def _sell_market(client, symbol, qty):
         step_size = _get_step_size(client, symbol)
         sell_qty = min(qty, actual_qty)
         if step_size:
-            precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+            precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
             sell_qty = round(sell_qty - (sell_qty % step_size), precision)
         if sell_qty <= 0:
             return None, None, f"الكمية المتاحة للبيع صفر أو أقل (رصيد {asset}: {actual_qty}, مطلوب: {qty})"
