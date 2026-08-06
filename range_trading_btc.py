@@ -39,7 +39,8 @@ from market_regime import MarketRegimeDetector
 
 
 DEFAULT_CONFIG = {
-    "symbol": "BTCUSDT",
+    # ⬅️ بطلب المستخدم: كانت BTC حصراً، صارت سلة عملات — صفقة وحدة بس عبر الكل
+    "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "CFXUSDT", "HEIUSDT"],
     "interval": Client.KLINE_INTERVAL_30MINUTE,
 
     # ── النطاق السعري (Donchian بسيط) ──
@@ -68,42 +69,25 @@ DEFAULT_CONFIG = {
 # 🔧 تنفيذ شراء/بيع مستقل (نفس نمط trend_stoch_parallel.py)
 # ──────────────────────────────────────────────
 def _get_step_size(client, symbol):
-    """
-    يرجع stepSize كـ string بدقة كاملة (مثل '0.00001000') بدلاً من float
-    لتفادي الـ scientific notation اللي بتخرب حساب الـ precision.
-    """
     try:
         info = client.get_symbol_info(symbol)
         if not info:
             return None
         for f in info["filters"]:
             if f["filterType"] == "LOT_SIZE":
-                return f["stepSize"]  # ← string خام من Binance
+                return float(f["stepSize"])
     except Exception:
         pass
     return None
 
 
 def _get_quantity(client, symbol, usdt_amount):
-    step_size_raw = _get_step_size(client, symbol)
+    step_size = _get_step_size(client, symbol)
     price = float(client.get_symbol_ticker(symbol=symbol)["price"])
     qty = usdt_amount / price
-    if step_size_raw:
-        # استخرج precision من string مباشرة (آمن من scientific notation)
-        s = str(step_size_raw).rstrip("0")
-        precision = len(s.split(".")[-1]) if "." in s else 0
-
-        # تقريب لأسفل لأقرب مضاعف من step_size باستخدام Decimal (دقّة عالية)
-        try:
-            from decimal import Decimal
-            step_d = Decimal(str(step_size_raw))
-            qty_d = Decimal(str(qty))
-            qty_d = (qty_d // step_d) * step_d
-            qty = float(qty_d)
-        except Exception:
-            # fallback للحسبة القديمة لو فشل Decimal لأي سبب
-            step_f = float(step_size_raw)
-            qty = round(qty - (qty % step_f), precision)
+    if step_size:
+        precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
+        qty = round(qty - (qty % step_size), precision)
     return qty, price
 
 
@@ -146,7 +130,7 @@ def _sell_market(client, symbol, qty):
         step_size = _get_step_size(client, symbol)
         sell_qty = min(qty, actual_qty)
         if step_size:
-            precision = len(str(step_size).rstrip("0").split(".")[-1]) if "." in str(step_size) else 0
+            precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
             sell_qty = round(sell_qty - (sell_qty % step_size), precision)
         if sell_qty <= 0:
             return None, None, f"الكمية المتاحة للبيع صفر أو أقل (رصيد {asset}: {actual_qty}, مطلوب: {qty})"
@@ -251,10 +235,10 @@ class RangeTradingBTC:
     # ──────────────────────────────────────────────
     # جلب الشموع
     # ──────────────────────────────────────────────
-    def _get_klines(self):
+    def _get_klines(self, symbol):
         try:
             klines = self.client.get_klines(
-                symbol=self.cfg["symbol"],
+                symbol=symbol,
                 interval=self.cfg["interval"],
                 limit=self.cfg["lookback_candles"] + self.cfg["atr_period"] + 10,
             )
@@ -273,8 +257,8 @@ class RangeTradingBTC:
     # ──────────────────────────────────────────────
     # 🔍 النطاق السعري البسيط (أعلى/أدنى سعر بآخر N شمعة — Donchian)
     # ──────────────────────────────────────────────
-    def get_price_range(self):
-        df = self._get_klines()
+    def get_price_range(self, symbol):
+        df = self._get_klines(symbol)
         if df is None:
             return None
         # نستبعد آخر شمعة (لسا مفتوحة) من نافذة تحديد النطاق
@@ -288,11 +272,11 @@ class RangeTradingBTC:
     # ──────────────────────────────────────────────
     # 🟢 فحص إشارة الدخول (لمسة الحد الأدنى + قفل فوقه + شمعة صاعدة)
     # ──────────────────────────────────────────────
-    def check_entry_signal(self):
-        price_range = self.get_price_range()
+    def check_entry_signal(self, symbol):
+        price_range = self.get_price_range(symbol)
         if price_range is None:
             return None
-        df = self._get_klines()
+        df = self._get_klines(symbol)
         if df is None:
             return None
 
@@ -316,33 +300,42 @@ class RangeTradingBTC:
         lows = df["low"]
         closes = df["close"]
         atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
+        coin_name = symbol.replace("USDT", "")
 
         return {
-            "symbol": self.cfg["symbol"],
+            "symbol": symbol,
             "price": float(last_close),
-            "range_low": round(range_low, 2),
-            "range_high": round(price_range["range_high"], 2),
+            "range_low": round(range_low, 8),
+            "range_high": round(price_range["range_high"], 8),
             "atr": atr_value,
             "signal_info": (
-                f"📊 <b>Range Trading BTC — ارتداد من أدنى النطاق</b>\n"
-                f"💰 السعر: {last_close:.2f} | أدنى النطاق (6 ساعات): {range_low:.2f}\n"
-                f"🔝 أعلى النطاق: {price_range['range_high']:.2f}"
+                f"📊 <b>Range Trading — ارتداد من أدنى النطاق ({coin_name})</b>\n"
+                f"💰 السعر: {last_close:.6f} | أدنى النطاق (6 ساعات): {range_low:.6f}\n"
+                f"🔝 أعلى النطاق: {price_range['range_high']:.6f}"
             ),
         }
+
+    def scan_for_entry(self):
+        """يفحص كل عملات السلة بالترتيب، ويرجع أول إشارة تتحقق أو None."""
+        for symbol in self.cfg["symbols"]:
+            signal = self.check_entry_signal(symbol)
+            if signal is not None:
+                return signal
+        return None
 
     # ──────────────────────────────────────────────
     # ⚡ تنفيذ الشراء (نفس نظام حساب الستوب الأولي بالضبط — ATRGuard)
     # ──────────────────────────────────────────────
     def _execute_buy(self, signal):
-        symbol = self.cfg["symbol"]
+        symbol = signal["symbol"]
         amount = self.cfg["usdt_per_trade"]
 
         if self.cfg["live_trading"]:
             result, error = _buy_market(self.client, symbol, amount)
             if result is None:
                 self._notify(
-                    f"❌ <b>Range Trading BTC — فشل تنفيذ أمر الشراء</b>\n"
-                    f"السعر وقت الإشارة: {signal['price']:.2f}\n"
+                    f"❌ <b>Range Trading — فشل تنفيذ أمر الشراء ({symbol.replace('USDT','')})</b>\n"
+                    f"السعر وقت الإشارة: {signal['price']:.6f}\n"
                     f"⚠️ السبب: {error}"
                 )
                 return
@@ -384,9 +377,9 @@ class RangeTradingBTC:
 
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
-            f"🟢 <b>Range Trading BTC{mode_tag} — دخول</b>\n"
+            f"🟢 <b>Range Trading{mode_tag} — دخول</b>\n"
             f"{signal['signal_info']}\n"
-            f"🛡️ وقف الخسارة الأولي: {stop_loss:.2f} | حالة السوق: {market_regime}\n"
+            f"🛡️ وقف الخسارة الأولي: {stop_loss:.6f} | حالة السوق: {market_regime}\n"
             f"💵 المبلغ: {amount} USDT"
         )
 
@@ -427,7 +420,7 @@ class RangeTradingBTC:
                 self.position["highest_price"] = price
                 self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
                 self._save_state()
-                self._notify(f"🎯 Range Trading BTC: تفعيل Trailing | ستوب: {self.position['stop_loss']}")
+                self._notify(f"🎯 Range Trading ({symbol.replace('USDT','')}): تفعيل Trailing | ستوب: {self.position['stop_loss']}")
 
         if self.position["trailing_active"]:
             if price > self.position["highest_price"]:
@@ -449,7 +442,7 @@ class RangeTradingBTC:
             exit_price, executed_qty, error = _sell_market(self.client, symbol, qty)
             if exit_price is None:
                 self._notify(
-                    f"❌ <b>Range Trading BTC — فشل تنفيذ أمر البيع</b>\n"
+                    f"❌ <b>Range Trading — فشل تنفيذ أمر البيع ({symbol.replace('USDT','')})</b>\n"
                     f"السبب المحاول: {reason}\n"
                     f"⚠️ الخطأ: {error}"
                 )
@@ -475,8 +468,8 @@ class RangeTradingBTC:
         reason_ar = reason_map.get(reason, reason)
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
-            f"{icon} <b>Range Trading BTC{mode_tag} — خروج ({reason_ar})</b>\n"
-            f"💰 دخول: {entry_price:.2f} → خروج: {exit_price:.2f}\n"
+            f"{icon} <b>Range Trading{mode_tag} — خروج {symbol.replace('USDT','')} ({reason_ar})</b>\n"
+            f"💰 دخول: {entry_price:.6f} → خروج: {exit_price:.6f}\n"
             f"📊 PnL: {pnl:+.4f} USDT ({pnl_pct:+.3f}%)"
         )
 
@@ -506,7 +499,7 @@ class RangeTradingBTC:
             self.manage_open_position()
             return {"status": "holding" if self.position else "exited"}
 
-        signal = self.check_entry_signal()
+        signal = self.scan_for_entry()
         if signal is not None:
             self._execute_buy(signal)
             return {"status": "entered", "signal": signal}
@@ -514,7 +507,7 @@ class RangeTradingBTC:
 
     def run(self, poll_seconds=1800, max_iterations=None, is_enabled_fn=None):
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
-        print(f"📊 بدء Range Trading BTC — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة")
+        print(f"📊 بدء Range Trading (سلة: {', '.join(s.replace('USDT','') for s in self.cfg['symbols'])}) — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة")
 
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
@@ -537,8 +530,9 @@ if __name__ == "__main__":
     client = Client(api_key, api_secret)
 
     strategy = RangeTradingBTC(client, usdt_per_trade=15.0, live_trading=False)
-    price_range = strategy.get_price_range()
-    if price_range:
-        print(f"📊 النطاق الحالي: {price_range['range_low']:.2f} - {price_range['range_high']:.2f}")
-    else:
-        print("⚠️ ما قدرت أحسب النطاق حالياً")
+    for sym in strategy.cfg["symbols"]:
+        price_range = strategy.get_price_range(sym)
+        if price_range:
+            print(f"📊 {sym}: {price_range['range_low']:.6f} - {price_range['range_high']:.6f}")
+        else:
+            print(f"⚠️ {sym}: ما قدرت أحسب النطاق حالياً")
