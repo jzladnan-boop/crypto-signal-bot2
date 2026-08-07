@@ -37,6 +37,9 @@ from binance.exceptions import BinanceAPIException
 
 from coin_memory import ATRGuard
 from market_regime import MarketRegimeDetector
+from portfolio_manager import get_portfolio_manager
+
+_PORTFOLIO_OWNER = "range_trading"
 
 
 DEFAULT_CONFIG = {
@@ -129,7 +132,11 @@ def _sell_market(client, symbol, qty):
         balance = client.get_asset_balance(asset=asset)
         actual_qty = float(balance["free"])
         step_size = _get_step_size(client, symbol)
-        sell_qty = min(qty, actual_qty)
+        # ⬅️ بطلب المستخدم: كانت min(qty, actual_qty) — تبيع بس كمية الصفقة المسجّلة
+        # وتسيب أي غبار (Dust) متراكم من تقريب LOT_SIZE بصفقات سابقة لنفس العملة.
+        # هلق تبيع كامل الرصيد المتاح فعلياً، فينكسح أي غبار قديم مع كل عملية بيع.
+        # ⚠️ هذا التغيير بهالملف المستقل بس — bot.py الأساسي ما انلمس.
+        sell_qty = actual_qty
         if step_size:
             precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
             sell_qty = round(sell_qty - (sell_qty % step_size), precision)
@@ -213,6 +220,10 @@ class RangeTradingBTC:
                     self.position = json.load(f)
             except Exception:
                 self.position = None
+        if self.position is not None:
+            # ⬅️ لو فيه صفقة محملة من قبل (البوت أعاد التشغيل)، نحجز عملتها فوراً
+            # حتى ما تشتريها استراتيجية تانية عليها وهي أصلاً مملوكة لنا
+            get_portfolio_manager().try_claim(self.position["symbol"], _PORTFOLIO_OWNER)
 
     def _save_state(self):
         path = self.cfg["state_file"]
@@ -322,8 +333,11 @@ class RangeTradingBTC:
         }
 
     def scan_for_entry(self):
-        """يفحص كل عملات السلة بالترتيب، ويرجع أول إشارة تتحقق أو None."""
+        """يفحص كل عملات السلة بالترتيب، ويرجع أول إشارة تتحقق (وغير محجوزة لاستراتيجية تانية) أو None."""
+        portfolio = get_portfolio_manager()
         for symbol in self.cfg["symbols"]:
+            if portfolio.is_claimed_by_other(symbol, _PORTFOLIO_OWNER):
+                continue   # عملة محجوزة لاستراتيجية تانية حالياً — نتجاوزها
             signal = self.check_entry_signal(symbol)
             if signal is not None:
                 return signal
@@ -336,9 +350,16 @@ class RangeTradingBTC:
         symbol = signal["symbol"]
         amount = self.cfg["usdt_per_trade"]
 
+        # 🔐 حجز أخير قبل الشراء الفعلي — لو استراتيجية تانية حجزت نفس العملة
+        # بالثانية يلي بينها وبين انتهاء scan_for_entry، نتراجع فوراً بدل ما نشتري.
+        if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
+            self._notify(f"⚠️ Range Trading: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
+            return
+
         if self.cfg["live_trading"]:
             result, error = _buy_market(self.client, symbol, amount)
             if result is None:
+                get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
                 self._notify(
                     f"❌ <b>Range Trading — فشل تنفيذ أمر الشراء ({symbol.replace('USDT','')})</b>\n"
                     f"السعر وقت الإشارة: {signal['price']:.6f}\n"
@@ -480,6 +501,7 @@ class RangeTradingBTC:
         )
 
         self.position = None
+        get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # 🔐 نحرر الحجز — العملة صارت متاحة لأي استراتيجية تانية
         self._save_state()
 
     def close_manually(self):
@@ -511,7 +533,12 @@ class RangeTradingBTC:
             return {"status": "entered", "signal": signal}
         return {"status": "waiting_for_entry"}
 
-    def run(self, poll_seconds=1800, max_iterations=None, is_enabled_fn=None):
+    def run(self, poll_seconds=1800, position_check_seconds=60, max_iterations=None, is_enabled_fn=None):
+        """
+        ⬅️ نفس إصلاح trend_stoch_parallel.py: لو فيه صفقة مفتوحة، نفحصها كل
+        position_check_seconds (دقيقة) بدل poll_seconds (30 دقيقة) — حتى Trailing
+        ما يفوته تحرك سعري صار وارتد قبل الفحص التالي.
+        """
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
         print(f"📊 بدء Range Trading (سلة: {', '.join(s.replace('USDT','') for s in self.cfg['symbols'])}) — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة")
 
@@ -522,7 +549,7 @@ class RangeTradingBTC:
                     self.check_and_act()
                 except Exception as e:
                     print(f"❌ خطأ بدورة الفحص: {e}")
-                sleep_time = poll_seconds
+                sleep_time = position_check_seconds if self.position is not None else poll_seconds
             else:
                 sleep_time = 10
             iteration += 1
