@@ -32,6 +32,9 @@ from market_regime import MarketRegimeDetector
 from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config, get_24h_change_pct
 from range_trading_btc import RangeTradingBTC
 from trend_stoch_parallel import TrendStochParallel
+from portfolio_manager import get_portfolio_manager
+
+_PORTFOLIO_OWNER = "main_bot"
 
 
 def _get_live_risk_config():
@@ -376,6 +379,7 @@ def load_trades():
                     f"📂 صفقة محملة: {coin} | دخول: {trade['entry_price']:.4f}$ | "
                     f"ستوب: {trade['stop_loss']:.4f}$ | Trailing: {trade['trailing_active']}"
                 )
+                get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER)   # 🔐 نحجزها فوراً — تحميل من الذاكرة يعني إنها مملوكة لنا فعلياً
             log.info(f"✅ تم تحميل {len(open_trades)} صفقة من الذاكرة")
             save_trades()
         except Exception as e:
@@ -2031,6 +2035,7 @@ def close_trade(client, symbol):
         with _lock:
             if symbol in open_trades:
                 del open_trades[symbol]
+        get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # 🔐 نحرر الحجز
         save_trades()
         return sell_price, "ok"
 
@@ -2043,6 +2048,7 @@ def close_trade(client, symbol):
             with _lock:
                 if symbol in open_trades:
                     del open_trades[symbol]
+            get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # 🔐 نحرر الحجز
             save_trades()
             log.warning(f"⚠️ {symbol}: لا يوجد رصيد فعلي، تم حذف الصفقة من السجل")
             return None, "no_balance_removed"
@@ -2865,6 +2871,7 @@ def run_bot():
         client,
         notify_fn=send_telegram,
         config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing/Breakeven حية من إعدادات البوت الأساسي
+        symbols_fn=lambda: list(SYMBOLS),  # ⬅️ بطلب المستخدم: تفحص نفس الـ144 عملة المعتمدة، مش كل أزواج USDT ببينانس
         usdt_per_trade=TREND_PARALLEL_USDT_PER_TRADE,
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ TREND_PARALLEL_ENABLED (مطفي افتراضياً)
         state_file=os.path.join(DATA_DIR, "trend_stoch_state.json"),
@@ -3041,6 +3048,7 @@ def run_bot():
                                     f"💹 PnL: {profit:+.4f} USDT"
                                 )
                                 del open_trades[symbol]
+                                get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # 🔐 نحرر الحجز
                                 save_trades()
                                 continue
                     else:
@@ -3084,6 +3092,7 @@ def run_bot():
                                     )
 
                                 del open_trades[symbol]
+                                get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # 🔐 نحرر الحجز
                                 save_trades()
                                 continue
 
@@ -3234,7 +3243,14 @@ def run_bot():
                             continue
 
                         if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):   # ✅ RESERVE_USDT = 0.0 الآن، أي بدون احتياطي جانبي
+                            # 🔐 حجز العملة قبل الشراء — لو استراتيجية موازية (Range Trading أو
+                            # Trend+Stoch) حاجزاها حالياً، نتراجع ونكمل على عملة تانية بدل ما نتضارب.
+                            if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
+                                watch_list.discard(symbol)
+                                continue
                             res = buy_market(client, symbol, TRADE_AMOUNT)
+                            if res is None:
+                                get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
                             if res:
                                 res["trailing_active"] = False
                                 res["highest_price"]   = res["entry_price"]
