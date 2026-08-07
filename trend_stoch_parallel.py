@@ -49,6 +49,9 @@ from binance.exceptions import BinanceAPIException
 from indicators import calculate_bollinger_bands, calculate_vwap, calculate_momentum_score
 from coin_memory import ATRGuard
 from market_regime import MarketRegimeDetector
+from portfolio_manager import get_portfolio_manager
+
+_PORTFOLIO_OWNER = "trend_parallel"
 
 
 DEFAULT_CONFIG = {
@@ -145,7 +148,11 @@ def _sell_market(client, symbol, qty):
         balance = client.get_asset_balance(asset=asset)
         actual_qty = float(balance["free"])
         step_size = _get_step_size(client, symbol)
-        sell_qty = min(qty, actual_qty)
+        # ⬅️ بطلب المستخدم: كانت min(qty, actual_qty) — تبيع بس كمية الصفقة المسجّلة
+        # وتسيب أي غبار (Dust) متراكم من تقريب LOT_SIZE بصفقات سابقة لنفس العملة.
+        # هلق تبيع كامل الرصيد المتاح فعلياً، فينكسح أي غبار قديم مع كل عملية بيع.
+        # ⚠️ هذا التغيير بهالملف المستقل بس — bot.py الأساسي ما انلمس.
+        sell_qty = actual_qty
         if step_size:
             precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
             sell_qty = round(sell_qty - (sell_qty % step_size), precision)
@@ -183,16 +190,23 @@ def _calculate_atr(highs, lows, closes, period):
 
 
 class TrendStochParallel:
-    def __init__(self, client, notify_fn=None, config_fn=None, **config_overrides):
+    def __init__(self, client, notify_fn=None, config_fn=None, symbols_fn=None, **config_overrides):
         """
         config_fn: دالة اختيارية بدون معاملات، ترجع dict فيه قيم حية (زي
         atr_multiplier, trail_atr_multiplier, trail_activate_pct, breakeven_activate_pct,
         breakeven_margin_pct) — بتُستدعى بأول كل دورة فحص، فأي تغيير عالإعدادات
         بالتطبيق/تيليغرام (على البوت الأساسي) بينعكس هون فوراً بدون إعادة تشغيل.
+
+        symbols_fn: دالة اختيارية بدون معاملات، ترجع القائمة الحية لعملات البوت
+        الأساسي (SYMBOLS، الـ144 عملة المختارة) — بتُستدعى بكل فحص، حتى الاستراتيجية
+        تفحص **نفس** سلة العملات المعتمدة بالبوت، مش كل أزواج USDT الموجودة ببينانس
+        (مئات العملات، فيها ضعيفة/غير مدروسة). لو ما انمررت (تشغيل مستقل للاختبار)،
+        بترجع تلقائياً لجلب كل أزواج USDT من بينانس مباشرة.
         """
         self.client = client
         self.notify_fn = notify_fn
         self.config_fn = config_fn
+        self.symbols_fn = symbols_fn
         self.cfg = dict(DEFAULT_CONFIG)
         self.cfg.update(config_overrides)
 
@@ -223,6 +237,8 @@ class TrendStochParallel:
                     self.position = json.load(f)
             except Exception:
                 self.position = None
+        if self.position is not None:
+            get_portfolio_manager().try_claim(self.position["symbol"], _PORTFOLIO_OWNER)
 
     def _save_state(self):
         path = self.cfg["state_file"]
@@ -252,6 +268,14 @@ class TrendStochParallel:
     # 🌐 قائمة العملات (نفس نطاق البوت — USDT Spot النشطة، بدون توكنز رافعة مالية)
     # ──────────────────────────────────────────────
     def _get_symbols(self):
+        if self.symbols_fn is not None:
+            try:
+                live_symbols = self.symbols_fn()
+                if live_symbols:
+                    return list(live_symbols)
+            except Exception:
+                pass   # فشل الجلب الحي — نكمل على الاحتياطي بالأسفل
+
         if self.cfg["symbols"]:
             return self.cfg["symbols"]
 
@@ -327,15 +351,18 @@ class TrendStochParallel:
             return None
 
     def scan_for_entry(self):
-        """يفحص كل العملات، ويرجع أفضل إشارة (أعلى momentum_score) أو None."""
+        """يفحص كل العملات، ويرجع أفضل إشارة (أعلى momentum_score، وغير محجوزة لاستراتيجية تانية) أو None."""
         symbols = self._get_symbols()
         if not symbols:
             return None
 
+        portfolio = get_portfolio_manager()
         best_signal = None
         for symbol in symbols:
-            if symbol == "BTCUSDT":   # مستبعدة أصلاً — مغطاة بستراتيجية Range Trading BTC المنفصلة
+            if symbol == "BTCUSDT":   # مستبعدة أصلاً — مغطاة بستراتيجية Range Trading المنفصلة
                 continue
+            if portfolio.is_claimed_by_other(symbol, _PORTFOLIO_OWNER):
+                continue   # عملة محجوزة لاستراتيجية تانية حالياً — نتجاوزها
             signal = self.check_symbol_entry(symbol)
             if signal and (best_signal is None or signal["momentum_score"] > best_signal["momentum_score"]):
                 best_signal = signal
@@ -349,9 +376,16 @@ class TrendStochParallel:
         symbol = signal["symbol"]
         amount = self.cfg["usdt_per_trade"]
 
+        # 🔐 حجز أخير قبل الشراء الفعلي — لو استراتيجية تانية حجزت نفس العملة
+        # بالفترة يلي بين scan_for_entry والتنفيذ، نتراجع فوراً بدل ما نشتري.
+        if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
+            self._notify(f"⚠️ Trend+Stoch: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
+            return
+
         if self.cfg["live_trading"]:
             result, error = _buy_market(self.client, symbol, amount)
             if result is None:
+                get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
                 self._notify(f"❌ <b>Trend+Stoch — فشل تنفيذ أمر الشراء لـ {symbol}</b>\n⚠️ السبب: {error}")
                 return
             entry_price, qty = result["entry_price"], result["qty"]
@@ -506,6 +540,7 @@ class TrendStochParallel:
         )
 
         self.position = None
+        get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # 🔐 نحرر الحجز — العملة صارت متاحة لأي استراتيجية تانية
         self._save_state()
 
     def _refresh_live_config(self):
@@ -535,7 +570,16 @@ class TrendStochParallel:
             return {"status": "entered", "signal": signal}
         return {"status": "waiting_for_entry"}
 
-    def run(self, poll_seconds=3600, max_iterations=None, is_enabled_fn=None):
+    def run(self, poll_seconds=3600, position_check_seconds=60, max_iterations=None, is_enabled_fn=None):
+        """
+        ⬅️ إصلاح مهم: قبل هيك كانت الحلقة تفحص كل شي (بما فيها صفقة مفتوحة) كل
+        poll_seconds (ساعة كاملة) — يعني لو السعر طلع وحقق شرط تفعيل Trailing
+        وبعدين رجع نزل، كله ممكن يصير **بين فحصين متتاليين** بدون ما الكود يشوفه
+        أصلاً، فيبدو "Trailing ما عم يشتغل" رغم إنه المنطق نفسه سليم.
+        هلق: لو فيه صفقة مفتوحة، نفحصها كل position_check_seconds (دقيقة افتراضياً)
+        — نفس فكرة حلقة المراقبة بالبوت الأساسي. لو ما فيه صفقة، نفحص إشارة دخول
+        جديدة كل poll_seconds (ساعة) بس — منطقي، لأنه هيك أصلاً فريم الشموع.
+        """
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
         print(f"📈 بدء Trend+Stoch المستقلة — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: ساعة")
 
@@ -546,7 +590,7 @@ class TrendStochParallel:
                     self.check_and_act()
                 except Exception as e:
                     print(f"❌ خطأ بدورة الفحص: {e}")
-                sleep_time = poll_seconds
+                sleep_time = position_check_seconds if self.position is not None else poll_seconds
             else:
                 sleep_time = 10
             iteration += 1
