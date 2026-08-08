@@ -2402,6 +2402,12 @@ def api_history():
     if period == "today":
         records = [r for r in load_profit_log() if r["time"].startswith(now)]
         records += [r for r in load_parallel_strategies_history() if r["time"].startswith(now)]
+    elif period == "yesterday":
+        # ⬅️ بطلب المستخدم: فلتر "أمس" — نفس تاريخ اليوم ناقص يوم وحد، بتوقيت UTC
+        # (نفس التوقيت المستخدم بتسجيل الأوقات — يتوافق مع فلتر "اليوم" الموجود)
+        yesterday = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        records = [r for r in load_all_profit_log() if r["time"].startswith(yesterday)]
+        records += [r for r in load_parallel_strategies_history() if r["time"].startswith(yesterday)]
     elif period == "week":
         cutoff  = time.time() - 7 * 86400
         records = [r for r in load_all_profit_log()
