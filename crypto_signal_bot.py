@@ -32,6 +32,7 @@ from market_regime import MarketRegimeDetector
 from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config, get_24h_change_pct
 from range_trading_btc import RangeTradingBTC
 from trend_stoch_parallel import TrendStochParallel
+from squeeze_breakout import SqueezeBreakout
 from portfolio_manager import get_portfolio_manager
 
 _PORTFOLIO_OWNER = "main_bot"
@@ -308,6 +309,16 @@ TREND_PARALLEL_USDT_PER_TRADE = 15.0
 _trend_parallel_strategy = None   # ⬅️ نسخة TrendStochParallel الوحيدة
 
 # ──────────────────────────────────────────────
+# 🐍 استراتيجية Squeeze Breakout الموازية المستقلة (ملف squeeze_breakout.py)
+# كاشف انضغاط بولينجر + انفجار مبكر بفوليوم — يمسك العملات قبل ما توصل +10%،
+# مستقلة كلياً، بلا LLM، رياضيات بحتة. مطفية افتراضياً — تفعّل/تطفى من تيليغرام
+# (/set_squeeze_breakout on|off) أو التطبيق.
+# ──────────────────────────────────────────────
+SQUEEZE_BREAKOUT_ENABLED = False
+SQUEEZE_BREAKOUT_USDT_PER_TRADE = 15.0
+_squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحيدة
+
+# ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
 logging.basicConfig(
@@ -441,6 +452,7 @@ def save_settings():
     global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global RANGE_TRADING_ENABLED
     global TREND_PARALLEL_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -468,6 +480,7 @@ def save_settings():
                 "inverse_btc_config" : INVERSE_BTC_CONFIG,
                 "range_trading_enabled": RANGE_TRADING_ENABLED,
                 "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
+                "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -482,6 +495,7 @@ def load_settings():
     global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global RANGE_TRADING_ENABLED
     global TREND_PARALLEL_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -522,6 +536,7 @@ def load_settings():
             set_inverse_config(**loaded_inv_config)
         RANGE_TRADING_ENABLED = s.get("range_trading_enabled", RANGE_TRADING_ENABLED)
         TREND_PARALLEL_ENABLED = s.get("trend_parallel_enabled", TREND_PARALLEL_ENABLED)
+        SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -780,6 +795,7 @@ def telegram_command_listener(client):
     global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
     global RANGE_TRADING_ENABLED
     global TREND_PARALLEL_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -1136,6 +1152,42 @@ def telegram_command_listener(client):
                             f"📈 <b>Trend+Stoch الموازية</b>\n"
                             f"الحالة: {tp_status}\n"
                             f"المبلغ لكل صفقة: {TREND_PARALLEL_USDT_PER_TRADE} USDT\n"
+                            f"{pos_line}"
+                        )
+
+                    # ── /set_squeeze_breakout (تشغيل/إيقاف استراتيجية Squeeze Breakout المستقلة) ──
+                    elif text.startswith("/set_squeeze_breakout "):
+                        value = text.replace("/set_squeeze_breakout ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                SQUEEZE_BREAKOUT_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّلة" if SQUEEZE_BREAKOUT_ENABLED else "❌ متوقفة"
+                            send_admin(
+                                f"{status_txt} استراتيجية Squeeze Breakout\n"
+                                f"↳ صفقات حقيقية بمبلغ {SQUEEZE_BREAKOUT_USDT_PER_TRADE} USDT/صفقة، سلة العملات، فريم 30 دقيقة، صفقة وحدة بس"
+                                if SQUEEZE_BREAKOUT_ENABLED else
+                                "❌ تم إيقاف Squeeze Breakout — أي صفقة مفتوحة حالياً بتضل تكمل لحد ما توقف عادي (ستوب/ترايلنك)، بس ما رح تنفتح صفقة جديدة"
+                            )
+                        else:
+                            send_admin("❌ مثال: /set_squeeze_breakout on  أو  /set_squeeze_breakout off")
+
+                    # ── /squeeze_breakout_status ──────────────────────
+                    elif text == "/squeeze_breakout_status":
+                        with _lock:
+                            sb_status = "✅ مفعّلة" if SQUEEZE_BREAKOUT_ENABLED else "❌ متوقفة"
+                        pos = _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None
+                        if pos:
+                            pos_line = (
+                                f"📍 صفقة مفتوحة: {pos['symbol'].replace('USDT','')} | دخول {pos['entry_price']:.6f} | "
+                                f"ستوب حالي {pos['stop_loss']:.6f} | Trailing: {'مفعّل' if pos['trailing_active'] else 'غير مفعّل'}"
+                            )
+                        else:
+                            pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
+                        send_admin(
+                            f"🐍 <b>Squeeze Breakout</b>\n"
+                            f"الحالة: {sb_status}\n"
+                            f"المبلغ لكل صفقة: {SQUEEZE_BREAKOUT_USDT_PER_TRADE} USDT\n"
                             f"{pos_line}"
                         )
 
@@ -1563,6 +1615,10 @@ def telegram_command_listener(client):
                             "/set_trend_parallel on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم ساعة)\n"
                             "/set_trend_parallel off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/trend_parallel_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
+                            "<b>🐍 Squeeze Breakout (استراتيجية موازية مستقلة):</b>\n"
+                            "/set_squeeze_breakout on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم 30 دقيقة)\n"
+                            "/set_squeeze_breakout off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
+                            "/squeeze_breakout_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
                             "<b>المؤشرات:</b>\n"
                             "/enable_ma20 — تشغيل فيلتر MA20 (مستقل عن الاستراتيجية)\n"
                             "/disable_ma20 — تعطيل فيلتر MA20\n\n"
@@ -2298,12 +2354,15 @@ def api_trades():
     # لنفس القائمة، حتى تظهر بشاشة "الصفقات" العادية متل أي صفقة تانية.
     range_pos = _range_trading_strategy.position if _range_trading_strategy else None
     trend_pos = _trend_parallel_strategy.position if _trend_parallel_strategy else None
+    squeeze_pos = _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None
 
     extra_symbols = set()
     if range_pos:
         extra_symbols.add(range_pos.get("symbol", "BTCUSDT"))
     if trend_pos:
         extra_symbols.add(trend_pos["symbol"])
+    if squeeze_pos:
+        extra_symbols.add(squeeze_pos["symbol"])
 
     # ✅ إصلاح: جلب كل الأسعار بطلب واحد بدل طلب لكل عملة بحلقة
     # ✅ كاش قصير المدة: أي عدد أجهزة فاتحة بنفس اللحظة بتشارك نفس النداء لبينانس
@@ -2351,22 +2410,38 @@ def api_trades():
             "strategy": "trend_stoch_parallel",
         })
 
+    if squeeze_pos:
+        symbol = squeeze_pos["symbol"]
+        current_price = all_prices.get(symbol, squeeze_pos["entry_price"])
+        pnl_pct = round((current_price - squeeze_pos["entry_price"]) / squeeze_pos["entry_price"] * 100, 2)
+        result.append({
+            "symbol": symbol,
+            "entry_price": squeeze_pos["entry_price"],
+            "current_price": current_price,
+            "trailing_active": squeeze_pos.get("trailing_active", False),
+            "stop_loss": squeeze_pos.get("stop_loss"),
+            "pnl_pct": pnl_pct,
+            "strategy": "squeeze_breakout",
+        })
+
     return jsonify(result)
 
 
 # ── سجل الصفقات المغلقة ──────────────────────────
 def load_parallel_strategies_history():
     """
-    يقرأ سجلات الصفقات المغلقة من الاستراتيجيتين الموازيتين المستقلتين
-    (Range Trading و Trend+Stoch الموازية) — كل وحدة إلها ملف history خاص فيها،
-    منفصل تماماً عن profit_log تبع البوت الأساسي — ويحوّلهم لنفس شكل السجل
-    العادي (symbol/entry_price/exit_price/profit/pct/reason/time) حتى يظهروا
-    بشاشة "الصفقات > السجل" بالتطبيق متل أي صفقة عادية.
+    يقرأ سجلات الصفقات المغلقة من الاستراتيجيات الموازية المستقلة
+    (Range Trading و Trend+Stoch الموازية و Squeeze Breakout) — كل وحدة إلها
+    ملف history خاص فيها، منفصل تماماً عن profit_log تبع البوت الأساسي —
+    ويحوّلهم لنفس شكل السجل العادي (symbol/entry_price/exit_price/profit/
+    pct/reason/time) حتى يظهروا بشاشة "الصفقات > السجل" بالتطبيق متل أي
+    صفقة عادية.
     """
     records = []
     sources = [
         (os.path.join(DATA_DIR, "range_trading_history.json"), "range_trading_btc"),
         (os.path.join(DATA_DIR, "trend_stoch_history.json"), "trend_stoch_parallel"),
+        (os.path.join(DATA_DIR, "squeeze_breakout_history.json"), "squeeze_breakout"),
     ]
     for path, strategy_name in sources:
         if not os.path.exists(path):
@@ -2465,6 +2540,10 @@ def api_get_settings():
             "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
             "trend_parallel_usdt_per_trade": TREND_PARALLEL_USDT_PER_TRADE,
             "trend_parallel_position": _trend_parallel_strategy.position if _trend_parallel_strategy else None,
+            # ✅ Squeeze Breakout — استراتيجية موازية مستقلة (كاشف انضغاط/انفجار مبكر، سلة العملات، فريم 30 دقيقة)
+            "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
+            "squeeze_breakout_usdt_per_trade": SQUEEZE_BREAKOUT_USDT_PER_TRADE,
+            "squeeze_breakout_position": _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None,
         })
 
 
@@ -2480,6 +2559,7 @@ def api_set_settings():
     global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global RANGE_TRADING_ENABLED
     global TREND_PARALLEL_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -2613,6 +2693,10 @@ def api_set_settings():
         if "trend_parallel_enabled" in data:
             TREND_PARALLEL_ENABLED = bool(data["trend_parallel_enabled"])
 
+        # ✅ Squeeze Breakout — تشغيل/إيقاف من التطبيق
+        if "squeeze_breakout_enabled" in data:
+            SQUEEZE_BREAKOUT_ENABLED = bool(data["squeeze_breakout_enabled"])
+
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
     save_settings()
@@ -2714,6 +2798,9 @@ def api_close_trade():
         elif _trend_parallel_strategy and _trend_parallel_strategy.position and \
                 _trend_parallel_strategy.position["symbol"] == full_symbol:
             sell_price, status = _trend_parallel_strategy.close_manually()
+        elif _squeeze_breakout_strategy and _squeeze_breakout_strategy.position and \
+                _squeeze_breakout_strategy.position["symbol"] == full_symbol:
+            sell_price, status = _squeeze_breakout_strategy.close_manually()
         else:
             return jsonify({"error": "لا توجد صفقة مفتوحة لهذه العملة"}), 404
 
@@ -2889,6 +2976,25 @@ def run_bot():
         daemon=True,
     )
     trend_parallel_thread.start()
+
+    # ── 🐍 Squeeze Breakout — Thread مستقل تماماً كمان ──
+    global _squeeze_breakout_strategy
+    _squeeze_breakout_strategy = SqueezeBreakout(
+        client,
+        notify_fn=send_telegram,
+        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing/Breakeven حية من إعدادات البوت الأساسي
+        symbols_fn=lambda: list(SYMBOLS),  # ⬅️ نفس الـ144 عملة المعتمدة
+        usdt_per_trade=SQUEEZE_BREAKOUT_USDT_PER_TRADE,
+        live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ SQUEEZE_BREAKOUT_ENABLED (مطفي افتراضياً)
+        state_file=os.path.join(DATA_DIR, "squeeze_breakout_state.json"),
+        history_file=os.path.join(DATA_DIR, "squeeze_breakout_history.json"),
+    )
+    squeeze_breakout_thread = threading.Thread(
+        target=_squeeze_breakout_strategy.run,
+        kwargs={"poll_seconds": 1800, "is_enabled_fn": lambda: SQUEEZE_BREAKOUT_ENABLED},
+        daemon=True,
+    )
+    squeeze_breakout_thread.start()
 
     last_heartbeat = time.time()
     last_scan      = 0
