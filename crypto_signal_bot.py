@@ -112,8 +112,12 @@ TRAIL_ACTIVATE_PCT = 0.01
 # هذا يمنع الحالة يلي الستوب بينقفل بالضبط على سعر الدخول (بدون هامش)
 # ويتحول لخسارة بسيطة بعد العمولة والانزلاق عند التنفيذ الفعلي.
 # ──────────────────────────────────────────────
-BREAKEVEN_ACTIVATE_PCT = 0.005   # 0.5% ربح → تفعيل أرضية التعادل
+BREAKEVEN_ACTIVATE_PCT = 0.005   # احتياطي فقط — يُستخدم لو تعذر حساب ATR وقت الفحص
 BREAKEVEN_MARGIN_PCT   = 0.002   # 0.2% فوق سعر الدخول (يغطي عمولة بينانس القياسية 0.1%×2)
+# ⬅️ بدل نسبة ثابتة: تفعيل Breakeven/Trailing بمضاعف ATR الحالي (يتكيف مع تذبذب كل عملة)،
+# مع رجوع للنسبة الثابتة فوق كاحتياطي لو تعذر حساب ATR بلحظة الفحص.
+BREAKEVEN_ACTIVATE_ATR_MULTIPLE = 0.5
+TRAIL_ACTIVATE_ATR_MULTIPLE     = 1.0
 
 TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي بناءً على طلب المستخدم (كان 2.0)
@@ -1770,6 +1774,27 @@ def calculate_atr(highs, lows, closes):
     except Exception:
         return None
 
+
+def refresh_trade_atr(client, symbol, trade):
+    """
+    ⬅️ تحسين 1: يعيد حساب ATR الحالي لعملة صفقة مفتوحة (بدل ما يضل مجمّد على
+    قيمة لحظة الشراء طول عمر الصفقة). يحدّث trade["atr"] لو نجح الحساب، ويرجع
+    القيمة الجديدة أو None لو تعذر (بهاي الحالة القيمة القديمة تضل مستخدمة).
+    """
+    try:
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=ATR_PERIOD + 10)
+        if not klines or len(klines) < ATR_PERIOD + 2:
+            return None
+        highs  = pd.Series([float(k[2]) for k in klines])
+        lows   = pd.Series([float(k[3]) for k in klines])
+        closes = pd.Series([float(k[4]) for k in klines])
+        atr_value = calculate_atr(highs, lows, closes)
+        if atr_value:
+            trade["atr"] = atr_value
+        return atr_value
+    except Exception:
+        return None
+
 def get_indicators(client, symbol):
     try:
         klines  = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
@@ -3099,16 +3124,34 @@ def run_bot():
                         continue
                     coin  = symbol.replace("USDT", "")
 
-                    # 🛡️ مرحلة حماية التعادل (Breakeven): تُفعّل بربح بسيط (BREAKEVEN_ACTIVATE_PCT)
+                    # ⬅️ تحسين 1: إعادة حساب ATR كل دورة فحص بدل ما يضل مجمّد على قيمة
+                    # لحظة الشراء طول عمر الصفقة — الوقف هلق "واعي" لتذبذب العملة الحالي.
+                    fresh_atr = refresh_trade_atr(client, symbol, trade)
+                    atr_val = fresh_atr if fresh_atr else trade.get("atr")
+                    if fresh_atr:
+                        save_trades()
+
+                    # ⬅️ تحسين 2: نقاط تفعيل Breakeven/Trailing بمضاعف ATR بدل نسبة ثابتة —
+                    # تتكيف تلقائياً مع تذبذب كل عملة، مع رجوع للنسبة الثابتة كاحتياطي فقط
+                    # لو تعذر حساب ATR بلحظة الفحص.
+                    if atr_val:
+                        breakeven_atr_multiple = trade.get("breakeven_activate_atr_multiple", BREAKEVEN_ACTIVATE_ATR_MULTIPLE)
+                        trail_atr_multiple     = trade.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
+                        breakeven_trigger_price = trade["entry_price"] + (breakeven_atr_multiple * atr_val)
+                        trail_trigger_price     = trade["entry_price"] + (trail_atr_multiple * atr_val)
+                    else:
+                        breakeven_trigger_price = trade["entry_price"] * (1 + trade.get("breakeven_activate_pct", BREAKEVEN_ACTIVATE_PCT))
+                        trail_trigger_price     = trade["entry_price"] * (1 + trade.get("trail_activate_pct", TRAIL_ACTIVATE_PCT))
+
+                    # 🛡️ مرحلة حماية التعادل (Breakeven): تُفعّل بربح بسيط
                     # قبل التريلينج الكامل بكتير. الستوب ينتقل لسعر الدخول + هامش يغطي العمولة،
                     # ويُخزَّن كـ"أرضية" (breakeven_floor) بالصفقة — لا يقدر أي حساب لاحق (حتى
                     # التريلينج نفسه لو مسافة ATR أوسع من الربح الحالي) ينزل تحتها أبداً طول عمر الصفقة.
                     # هذا يمنع حالة "الستوب بينقفل بالضبط على سعر الدخول الخام (بدون هامش)"
                     # يلي كانت بتتحول لخسارة بسيطة بعد العمولة والانزلاق عند التنفيذ الفعلي.
                     if trade.get("breakeven_floor") is None:
-                        breakeven_activate_pct = trade.get("breakeven_activate_pct", BREAKEVEN_ACTIVATE_PCT)
                         breakeven_margin_pct   = trade.get("breakeven_margin_pct", BREAKEVEN_MARGIN_PCT)
-                        if price >= trade["entry_price"] * (1 + breakeven_activate_pct):
+                        if price >= breakeven_trigger_price:
                             floor_price = round(trade["entry_price"] * (1 + breakeven_margin_pct), 8)
                             trade["breakeven_floor"] = floor_price
                             # الستوب ينتقل فوراً للأرضية الجديدة، بس فقط لو هيك بيرفعه (ما ينزل الستوب أبداً)
@@ -3123,8 +3166,7 @@ def run_bot():
                     if not trade["trailing_active"]:
                         # 🧠 لو الصفقة دخلت بوضع Strict Mode (عملة ذات تاريخ ضعيف بذاكرة العملات)،
                         # نقطة تفعيل الـ Trailing تكون مضاعفة (تعويض تضييق الـ SL بمهلة ربح أوسع).
-                        trail_activate_pct = trade.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
-                        if price >= trade["entry_price"] * (1 + trail_activate_pct):
+                        if price >= trail_trigger_price:
                             trade["trailing_active"] = True
                             trade["highest_price"]   = price
                             # ✅ الستوب وقت تفعيل التريلينج ما ينزل تحت أرضية التعادل (دخول+هامش)،
@@ -3403,12 +3445,15 @@ def run_bot():
                                 # 🧠 مضاعفة نقطة تفعيل Trailing (تقبّليات أوسع) بوضع Strict Mode فقط
                                 tp_multiplier = atr_guard.get_take_profit_multiplier(is_strict)
                                 res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
+                                # ⬅️ نفس المضاعفة، بس بمصطلح مضاعف ATR (يُستخدم أولوية لو ATR متاح وقت الفحص)
+                                res["trail_activate_atr_multiple"] = round(TRAIL_ACTIVATE_ATR_MULTIPLE * tp_multiplier, 4)
 
                                 # 🛡️ قفل إعدادات حماية التعادل الحالية وقت الشراء بالصفقة نفسها،
                                 # عشان أي تعديل لاحق على الإعدادات العامة ما يأثر على صفقة مفتوحة أصلاً
                                 with _lock:
                                     res["breakeven_activate_pct"] = BREAKEVEN_ACTIVATE_PCT
                                     res["breakeven_margin_pct"]   = BREAKEVEN_MARGIN_PCT
+                                    res["breakeven_activate_atr_multiple"] = BREAKEVEN_ACTIVATE_ATR_MULTIPLE
 
                                 open_trades[symbol]    = res
                                 save_trades()
