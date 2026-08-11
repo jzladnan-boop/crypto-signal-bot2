@@ -62,8 +62,10 @@ DEFAULT_CONFIG = {
     "atr_period": 14,
     "atr_multiplier": 2.0,
     "trail_atr_multiplier": 1.5,
-    "trail_activate_pct": 0.01,
-    "breakeven_activate_pct": 0.005,
+    "trail_activate_atr_multiple": 1.0,     # ⬅️ بدل نسبة ثابتة: تفعيل Trailing عند ربح = 1.0×ATR الحالي
+    "breakeven_activate_atr_multiple": 0.5, # ⬅️ بدل نسبة ثابتة: تفعيل Breakeven عند ربح = 0.5×ATR الحالي
+    "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
+    "breakeven_activate_pct": 0.005,   # احتياطي فقط — يُستخدم لو تعذر حساب ATR
     "breakeven_margin_pct": 0.002,
     "stop_loss_fallback_pct": 0.02,
     "fallback_trail_pct": 0.01,
@@ -446,6 +448,26 @@ class SqueezeBreakout:
     # ──────────────────────────────────────────────
     # 🔄 ستوب الـ Trailing
     # ──────────────────────────────────────────────
+    def _refresh_position_atr(self, symbol):
+        """⬅️ تحسين 1: يعيد حساب ATR الحالي لعملة الصفقة المفتوحة كل دورة فحص."""
+        try:
+            klines = self.client.get_klines(
+                symbol=symbol, interval=self.cfg["interval"],
+                limit=self.cfg["atr_period"] + 10,
+            )
+            if not klines or len(klines) < self.cfg["atr_period"] + 2:
+                return None
+            highs = pd.Series([float(k[2]) for k in klines])
+            lows = pd.Series([float(k[3]) for k in klines])
+            closes = pd.Series([float(k[4]) for k in klines])
+            atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
+            if atr_value:
+                self.position["atr"] = atr_value
+                self._save_state()
+            return atr_value
+        except Exception:
+            return None
+
     def _compute_trail_stop(self, price):
         atr_val = self.position.get("atr")
         if atr_val:
@@ -464,8 +486,20 @@ class SqueezeBreakout:
         except Exception:
             return
 
+        # ⬅️ تحسين 1: إعادة حساب ATR كل دورة فحص بدل ما يضل مجمّد على قيمة الشراء
+        fresh_atr = self._refresh_position_atr(symbol)
+        atr_val = fresh_atr if fresh_atr else self.position.get("atr")
+
+        # ⬅️ تحسين 2: نقاط تفعيل Breakeven/Trailing بمضاعف ATR بدل نسبة ثابتة
+        if atr_val:
+            breakeven_trigger = self.position["entry_price"] + (self.cfg["breakeven_activate_atr_multiple"] * atr_val)
+            trail_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
+        else:
+            breakeven_trigger = self.position["entry_price"] * (1 + self.cfg["breakeven_activate_pct"])
+            trail_trigger = self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"])
+
         if self.position.get("breakeven_floor") is None:
-            if price >= self.position["entry_price"] * (1 + self.cfg["breakeven_activate_pct"]):
+            if price >= breakeven_trigger:
                 floor_price = round(self.position["entry_price"] * (1 + self.cfg["breakeven_margin_pct"]), 8)
                 self.position["breakeven_floor"] = floor_price
                 if floor_price > self.position["stop_loss"]:
@@ -475,7 +509,7 @@ class SqueezeBreakout:
         stop_floor = self.position.get("breakeven_floor") or self.position["entry_price"]
 
         if not self.position["trailing_active"]:
-            if price >= self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"]):
+            if price >= trail_trigger:
                 self.position["trailing_active"] = True
                 self.position["highest_price"] = price
                 self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
