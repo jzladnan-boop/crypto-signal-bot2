@@ -56,8 +56,10 @@ DEFAULT_CONFIG = {
     "atr_period": 14,
     "atr_multiplier": 2.0,             # مضاعف ATR للستوب الأولي
     "trail_atr_multiplier": 1.5,       # مضاعف ATR لمسافة الـ Trailing
-    "trail_activate_pct": 0.01,        # 1% ربح → تفعيل Trailing
-    "breakeven_activate_pct": 0.005,   # 0.5% ربح → تفعيل أرضية التعادل
+    "trail_activate_atr_multiple": 1.0,     # ⬅️ بدل نسبة ثابتة: تفعيل Trailing عند ربح = 1.0×ATR الحالي (يتكيف مع تذبذب كل عملة)
+    "breakeven_activate_atr_multiple": 0.5, # ⬅️ بدل نسبة ثابتة: تفعيل Breakeven عند ربح = 0.5×ATR الحالي
+    "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR وقت الفحص
+    "breakeven_activate_pct": 0.005,   # احتياطي فقط — يُستخدم لو تعذر حساب ATR وقت الفحص
     "breakeven_margin_pct": 0.002,     # 0.2% فوق الدخول (يغطي عمولة بينانس 0.1%×2)
     "stop_loss_fallback_pct": 0.02,    # احتياطي لو ما قدرنا نحسب ATR
     "fallback_trail_pct": 0.01,        # احتياطي Trailing لو ما قدرنا نحسب ATR
@@ -413,6 +415,30 @@ class RangeTradingBTC:
     # ──────────────────────────────────────────────
     # 🔄 حساب ستوب الـ Trailing (نفس compute_trail_stop بالضبط)
     # ──────────────────────────────────────────────
+    def _refresh_position_atr(self, symbol):
+        """
+        ⬅️ تحسين 1: يجيب شموع حديثة ويعيد حساب ATR الحالي لعملة الصفقة المفتوحة،
+        بدل ما نعتمد على قيمة ATR المحسوبة لحظة الشراء بس. يرجع القيمة الجديدة،
+        أو None لو تعذر الحساب (بهاي الحالة self.position["atr"] القديمة تضل مستخدمة).
+        """
+        try:
+            klines = self.client.get_klines(
+                symbol=symbol, interval=self.cfg["interval"],
+                limit=self.cfg["atr_period"] + 10,
+            )
+            if not klines or len(klines) < self.cfg["atr_period"] + 2:
+                return None
+            highs = pd.Series([float(k[2]) for k in klines])
+            lows = pd.Series([float(k[3]) for k in klines])
+            closes = pd.Series([float(k[4]) for k in klines])
+            atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
+            if atr_value:
+                self.position["atr"] = atr_value
+                self._save_state()
+            return atr_value
+        except Exception:
+            return None
+
     def _compute_trail_stop(self, price):
         atr_val = self.position.get("atr")
         if atr_val:
@@ -431,8 +457,22 @@ class RangeTradingBTC:
         except Exception:
             return
 
+        # ⬅️ تحسين 1: نعيد حساب ATR بكل دورة فحص (كل دقيقة تقريباً) بدل ما يضل
+        # مجمّد على قيمة لحظة الشراء — الوقف هلق "واعي" لتذبذب العملة الحالي.
+        fresh_atr = self._refresh_position_atr(symbol)
+        atr_val = fresh_atr if fresh_atr else self.position.get("atr")
+
+        # ⬅️ تحسين 2: نقاط تفعيل Breakeven/Trailing بمضاعف ATR بدل نسبة ثابتة —
+        # تتكيف تلقائياً مع شخصية تذبذب كل عملة، بدل رقم واحد يفرض على الكل.
+        if atr_val:
+            breakeven_trigger = self.position["entry_price"] + (self.cfg["breakeven_activate_atr_multiple"] * atr_val)
+            trail_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
+        else:
+            breakeven_trigger = self.position["entry_price"] * (1 + self.cfg["breakeven_activate_pct"])
+            trail_trigger = self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"])
+
         if self.position.get("breakeven_floor") is None:
-            if price >= self.position["entry_price"] * (1 + self.cfg["breakeven_activate_pct"]):
+            if price >= breakeven_trigger:
                 floor_price = round(self.position["entry_price"] * (1 + self.cfg["breakeven_margin_pct"]), 8)
                 self.position["breakeven_floor"] = floor_price
                 if floor_price > self.position["stop_loss"]:
@@ -442,7 +482,7 @@ class RangeTradingBTC:
         stop_floor = self.position.get("breakeven_floor") or self.position["entry_price"]
 
         if not self.position["trailing_active"]:
-            if price >= self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"]):
+            if price >= trail_trigger:
                 self.position["trailing_active"] = True
                 self.position["highest_price"] = price
                 self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
