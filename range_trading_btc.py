@@ -35,7 +35,7 @@ import ta
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-from coin_memory import ATRGuard
+from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 
@@ -68,6 +68,7 @@ DEFAULT_CONFIG = {
     "live_trading": False,             # ⚠️ لازم True صراحة لتنفيذ صفقات حقيقية
     "state_file": "range_trading_state.json",
     "history_file": "range_trading_history.json",
+    "coin_memory_db_path": "coin_memory.db",   # ⬅️ نفس قاعدة الذاكرة الموحّدة يلي البوت الأساسي يستخدمها
 }
 
 
@@ -189,6 +190,7 @@ class RangeTradingBTC:
         self.cfg.update(config_overrides)
 
         self.atr_guard = ATRGuard()                          # نسخة خاصة
+        self.coin_memory = CoinMemory(self.cfg["coin_memory_db_path"])   # ⬅️ نفس قاعدة الذاكرة الموحّدة (كتابة بس هون)
         self.regime_detector = MarketRegimeDetector(client)   # نسخة خاصة
 
         self.position = None   # صفقة وحدة بس بأي لحظة
@@ -530,6 +532,16 @@ class RangeTradingBTC:
             "live": self.cfg["live_trading"],
         })
 
+        # ⬅️ نسجل بقاعدة الذاكرة الموحّدة كمان (بالإضافة لملف السجل الخاص فينا)
+        # حتى يصير عندها صورة كاملة عن أداء كل عملة عبر كل الاستراتيجيات مع بعض.
+        try:
+            self.coin_memory.record_trade(
+                symbol=symbol, is_win=(pnl > 0), pnl=pnl,
+                slippage_pct=0.0, strategy="range_trading_btc",
+            )
+        except Exception:
+            pass   # فشل التسجيل بالذاكرة الموحّدة ما لازم يوقف تنفيذ البيع نفسه
+
         icon = "✅" if pnl > 0 else "❌"
         reason_map = {"trailing_stop": "Trailing Stop", "stop_loss": "وقف خسارة", "manual_close": "إغلاق يدوي"}
         reason_ar = reason_map.get(reason, reason)
@@ -575,16 +587,21 @@ class RangeTradingBTC:
 
     def run(self, poll_seconds=1800, position_check_seconds=60, max_iterations=None, is_enabled_fn=None):
         """
-        ⬅️ نفس إصلاح trend_stoch_parallel.py: لو فيه صفقة مفتوحة، نفحصها كل
-        position_check_seconds (دقيقة) بدل poll_seconds (30 دقيقة) — حتى Trailing
-        ما يفوته تحرك سعري صار وارتد قبل الفحص التالي.
+        ⬅️ إصلاح باگ حقيقي: قبل هيك، لو الاستراتيجية موقوفة (is_enabled_fn() = False)
+        وعندها صفقة مفتوحة، الكود كان يوقف check_and_act() بالكامل — يعني الصفقة
+        المفتوحة تضل بدون أي مراقبة (لا ستوب لوز، لا Trailing) لحد ما ترجع الاستراتيجية
+        تتفعّل. هلق: **إدارة الصفقة المفتوحة (حماية) شغالة دايماً بغض النظر عن حالة
+        التفعيل** — الإيقاف بس بيمنع البحث عن صفقات جديدة، مش حماية الموجودة أصلاً.
         """
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
         print(f"📊 بدء Range Trading (سلة: {', '.join(s.replace('USDT','') for s in self.cfg['symbols'])}) — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة")
 
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
-            if is_enabled_fn is None or is_enabled_fn():
+            has_open_position = self.position is not None
+            is_enabled = is_enabled_fn is None or is_enabled_fn()
+
+            if has_open_position or is_enabled:
                 try:
                     self.check_and_act()
                 except Exception as e:
