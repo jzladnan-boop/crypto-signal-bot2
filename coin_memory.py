@@ -76,7 +76,12 @@ class CoinMemory:
 
     def _connect(self):
         # check_same_thread=False لأن أغلب البوتات تستدعي هذا من ثريدات متعددة
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # ⬅️ WAL Mode: يسمح بقراءة وكتابة متزامنة من كذا Thread بنفس الوقت (البوت
+        # الأساسي + 3 استراتيجيات مستقلة كلهم ممكن يكتبوا بنفس اللحظة) بدون قفل
+        # كامل لقاعدة البيانات — كان أكبر خطر تضارب كتابة حقيقي بالنظام الحالي.
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
 
     def _init_db(self):
         with self._connect() as conn:
@@ -87,9 +92,20 @@ class CoinMemory:
                     timestamp REAL NOT NULL,
                     is_win INTEGER NOT NULL,
                     pnl REAL NOT NULL,
-                    slippage_pct REAL NOT NULL
+                    slippage_pct REAL NOT NULL,
+                    strategy TEXT NOT NULL DEFAULT 'unknown'
                 )
             """)
+            # ⬅️ ترحيل (Migration) لقواعد بيانات قديمة أُنشئت قبل عمود strategy —
+            # لو الجدول موجود أصلاً بدون هالعمود، نضيفه. لو موجود أصلاً (قاعدة
+            # جديدة أو ترحيل سابق)، sqlite بيرفض الأمر بخطأ "duplicate column"
+            # ونتجاهله بهدوء (هذا هو السلوك المتوقع، مش خلل).
+            try:
+                conn.execute("ALTER TABLE trades ADD COLUMN strategy TEXT NOT NULL DEFAULT 'unknown'")
+            except sqlite3.OperationalError:
+                pass   # العمود موجود أصلاً — تمام
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy)")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS symbol_stats (
                     symbol TEXT PRIMARY KEY,
@@ -106,17 +122,20 @@ class CoinMemory:
 
     # ---------------- تسجيل نتيجة صفقة ----------------
 
-    def record_trade(self, symbol: str, is_win: bool, pnl: float, slippage_pct: float):
+    def record_trade(self, symbol: str, is_win: bool, pnl: float, slippage_pct: float, strategy: str = "unknown"):
         """
         يُستدعى مرة واحدة فقط عند إغلاق أي صفقة (ربح أو خسارة).
+        strategy: اسم الاستراتيجية يلي فتحت الصفقة (مثلاً "rsi", "range_trading_btc",
+        "trend_stoch_parallel", "squeeze_breakout") — حتى نقدر نحلل أداء كل
+        استراتيجية لحالها لكل عملة، مش بس أداء العملة بشكل عام.
         """
         symbol = symbol.upper()
         now = time.time()
 
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO trades (symbol, timestamp, is_win, pnl, slippage_pct) VALUES (?, ?, ?, ?, ?)",
-                (symbol, now, int(is_win), pnl, slippage_pct)
+                "INSERT INTO trades (symbol, timestamp, is_win, pnl, slippage_pct, strategy) VALUES (?, ?, ?, ?, ?, ?)",
+                (symbol, now, int(is_win), pnl, slippage_pct, strategy)
             )
 
             row = conn.execute(
@@ -175,6 +194,54 @@ class CoinMemory:
                    FROM symbol_stats"""
             ).fetchall()
         return [SymbolStats(*r) for r in rows]
+
+    def get_recent_trades(self, symbol: str = None, strategy: str = None, limit: int = 20) -> List[dict]:
+        """
+        يرجع آخر `limit` صفقة (الأحدث أولاً)، مع إمكانية الفلترة حسب العملة و/أو
+        الاستراتيجية. أساس أي فلتر مستقبلي (نقطة 3 يلي اتفقنا نأجلها) — مثلاً
+        "شو معدل نجاح هاي العملة بآخر 20 صفقة" أو "شو أداء Squeeze Breakout عموماً".
+        """
+        query = "SELECT symbol, timestamp, is_win, pnl, slippage_pct, strategy FROM trades WHERE 1=1"
+        params = []
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol.upper())
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {"symbol": r[0], "timestamp": r[1], "is_win": bool(r[2]), "pnl": r[3], "slippage_pct": r[4], "strategy": r[5]}
+            for r in rows
+        ]
+
+    def get_strategy_stats(self, strategy: str) -> dict:
+        """
+        يرجع ملخص أداء استراتيجية معينة عبر كل العملات مجتمعة — عدد الصفقات،
+        الرابحة، الخاسرة، إجمالي الربح/الخسارة، ونسبة النجاح.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*), SUM(is_win), SUM(pnl)
+                   FROM trades WHERE strategy = ?""",
+                (strategy,)
+            ).fetchone()
+        total, wins, total_pnl = row
+        total = total or 0
+        wins = wins or 0
+        total_pnl = total_pnl or 0.0
+        return {
+            "strategy": strategy,
+            "total_trades": total,
+            "wins": wins,
+            "losses": total - wins,
+            "win_rate_pct": round((wins / total) * 100, 2) if total > 0 else None,
+            "total_pnl": round(total_pnl, 4),
+        }
 
     def _set_correlation(self, symbol: str, corr_type: str, corr_score: float):
         symbol = symbol.upper()
