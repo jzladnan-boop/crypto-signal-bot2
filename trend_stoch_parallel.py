@@ -47,7 +47,7 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
 from indicators import calculate_bollinger_bands, calculate_vwap, calculate_momentum_score
-from coin_memory import ATRGuard
+from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 
@@ -83,6 +83,7 @@ DEFAULT_CONFIG = {
     "live_trading": False,             # ⚠️ لازم True صراحة لتنفيذ صفقات حقيقية
     "state_file": "trend_stoch_state.json",
     "history_file": "trend_stoch_history.json",
+    "coin_memory_db_path": "coin_memory.db",   # ⬅️ نفس قاعدة الذاكرة الموحّدة يلي البوت الأساسي يستخدمها
     "scan_pause_seconds": 0.4,         # ⬅️ بطلب المستخدم: كانت 0.15 — بطّأنا الفحص (144 عملة كل ساعة) لتخفيف الضغط على مفتاح API المشترك مع البوت الأساسي
 }
 
@@ -213,6 +214,7 @@ class TrendStochParallel:
         self.cfg.update(config_overrides)
 
         self.atr_guard = ATRGuard()                    # نسخة خاصة، بدون أي علاقة بنسخة bot.py
+        self.coin_memory = CoinMemory(self.cfg["coin_memory_db_path"])   # ⬅️ نفس قاعدة الذاكرة الموحّدة (كتابة بس هون)
         self.regime_detector = MarketRegimeDetector(client)   # نفس الشي — نسخة خاصة لحالها
 
         self.position = None   # صفقة وحدة بس بأي لحظة
@@ -563,6 +565,14 @@ class TrendStochParallel:
             "live": self.cfg["live_trading"],
         })
 
+        try:
+            self.coin_memory.record_trade(
+                symbol=symbol, is_win=(pnl > 0), pnl=pnl,
+                slippage_pct=0.0, strategy="trend_stoch_parallel",
+            )
+        except Exception:
+            pass
+
         icon = "✅" if pnl > 0 else "❌"
         reason_map = {"trailing_stop": "Trailing Stop", "stop_loss": "وقف خسارة", "manual_close": "إغلاق يدوي"}
         reason_ar = reason_map.get(reason, reason)
@@ -606,20 +616,28 @@ class TrendStochParallel:
 
     def run(self, poll_seconds=3600, position_check_seconds=60, max_iterations=None, is_enabled_fn=None):
         """
-        ⬅️ إصلاح مهم: قبل هيك كانت الحلقة تفحص كل شي (بما فيها صفقة مفتوحة) كل
+        ⬅️ إصلاح مهم 1: قبل هيك كانت الحلقة تفحص كل شي (بما فيها صفقة مفتوحة) كل
         poll_seconds (ساعة كاملة) — يعني لو السعر طلع وحقق شرط تفعيل Trailing
         وبعدين رجع نزل، كله ممكن يصير **بين فحصين متتاليين** بدون ما الكود يشوفه
         أصلاً، فيبدو "Trailing ما عم يشتغل" رغم إنه المنطق نفسه سليم.
         هلق: لو فيه صفقة مفتوحة، نفحصها كل position_check_seconds (دقيقة افتراضياً)
         — نفس فكرة حلقة المراقبة بالبوت الأساسي. لو ما فيه صفقة، نفحص إشارة دخول
         جديدة كل poll_seconds (ساعة) بس — منطقي، لأنه هيك أصلاً فريم الشموع.
+
+        ⬅️ إصلاح مهم 2 (باگ حقيقي): لو الاستراتيجية موقوفة وعندها صفقة مفتوحة،
+        كان الكود يوقف check_and_act() بالكامل — الصفقة تضل بدون مراقبة (لا ستوب
+        لوز، لا Trailing) لحد ما ترجع تتفعّل. هلق إدارة الصفقة المفتوحة شغالة
+        دايماً بغض النظر عن حالة التفعيل — الإيقاف بس بيمنع البحث عن صفقات جديدة.
         """
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
         print(f"📈 بدء Trend+Stoch المستقلة — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: ساعة")
 
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
-            if is_enabled_fn is None or is_enabled_fn():
+            has_open_position = self.position is not None
+            is_enabled = is_enabled_fn is None or is_enabled_fn()
+
+            if has_open_position or is_enabled:
                 try:
                     self.check_and_act()
                 except Exception as e:
