@@ -36,7 +36,7 @@ import ta
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-from coin_memory import ATRGuard
+from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 
@@ -74,6 +74,7 @@ DEFAULT_CONFIG = {
     "live_trading": False,
     "state_file": "squeeze_breakout_state.json",
     "history_file": "squeeze_breakout_history.json",
+    "coin_memory_db_path": "coin_memory.db",   # ⬅️ نفس قاعدة الذاكرة الموحّدة يلي البوت الأساسي يستخدمها
     "scan_pause_seconds": 0.3,
 }
 
@@ -185,6 +186,7 @@ class SqueezeBreakout:
         self.cfg.update(config_overrides)
 
         self.atr_guard = ATRGuard()
+        self.coin_memory = CoinMemory(self.cfg["coin_memory_db_path"])   # ⬅️ نفس قاعدة الذاكرة الموحّدة (كتابة بس هون)
         self.regime_detector = MarketRegimeDetector(client)
 
         self.position = None
@@ -556,6 +558,14 @@ class SqueezeBreakout:
             "live": self.cfg["live_trading"],
         })
 
+        try:
+            self.coin_memory.record_trade(
+                symbol=symbol, is_win=(pnl > 0), pnl=pnl,
+                slippage_pct=0.0, strategy="squeeze_breakout",
+            )
+        except Exception:
+            pass
+
         icon = "✅" if pnl > 0 else "❌"
         reason_map = {"trailing_stop": "Trailing Stop", "stop_loss": "وقف خسارة", "manual_close": "إغلاق يدوي"}
         reason_ar = reason_map.get(reason, reason)
@@ -604,13 +614,21 @@ class SqueezeBreakout:
         نفس مبدأ فصل الترددين المطبّق بباقي الاستراتيجيات: صفقة مفتوحة تُدار كل
         دقيقة (position_check_seconds)، والبحث عن دخول جديد كل poll_seconds
         (30 دقيقة، نفس فريم الاستراتيجية).
+
+        ⬅️ إصلاح باگ حقيقي: لو الاستراتيجية موقوفة وعندها صفقة مفتوحة، كان الكود
+        يوقف check_and_act() بالكامل — الصفقة تضل بدون مراقبة (لا ستوب لوز، لا
+        Trailing) لحد ما ترجع تتفعّل. هلق إدارة الصفقة المفتوحة شغالة دايماً بغض
+        النظر عن حالة التفعيل — الإيقاف بس بيمنع البحث عن صفقات جديدة.
         """
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
         print(f"🐍 بدء Squeeze Breakout — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: 30 دقيقة")
 
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
-            if is_enabled_fn is None or is_enabled_fn():
+            has_open_position = self.position is not None
+            is_enabled = is_enabled_fn is None or is_enabled_fn()
+
+            if has_open_position or is_enabled:
                 try:
                     self.check_and_act()
                 except Exception as e:
