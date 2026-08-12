@@ -648,6 +648,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
             is_win=(profit > 0),
             pnl=profit,
             slippage_pct=entry_slippage_pct,
+            strategy=current_strategy or "unknown",   # ⬅️ اسم الاستراتيجية الفعّالة وقت الصفقة (rsi/stoch_rsi/trend_stoch/inverse_btc)
         )
     except Exception as e:
         log.error(f"❌ تسجيل ذاكرة العملة {symbol}: {e}")
@@ -2975,6 +2976,7 @@ def run_bot():
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ RANGE_TRADING_ENABLED (مطفي افتراضياً)
         state_file=os.path.join(DATA_DIR, "range_trading_state.json"),
         history_file=os.path.join(DATA_DIR, "range_trading_history.json"),
+        coin_memory_db_path=COIN_MEMORY_FILE,   # ⬅️ نفس قاعدة الذاكرة الموحّدة يلي البوت الأساسي يكتب فيها
     )
     range_trading_thread = threading.Thread(
         target=_range_trading_strategy.run,
@@ -2994,6 +2996,7 @@ def run_bot():
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ TREND_PARALLEL_ENABLED (مطفي افتراضياً)
         state_file=os.path.join(DATA_DIR, "trend_stoch_state.json"),
         history_file=os.path.join(DATA_DIR, "trend_stoch_history.json"),
+        coin_memory_db_path=COIN_MEMORY_FILE,
     )
     trend_parallel_thread = threading.Thread(
         target=_trend_parallel_strategy.run,
@@ -3013,6 +3016,7 @@ def run_bot():
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ SQUEEZE_BREAKOUT_ENABLED (مطفي افتراضياً)
         state_file=os.path.join(DATA_DIR, "squeeze_breakout_state.json"),
         history_file=os.path.join(DATA_DIR, "squeeze_breakout_history.json"),
+        coin_memory_db_path=COIN_MEMORY_FILE,
     )
     squeeze_breakout_thread = threading.Thread(
         target=_squeeze_breakout_strategy.run,
