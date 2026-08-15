@@ -3,7 +3,7 @@
 ======================================================================================
 استراتيجية منفصلة تماماً عن حلقة الفحص الرئيسية بـ crypto_signal_bot.py — بس بتستخدم
 بالضبط نفس منطق الدخول (Trend + StochRSI + فوليوم) ونفس نظام الحماية
-(ATR Stop Loss + Breakeven + Trailing) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون
+(ATR Stop Loss + Trailing) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون
 سلوك الحماية مطابق ومجرب.
 
 ⚠️ استقلالية "المشتركات المتغيّرة" (Shared Mutable State): هالملف ما بيلمس أي من
@@ -27,7 +27,6 @@ open_trades / current_strategy / coin_memory (تاريخ العملة يلي ب�
 2) الحماية (نفس نظام البوت بالضبط):
    - Stop Loss أولي: ATR × مضاعف، مربوط بحالة السوق (BULL/BEAR/SIDEWAYS) عبر
      نفس ATRGuard، بسقف صلب 3% ما ينكسر أبداً
-   - Breakeven: عند ربح 0.5%، الستوب ينتقل لسعر الدخول + 0.2% (يغطي العمولة) — أرضية
      ما تنزل تحتها أبداً طول عمر الصفقة
    - Trailing: يتفعّل عند ربح 1%، وبعدها يلاحق أعلى سعر بمسافة ATR × 1.5 (أو نسبة
      ثابتة احتياطية لو ATR غير متاح)
@@ -72,10 +71,7 @@ DEFAULT_CONFIG = {
     "atr_multiplier": 2.0,             # مضاعف ATR للستوب الأولي
     "trail_atr_multiplier": 1.5,       # مضاعف ATR لمسافة الـ Trailing
     "trail_activate_atr_multiple": 1.0,     # ⬅️ بدل نسبة ثابتة: تفعيل Trailing عند ربح = 1.0×ATR الحالي
-    "breakeven_activate_atr_multiple": 0.5, # ⬅️ بدل نسبة ثابتة: تفعيل Breakeven عند ربح = 0.5×ATR الحالي
     "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
-    "breakeven_activate_pct": 0.005,   # احتياطي فقط — يُستخدم لو تعذر حساب ATR
-    "breakeven_margin_pct": 0.002,     # 0.2% فوق الدخول (يغطي عمولة بينانس 0.1%×2)
     "stop_loss_fallback_pct": 0.02,    # احتياطي لو ما قدرنا نحسب ATR
     "fallback_trail_pct": 0.01,        # احتياطي Trailing لو ما قدرنا نحسب ATR
 
@@ -196,9 +192,9 @@ class TrendStochParallel:
     def __init__(self, client, notify_fn=None, config_fn=None, symbols_fn=None, **config_overrides):
         """
         config_fn: دالة اختيارية بدون معاملات، ترجع dict فيه قيم حية (زي
-        atr_multiplier, trail_atr_multiplier, trail_activate_pct, breakeven_activate_pct,
-        breakeven_margin_pct) — بتُستدعى بأول كل دورة فحص، فأي تغيير عالإعدادات
-        بالتطبيق/تيليغرام (على البوت الأساسي) بينعكس هون فوراً بدون إعادة تشغيل.
+        atr_multiplier, trail_atr_multiplier, trail_activate_pct) — بتُستدعى
+        بأول كل دورة فحص، فأي تغيير عالإعدادات بالتطبيق/تيليغرام (على البوت
+        الأساسي) بينعكس هون فوراً بدون إعادة تشغيل.
 
         symbols_fn: دالة اختيارية بدون معاملات، ترجع القائمة الحية لعملات البوت
         الأساسي (SYMBOLS، الـ144 عملة المختارة) — بتُستدعى بكل فحص، حتى الاستراتيجية
@@ -422,7 +418,6 @@ class TrendStochParallel:
             "stop_loss": round(stop_loss, 8),
             "trailing_active": False,
             "highest_price": entry_price,
-            "breakeven_floor": None,
             "entry_time": _utc_now_iso(),
             "market_regime_at_entry": market_regime,
         }
@@ -468,7 +463,7 @@ class TrendStochParallel:
         return round(price * (1 - self.cfg["fallback_trail_pct"]), 8)
 
     # ──────────────────────────────────────────────
-    # 🔍 إدارة الصفقة المفتوحة (Breakeven + Trailing + Stop Loss — نفس منطق البوت بالضبط)
+    # 🔍 إدارة الصفقة المفتوحة (Trailing + Stop Loss — نفس منطق البوت بالضبط)
     # ──────────────────────────────────────────────
     def manage_open_position(self):
         symbol = self.position["symbol"]
@@ -481,31 +476,18 @@ class TrendStochParallel:
         fresh_atr = self._refresh_position_atr(symbol)
         atr_val = fresh_atr if fresh_atr else self.position.get("atr")
 
-        # ⬅️ تحسين 2: نقاط تفعيل Breakeven/Trailing بمضاعف ATR بدل نسبة ثابتة
+        # ⬅️ نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة
         if atr_val:
-            breakeven_trigger = self.position["entry_price"] + (self.cfg["breakeven_activate_atr_multiple"] * atr_val)
             trail_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
         else:
-            breakeven_trigger = self.position["entry_price"] * (1 + self.cfg["breakeven_activate_pct"])
             trail_trigger = self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"])
-
-        # 🛡️ Breakeven
-        if self.position.get("breakeven_floor") is None:
-            if price >= breakeven_trigger:
-                floor_price = round(self.position["entry_price"] * (1 + self.cfg["breakeven_margin_pct"]), 8)
-                self.position["breakeven_floor"] = floor_price
-                if floor_price > self.position["stop_loss"]:
-                    self.position["stop_loss"] = floor_price
-                self._save_state()
-
-        stop_floor = self.position.get("breakeven_floor") or self.position["entry_price"]
 
         # 🎯 تفعيل Trailing
         if not self.position["trailing_active"]:
             if price >= trail_trigger:
                 self.position["trailing_active"] = True
                 self.position["highest_price"] = price
-                self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
+                self.position["stop_loss"] = self._compute_trail_stop(price)
                 self._save_state()
                 self._notify(f"🎯 Trend+Stoch: تفعيل Trailing لـ {symbol.replace('USDT','')} | ستوب: {self.position['stop_loss']}")
 
@@ -513,7 +495,7 @@ class TrendStochParallel:
         if self.position["trailing_active"]:
             if price > self.position["highest_price"]:
                 self.position["highest_price"] = price
-                self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
+                self.position["stop_loss"] = self._compute_trail_stop(price)
                 self._save_state()
             elif price <= self.position["stop_loss"]:
                 self._execute_sell(price, "trailing_stop")
@@ -602,7 +584,7 @@ class TrendStochParallel:
     # 🔄 دورة فحص/تنفيذ واحدة
     # ──────────────────────────────────────────────
     def check_and_act(self):
-        self._refresh_live_config()   # ⬅️ نتأكد إننا شغالين بآخر إعدادات ATR/Trailing/Breakeven من البوت الأساسي
+        self._refresh_live_config()   # ⬅️ نتأكد إننا شغالين بآخر إعدادات ATR/Trailing من البوت الأساسي
 
         if self.position is not None:
             self.manage_open_position()
