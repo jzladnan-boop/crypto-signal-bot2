@@ -29,8 +29,6 @@ import ta
 from flask import Flask, request, jsonify, session, send_from_directory
 from functools import wraps
 from market_regime import MarketRegimeDetector
-from inverse_btc import check_inverse_btc, get_config as get_inverse_config, set_config as set_inverse_config, get_24h_change_pct
-from range_trading_btc import RangeTradingBTC
 from trend_stoch_parallel import TrendStochParallel
 from squeeze_breakout import SqueezeBreakout
 from portfolio_manager import get_portfolio_manager
@@ -40,9 +38,9 @@ _PORTFOLIO_OWNER = "main_bot"
 
 def _get_live_risk_config():
     """
-    يرجع أحدث قيم ATR/Trailing/Breakeven من إعدادات البوت الأساسي الحية —
-    تُمرَّر لاستراتيجية Trend+Stoch الموازية (trend_stoch_parallel.py) عشان
-    تشتغل دايماً بنفس القيم الحية، بدون ما تحتاج إعادة تشغيل عند أي تعديل
+    يرجع أحدث قيم ATR/Trailing من إعدادات البوت الأساسي الحية —
+    تُمرَّر للاستراتيجيات الموازية (trend_stoch_parallel.py، squeeze_breakout.py)
+    عشان تشتغل دايماً بنفس القيم الحية، بدون ما تحتاج إعادة تشغيل عند أي تعديل
     من التطبيق أو تيليغرام.
     """
     with _lock:
@@ -50,8 +48,6 @@ def _get_live_risk_config():
             "atr_multiplier": ATR_MULTIPLIER,
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             "trail_activate_pct": TRAIL_ACTIVATE_PCT,
-            "breakeven_activate_pct": BREAKEVEN_ACTIVATE_PCT,
-            "breakeven_margin_pct": BREAKEVEN_MARGIN_PCT,
         }
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_beta
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
@@ -105,18 +101,8 @@ STOP_LOSS_PCT      = 0.02
 TRAIL_PCT          = 0.01
 TRAIL_ACTIVATE_PCT = 0.01
 
-# ──────────────────────────────────────────────
-# 🛡️ حماية التعادل (Breakeven Stop) — أرضية دائمة تُفعّل قبل التريلينج الكامل
-# لما تربح الصفقة نسبة بسيطة، الستوب ينتقل لسعر الدخول + هامش يغطي العمولة،
-# ويُخزَّن كـ"أرضية" لا يقدر أي حساب لاحق (حتى التريلينج) ينزل تحتها أبداً.
-# هذا يمنع الحالة يلي الستوب بينقفل بالضبط على سعر الدخول (بدون هامش)
-# ويتحول لخسارة بسيطة بعد العمولة والانزلاق عند التنفيذ الفعلي.
-# ──────────────────────────────────────────────
-BREAKEVEN_ACTIVATE_PCT = 0.005   # احتياطي فقط — يُستخدم لو تعذر حساب ATR وقت الفحص
-BREAKEVEN_MARGIN_PCT   = 0.002   # 0.2% فوق سعر الدخول (يغطي عمولة بينانس القياسية 0.1%×2)
-# ⬅️ بدل نسبة ثابتة: تفعيل Breakeven/Trailing بمضاعف ATR الحالي (يتكيف مع تذبذب كل عملة)،
-# مع رجوع للنسبة الثابتة فوق كاحتياطي لو تعذر حساب ATR بلحظة الفحص.
-BREAKEVEN_ACTIVATE_ATR_MULTIPLE = 0.5
+# ⬅️ بدل نسبة ثابتة: تفعيل Trailing بمضاعف ATR الحالي (يتكيف مع تذبذب كل عملة)،
+# مع رجوع للنسبة الثابتة (TRAIL_ACTIVATE_PCT) كاحتياطي لو تعذر حساب ATR بلحظة الفحص.
 TRAIL_ACTIVATE_ATR_MULTIPLE     = 1.0
 
 TRADE_AMOUNT       = 15.0
@@ -253,7 +239,6 @@ STRATEGY_LABELS = {
     "rsi"        : "RSI العادي",
     "stoch_rsi"  : "Stochastic RSI",
     "trend_stoch": "Trend + StochRSI",
-    "inverse_btc": "Inverse BTC 🔄",
 }
 consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
 pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
@@ -284,27 +269,8 @@ BB_FILTER_ENABLED   = False   # لو مفعّل: نشتري بس لو السعر
 BB_LOWER_MARGIN_PCT = 0.01    # هامش القرب المسموح من الحد السفلي (1% فوقه يُعتبر "قريب كفاية")
 
 # ──────────────────────────────────────────────
-# 🔄 إعدادات Inverse BTC (قابلة للتعديل من التطبيق)
-# ──────────────────────────────────────────────
-INVERSE_BTC_ENABLED = False   # 🔘 مطفي افتراضياً — تفعّله من التطبيق أو تيليغرام
-INVERSE_BTC_CONFIG = {
-    "btc_decline_threshold_pct": 3.0,   # BTC لازم ينزل 3% على الأقل
-    "rs_min_threshold_pct": 5.0,        # العملة أقوى من BTC بـ 5%
-    "min_volume_ratio": 1.2,            # فوليوم 1.2× المتوسط
-}
-
-# ──────────────────────────────────────────────
-# 📊 استراتيجية Range Trading BTC — مستقلة تماماً (ملف range_trading_btc.py)
-# صفقات حقيقية بمبلغ ثابت 15 USDT، صفقة وحدة بس بأي لحظة. مطفية افتراضياً —
-# تفعّل/تطفى من تيليغرام (/set_range_trading on|off) أو التطبيق (/api/settings).
-# ──────────────────────────────────────────────
-RANGE_TRADING_ENABLED = False
-RANGE_TRADING_USDT_PER_TRADE = 15.0   # المبلغ الثابت لكل صفقة Range Trading (صفقة وحدة بس بأي لحظة)
-_range_trading_strategy = None   # ⬅️ نسخة RangeTradingBTC الوحيدة — تتنشئ عند تشغيل البوت (main)
-
-# ──────────────────────────────────────────────
 # 📈 استراتيجية Trend + StochRSI الموازية المستقلة (ملف trend_stoch_parallel.py)
-# نفس منطق دخول Trend+Stoch الأصلي + نفس نظام ATR/Breakeven/Trailing الحقيقي،
+# نفس منطق دخول Trend+Stoch الأصلي + نفس نظام ATR/Trailing الحقيقي،
 # بس بصفقة وحدة بمبلغ ثابت 15 USDT، مستقلة كلياً عن حلقة الفحص الرئيسية.
 # مطفية افتراضياً — تفعّل/تطفى من تيليغرام (/set_trend_parallel on|off) أو التطبيق.
 # ──────────────────────────────────────────────
@@ -379,17 +345,6 @@ def load_trades():
                     trade["trailing_active"] = False
                 if "highest_price" not in trade:
                     trade["highest_price"] = trade["entry_price"]
-                if "breakeven_floor" not in trade:
-                    # 🛡️ صفقة قديمة من قبل إضافة حماية التعادل: لو الستوب المحفوظ فعلياً
-                    # أعلى من أو يساوي سعر الدخول (يعني كانت وصلت مرحلة "قفل على الدخول"
-                    # القديمة بدون هامش)، نرقّيها فوراً لأرضية تعادل صحيحة بهامش العمولة،
-                    # بدل ما تضل عالقة عند سعر الدخول الخام بدون حماية فعلية.
-                    trade["breakeven_floor"] = None
-                    if trade.get("stop_loss") and trade["stop_loss"] >= trade["entry_price"]:
-                        floor_price = round(trade["entry_price"] * (1 + BREAKEVEN_MARGIN_PCT), 8)
-                        trade["breakeven_floor"] = floor_price
-                        trade["stop_loss"] = max(trade["stop_loss"], floor_price)
-                        log.info(f"🛡️ ترقية صفقة قديمة {coin} لأرضية تعادل صحيحة: {floor_price}")
                 log.info(
                     f"📂 صفقة محملة: {coin} | دخول: {trade['entry_price']:.4f}$ | "
                     f"ستوب: {trade['stop_loss']:.4f}$ | Trailing: {trade['trailing_active']}"
@@ -452,9 +407,7 @@ def save_settings():
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
-    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
-    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
-    global RANGE_TRADING_ENABLED
+    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     try:
@@ -470,8 +423,6 @@ def save_settings():
                 "current_strategy" : current_strategy,
                 "stop_loss_pct"    : STOP_LOSS_PCT,
                 "trail_activate_pct": TRAIL_ACTIVATE_PCT,
-                "breakeven_activate_pct": BREAKEVEN_ACTIVATE_PCT,
-                "breakeven_margin_pct"  : BREAKEVEN_MARGIN_PCT,
                 "rsi_buy_prev"     : RSI_BUY_PREV,
                 "rsi_buy_curr"     : RSI_BUY_CURR,
                 "atr_period"       : ATR_PERIOD,
@@ -480,9 +431,6 @@ def save_settings():
                 "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
                 "vwap_filter_enabled": VWAP_FILTER_ENABLED,
                 "bb_filter_enabled"  : BB_FILTER_ENABLED,
-                "inverse_btc_enabled": INVERSE_BTC_ENABLED,
-                "inverse_btc_config" : INVERSE_BTC_CONFIG,
-                "range_trading_enabled": RANGE_TRADING_ENABLED,
                 "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
             }, f, ensure_ascii=False, indent=2)
@@ -495,9 +443,7 @@ def load_settings():
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
-    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED, INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
-    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
-    global RANGE_TRADING_ENABLED
+    global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     if not os.path.exists(SETTINGS_FILE):
@@ -523,8 +469,6 @@ def load_settings():
         current_strategy    = s.get("current_strategy", current_strategy)
         STOP_LOSS_PCT       = s.get("stop_loss_pct", STOP_LOSS_PCT)
         TRAIL_ACTIVATE_PCT  = s.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
-        BREAKEVEN_ACTIVATE_PCT = s.get("breakeven_activate_pct", BREAKEVEN_ACTIVATE_PCT)
-        BREAKEVEN_MARGIN_PCT   = s.get("breakeven_margin_pct", BREAKEVEN_MARGIN_PCT)
         RSI_BUY_PREV        = s.get("rsi_buy_prev", RSI_BUY_PREV)
         RSI_BUY_CURR        = s.get("rsi_buy_curr", RSI_BUY_CURR)
         ATR_PERIOD          = s.get("atr_period", ATR_PERIOD)
@@ -533,12 +477,6 @@ def load_settings():
         AUTO_STRATEGY_ENABLED = s.get("auto_strategy_enabled", AUTO_STRATEGY_ENABLED)
         VWAP_FILTER_ENABLED = s.get("vwap_filter_enabled", VWAP_FILTER_ENABLED)
         BB_FILTER_ENABLED   = s.get("bb_filter_enabled", BB_FILTER_ENABLED)
-        INVERSE_BTC_ENABLED = s.get("inverse_btc_enabled", INVERSE_BTC_ENABLED)
-        loaded_inv_config = s.get("inverse_btc_config")
-        if loaded_inv_config:
-            INVERSE_BTC_CONFIG.update(loaded_inv_config)
-            set_inverse_config(**loaded_inv_config)
-        RANGE_TRADING_ENABLED = s.get("range_trading_enabled", RANGE_TRADING_ENABLED)
         TREND_PARALLEL_ENABLED = s.get("trend_parallel_enabled", TREND_PARALLEL_ENABLED)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
@@ -648,7 +586,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
             is_win=(profit > 0),
             pnl=profit,
             slippage_pct=entry_slippage_pct,
-            strategy=current_strategy or "unknown",   # ⬅️ اسم الاستراتيجية الفعّالة وقت الصفقة (rsi/stoch_rsi/trend_stoch/inverse_btc)
+            strategy=current_strategy or "unknown",   # ⬅️ اسم الاستراتيجية الفعّالة وقت الصفقة (rsi/stoch_rsi/trend_stoch)
         )
     except Exception as e:
         log.error(f"❌ تسجيل ذاكرة العملة {symbol}: {e}")
@@ -793,12 +731,9 @@ def telegram_command_listener(client):
     global SYMBOLS, trading_enabled, ma20_enabled, current_interval, current_strategy
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
-    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
-    global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
-    global RANGE_TRADING_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
@@ -1002,28 +937,6 @@ def telegram_command_listener(client):
                         except:
                             send_admin("❌ مثال: /set_activate 0.5")
 
-                    # ── /set_breakeven ─────────────────────────
-                    elif text.startswith("/set_breakeven "):
-                        try:
-                            parts    = text.replace("/set_breakeven ", "").split()
-                            activate = float(parts[0]) / 100
-                            margin   = float(parts[1]) / 100
-                            if activate <= 0 or margin < 0:
-                                send_admin("❌ نقطة التفعيل لازم أكبر من صفر، والهامش أكبر من أو يساوي صفر.")
-                            else:
-                                with _lock:
-                                    BREAKEVEN_ACTIVATE_PCT = activate
-                                    BREAKEVEN_MARGIN_PCT   = margin
-                                save_settings()
-                                send_admin(
-                                    f"✅ حماية التعادل: تفعيل عند {BREAKEVEN_ACTIVATE_PCT*100}% ربح، "
-                                    f"هامش {BREAKEVEN_MARGIN_PCT*100}% فوق سعر الدخول\n"
-                                    f"يعني أول ما تربح الصفقة {BREAKEVEN_ACTIVATE_PCT*100}%، الستوب ينتقل فوراً "
-                                    f"لسعر الدخول + {BREAKEVEN_MARGIN_PCT*100}% (يغطي العمولة)، ولا ينزل تحته أبداً."
-                                )
-                        except:
-                            send_admin("❌ مثال: /set_breakeven 0.5 0.2  (تفعيل 0.5%، هامش 0.2%)")
-
                     # ── /set_rsi_range ────────────────────────
                     elif text.startswith("/set_rsi_range "):
                         try:
@@ -1107,23 +1020,6 @@ def telegram_command_listener(client):
                         else:
                             send_admin("❌ مثال: /set_bb_filter on  أو  /set_bb_filter off")
 
-                    # ── /set_range_trading (تشغيل/إيقاف استراتيجية Range Trading BTC المستقلة) ──
-                    elif text.startswith("/set_range_trading "):
-                        value = text.replace("/set_range_trading ", "").strip().lower()
-                        if value in ("on", "off"):
-                            with _lock:
-                                RANGE_TRADING_ENABLED = (value == "on")
-                            save_settings()
-                            status_txt = "✅ مفعّلة" if RANGE_TRADING_ENABLED else "❌ متوقفة"
-                            send_admin(
-                                f"{status_txt} استراتيجية Range Trading BTC\n"
-                                f"↳ صفقات حقيقية على سلة عملات (BTC/ETH/SOL/XRP/CFX/HEI) بمبلغ {RANGE_TRADING_USDT_PER_TRADE} USDT/صفقة، صفقة وحدة بس عبر كل السلة بأي لحظة"
-                                if RANGE_TRADING_ENABLED else
-                                "❌ تم إيقاف Range Trading BTC — أي صفقة مفتوحة حالياً بتضل مفتوحة لحد ما توقف عادي (وقف خسارة/Trailing)، بس ما رح تنفتح صفقة جديدة"
-                            )
-                        else:
-                            send_admin("❌ مثال: /set_range_trading on  أو  /set_range_trading off")
-
                     # ── /set_trend_parallel (تشغيل/إيقاف استراتيجية Trend+Stoch الموازية المستقلة) ──
                     elif text.startswith("/set_trend_parallel "):
                         value = text.replace("/set_trend_parallel ", "").strip().lower()
@@ -1196,27 +1092,6 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
-                    # ── /range_trading_status ──────────────────────
-                    elif text == "/range_trading_status":
-                        with _lock:
-                            rt_status = "✅ مفعّلة" if RANGE_TRADING_ENABLED else "❌ متوقفة"
-                        pos = _range_trading_strategy.position if _range_trading_strategy else None
-                        if pos:
-                            pos_line = (
-                                f"📍 صفقة مفتوحة: {pos.get('symbol', 'BTCUSDT').replace('USDT','')} | "
-                                f"دخول {pos['entry_price']:.6f} | "
-                                f"وقف خسارة حالي {pos['stop_loss']:.6f} | "
-                                f"Trailing: {'مفعّل' if pos.get('trailing_active') else 'غير مفعّل'}"
-                            )
-                        else:
-                            pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
-                        send_admin(
-                            f"📊 <b>Range Trading (سلة عملات)</b>\n"
-                            f"الحالة: {rt_status}\n"
-                            f"المبلغ لكل صفقة: {RANGE_TRADING_USDT_PER_TRADE} USDT\n"
-                            f"{pos_line}"
-                        )
-
                     # ── /filters_status ──────────────────────────
                     elif text == "/filters_status":
                         with _lock:
@@ -1230,53 +1105,6 @@ def telegram_command_listener(client):
                             f"↳ لو مفعّل: نشتري بس لو السعر قريب من الحد السفلي (ارتداد حقيقي من قاع، مو نزول مستمر)\n\n"
                             f"🏆 ترتيب الزخم (Momentum Score): شغال دائماً — لو فيه أكثر من مرشح شراء بنفس دورة الفحص، "
                             f"البوت يشتري الأقوى أولاً (فوليوم أعلى + حركة سعر أوضح)."
-                        )
-
-                    # ── /set_inverse_btc ─────────────────────────
-                    elif text.startswith("/set_inverse_btc "):
-                        value = text.replace("/set_inverse_btc ", "").strip().lower()
-                        if value in ("on", "off"):
-                            with _lock:
-                                INVERSE_BTC_ENABLED = (value == "on")
-                            save_settings()
-                            status_txt = "✅ مفعّل" if INVERSE_BTC_ENABLED else "❌ مطفي"
-                            send_admin(f"{status_txt} استراتيجية Inverse BTC")
-                        else:
-                            send_admin("❌ مثال: /set_inverse_btc on  أو  /set_inverse_btc off")
-
-                    # ── /set_inverse_config ──────────────────────
-                    elif text.startswith("/set_inverse_config "):
-                        try:
-                            parts = text.replace("/set_inverse_config ", "").strip().split()
-                            key = parts[0]
-                            val = float(parts[1])
-                            valid_keys = ["btc_decline_threshold_pct", "rs_min_threshold_pct", "min_volume_ratio"]
-                            if key not in valid_keys:
-                                send_admin(f"❌ المفتاح غير صحيح. الصح: {', '.join(valid_keys)}")
-                            else:
-                                with _lock:
-                                    INVERSE_BTC_CONFIG[key] = val
-                                    set_inverse_config(**{key: val})
-                                save_settings()
-                                send_admin(f"✅ Inverse BTC — {key} = {val}")
-                        except Exception as e:
-                            send_admin(f"❌ خطأ: {e}\nمثال: /set_inverse_config btc_decline_threshold_pct 3.0")
-
-                    # ── /inverse_status ──────────────────────────
-                    elif text == "/inverse_status":
-                        with _lock:
-                            enabled = INVERSE_BTC_ENABLED
-                            cfg = dict(INVERSE_BTC_CONFIG)
-                        status_txt = "✅ مفعّل" if enabled else "❌ مطفي"
-                        send_admin(
-                            f"🔄 <b>Inverse BTC</b>\n\n"
-                            f"الحالة: {status_txt}\n\n"
-                            f"الإعدادات:\n"
-                            f"📉 حد نزول BTC: {cfg['btc_decline_threshold_pct']}%\n"
-                            f"💪 قوة نسبية min: {cfg['rs_min_threshold_pct']}%\n"
-                            f"🔊 فوليوم min: {cfg['min_volume_ratio']}×\n\n"
-                            f"المنطق: لما BTC ينزل {cfg['btc_decline_threshold_pct']}% أو أكثر، "
-                            f"البوت يبحث عن عملات أقوى من BTC بـ {cfg['rs_min_threshold_pct']}% على الأقل."
                         )
 
                     # ── /atr_status ─────────────────────────────
@@ -1435,7 +1263,7 @@ def telegram_command_listener(client):
                     # ── /set_strategy ─────────────────────────
                     elif text.startswith("/set_strategy "):
                         strategy = text.replace("/set_strategy ", "").strip().lower()
-                        if strategy in ("rsi", "stoch_rsi", "trend_stoch", "inverse_btc"):
+                        if strategy in ("rsi", "stoch_rsi", "trend_stoch"):
                             with _lock:
                                 current_strategy = strategy
                                 auto_on = AUTO_STRATEGY_ENABLED
@@ -1449,14 +1277,13 @@ def telegram_command_listener(client):
                                 "rsi"        : "RSI العادي (ارتداد فوق 30)",
                                 "stoch_rsi"  : "Stochastic RSI (تقاطع K فوق D واختراق 20)",
                                 "trend_stoch": "Trend + StochRSI (تأكيد اتجاه 4 ساعات + فوليوم)",
-                                "inverse_btc": "Inverse BTC (شراء العملات اللي بتقاوم نزول BTC)",
                             }
                             msg = f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}"
                             if auto_on:
                                 msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بعد فترة التبريد (20 دقيقة) لو حالة السوق تغيّرت. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
                             send_admin(msg)
                         else:
-                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch\n/set_strategy inverse_btc")
+                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch")
 
                     # ── /set_auto_strategy ─────────────────────
                     elif text.startswith("/set_auto_strategy "):
@@ -1512,8 +1339,6 @@ def telegram_command_listener(client):
                             trail            = TRAIL_PCT * 100
                             stoploss         = STOP_LOSS_PCT * 100
                             activate         = TRAIL_ACTIVATE_PCT * 100
-                            be_activate      = BREAKEVEN_ACTIVATE_PCT * 100
-                            be_margin        = BREAKEVEN_MARGIN_PCT * 100
                             rsi_prev         = RSI_BUY_PREV
                             rsi_curr         = RSI_BUY_CURR
                             atr_period_val   = ATR_PERIOD
@@ -1522,8 +1347,6 @@ def telegram_command_listener(client):
                             auto_strategy_status = "✅ مفعّل" if AUTO_STRATEGY_ENABLED else "❌ مطفي"
                             vwap_status_cfg  = "✅" if VWAP_FILTER_ENABLED else "❌"
                             bb_status_cfg    = "✅" if BB_FILTER_ENABLED else "❌"
-                            inv_status_cfg   = "✅" if INVERSE_BTC_ENABLED else "❌"
-                            inv_cfg = dict(INVERSE_BTC_CONFIG)
                         send_admin(
                             f"⚙️ <b>الإعدادات الحالية</b>\n\n"
                             f"📊 الاستراتيجية: {strategy_label}\n"
@@ -1534,12 +1357,10 @@ def telegram_command_listener(client):
                             f"💼 أقصى صفقات: {max_tr}\n"
                             f"🛑 حد الخسارة الاحتياطي (Stop Loss %): {stoploss}%\n"
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
-                            f"🛡️ حماية التعادل: تفعيل عند {be_activate}% ربح | هامش {be_margin}% فوق الدخول\n"
                             f"🔍 مساحة Trailing الاحتياطية: {trail}%\n"
                             f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}\n"
                             f"📐 ATR: فترة {atr_period_val} شمعة | مضاعف الستوب {atr_mult_val}x | مضاعف Trailing {trail_atr_val}x\n"
-                            f"📊 فلاتر تأكيد: VWAP {vwap_status_cfg} | Bollinger {bb_status_cfg}\n"
-                            f"🔄 Inverse BTC: {inv_status_cfg} | نزول BTC: {inv_cfg['btc_decline_threshold_pct']}% | قوة نسبية: {inv_cfg['rs_min_threshold_pct']}%"
+                            f"📊 فلاتر تأكيد: VWAP {vwap_status_cfg} | Bollinger {bb_status_cfg}"
                         )
 
                     # ── /push_status ──────────────────────────
@@ -1584,7 +1405,6 @@ def telegram_command_listener(client):
                             "/set_trail 1.5 — مساحة تنفس Trailing Stop (كلما كبرت، أعطيت العملة مجال أكبر)\n"
                             "/set_stoploss 1.5 — حد الخسارة الثابت قبل تفعيل Trailing\n"
                             "/set_activate 0.5 — نسبة الربح المطلوبة لتفعيل Trailing Stop\n"
-                            "/set_breakeven 0.5 0.2 — تفعيل حماية التعادل عند 0.5% ربح، بهامش 0.2% فوق الدخول\n"
                             "/set_rsi_range 20 38 — نطاق RSI للمراقبة المكثفة\n"
                             "/set_interval 30 — الفريم الزمني للشموع (15/30/60/240 دقيقة)\n"
                             "/set_buy_rsi 25 30 — شرط الشراء: RSI السابق أصغر من 25 والحالي أكبر من 30\n\n"
@@ -1601,21 +1421,10 @@ def telegram_command_listener(client):
                             "/set_auto_strategy on — تفعيل التبديل التلقائي حسب حالة السوق\n"
                             "/set_auto_strategy off — إيقافه (يرجع كل شي يدوي)\n"
                             "/auto_strategy_status — عرض الحالة والمنطق الحالي\n\n"
-                            "<b>🔄 Inverse BTC:</b>\n"
-                            "/set_strategy inverse_btc — تفعيل استراتيجية عكس BTC\n"
-                            "/set_inverse_btc on — تفعيل/إطفاء الاستراتيجية\n"
-                            "/set_inverse_config btc_decline_threshold_pct 3.0 — تعديل حد نزول BTC\n"
-                            "/set_inverse_config rs_min_threshold_pct 5.0 — تعديل الحد الأدنى للقوة النسبية\n"
-                            "/set_inverse_config min_volume_ratio 1.2 — تعديل حد الفوليوم\n"
-                            "/inverse_status — عرض إعدادات Inverse BTC\n\n"
                             "<b>📐 فلاتر تأكيد إضافية:</b>\n"
                             "/set_vwap_filter on — الشراء يشترط السعر فوق VWAP\n"
                             "/set_bb_filter on — الشراء يشترط قرب السعر من حد بولينجر السفلي\n"
                             "/filters_status — عرض حالة الفلاتر وشرح ترتيب الزخم\n\n"
-                            "<b>📊 Range Trading BTC (استراتيجية موازية مستقلة):</b>\n"
-                            "/set_range_trading on — تشغيل (صفقات حقيقية 15 USDT، سلة BTC/ETH/SOL/XRP/CFX/HEI، فريم 30 دقيقة)\n"
-                            "/set_range_trading off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
-                            "/range_trading_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
                             "<b>📈 Trend+Stoch الموازية (استراتيجية موازية مستقلة):</b>\n"
                             "/set_trend_parallel on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم ساعة)\n"
                             "/set_trend_parallel off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
@@ -1672,46 +1481,17 @@ def scan_all_symbols(client):
     with _lock:
         strategy = current_strategy
 
-    if strategy == "inverse_btc":
-        # 🔄 فحص خفيف لـ Inverse BTC: العملات الصاعدة رغم نزول BTC
-        try:
-            btc_change = get_24h_change_pct(client, "BTCUSDT")
-            if btc_change is None or btc_change > -3.0:
-                # BTC ما نازل 3%+ — لا داعي للمراقبة
-                with _lock:
-                    watch_list = set()
-                log.info("🔄 Inverse BTC: BTC ما نازل 3%+ — إفراغ قائمة المراقبة")
-                return
-
-            # جلب كل التغيرات بطلب واحد
-            tickers = client.get_ticker()
-            ticker_map = {t["symbol"]: float(t.get("priceChangePercent", 0)) for t in tickers}
-
-            for symbol in SYMBOLS:
-                if symbol in open_trades:
-                    continue
-                change_pct = ticker_map.get(symbol)
-                if change_pct is None:
-                    continue
-                # مرشح خفيف: العملة صاعدة 1%+ (الفحص المكثف بيفحص 5%+)
-                if change_pct >= 1.0:
-                    new_watch.add(symbol)
-
-            log.info(f"🔄 مرشحون Inverse BTC: {len(new_watch)} عملة صاعدة رغم نزول BTC {btc_change:.1f}%")
-        except Exception as e:
-            log.error(f"❌ فحص Inverse BTC: {e}")
-    else:
-        log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
-        for symbol in list(SYMBOLS):
-            if is_api_blocked():
-                log.warning("🚦 تم اكتشاف حظر أثناء الفحص — إيقاف باقي الدورة الحالية")
-                break
-            if symbol in open_trades:
-                continue
-            rsi = get_rsi_quick(client, symbol)
-            if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
-                new_watch.add(symbol)
-            time.sleep(0.35)
+    log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
+    for symbol in list(SYMBOLS):
+        if is_api_blocked():
+            log.warning("🚦 تم اكتشاف حظر أثناء الفحص — إيقاف باقي الدورة الحالية")
+            break
+        if symbol in open_trades:
+            continue
+        rsi = get_rsi_quick(client, symbol)
+        if rsi is not None and RSI_WATCH_LOW <= rsi <= RSI_WATCH_HIGH:
+            new_watch.add(symbol)
+        time.sleep(0.35)
 
     added = new_watch - watch_list
     if added:
@@ -2376,15 +2156,12 @@ def api_trades():
     result       = []
     trades_copy  = dict(open_trades)
 
-    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Range Trading BTC / Trend+Stoch)
+    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Trend+Stoch / Squeeze Breakout)
     # لنفس القائمة، حتى تظهر بشاشة "الصفقات" العادية متل أي صفقة تانية.
-    range_pos = _range_trading_strategy.position if _range_trading_strategy else None
     trend_pos = _trend_parallel_strategy.position if _trend_parallel_strategy else None
     squeeze_pos = _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None
 
     extra_symbols = set()
-    if range_pos:
-        extra_symbols.add(range_pos.get("symbol", "BTCUSDT"))
     if trend_pos:
         extra_symbols.add(trend_pos["symbol"])
     if squeeze_pos:
@@ -2406,20 +2183,6 @@ def api_trades():
             "stop_loss": t.get("stop_loss"),
             "pnl_pct": pnl_pct,
             "strategy": t.get("strategy", current_strategy),
-        })
-
-    if range_pos:
-        symbol = range_pos.get("symbol", "BTCUSDT")
-        current_price = all_prices.get(symbol, range_pos["entry_price"])
-        pnl_pct = round((current_price - range_pos["entry_price"]) / range_pos["entry_price"] * 100, 2)
-        result.append({
-            "symbol": symbol,
-            "entry_price": range_pos["entry_price"],
-            "current_price": current_price,
-            "trailing_active": range_pos.get("trailing_active", False),
-            "stop_loss": range_pos.get("stop_loss"),
-            "pnl_pct": pnl_pct,
-            "strategy": "range_trading_btc",
         })
 
     if trend_pos:
@@ -2457,7 +2220,7 @@ def api_trades():
 def load_parallel_strategies_history():
     """
     يقرأ سجلات الصفقات المغلقة من الاستراتيجيات الموازية المستقلة
-    (Range Trading و Trend+Stoch الموازية و Squeeze Breakout) — كل وحدة إلها
+    (Trend+Stoch الموازية و Squeeze Breakout) — كل وحدة إلها
     ملف history خاص فيها، منفصل تماماً عن profit_log تبع البوت الأساسي —
     ويحوّلهم لنفس شكل السجل العادي (symbol/entry_price/exit_price/profit/
     pct/reason/time) حتى يظهروا بشاشة "الصفقات > السجل" بالتطبيق متل أي
@@ -2465,7 +2228,6 @@ def load_parallel_strategies_history():
     """
     records = []
     sources = [
-        (os.path.join(DATA_DIR, "range_trading_history.json"), "range_trading_btc"),
         (os.path.join(DATA_DIR, "trend_stoch_history.json"), "trend_stoch_parallel"),
         (os.path.join(DATA_DIR, "squeeze_breakout_history.json"), "squeeze_breakout"),
     ]
@@ -2526,7 +2288,6 @@ def api_history():
 @login_required
 def api_get_settings():
     with _lock:
-        inv_cfg = dict(INVERSE_BTC_CONFIG)
         return jsonify({
             "trade_amount": TRADE_AMOUNT,
             "max_trades": MAX_TRADES,
@@ -2541,8 +2302,6 @@ def api_get_settings():
             "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
             "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
-            "breakeven_activate_pct": round(BREAKEVEN_ACTIVATE_PCT * 100, 4),
-            "breakeven_margin_pct": round(BREAKEVEN_MARGIN_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
             "rsi_buy_curr": RSI_BUY_CURR,
             "atr_period": ATR_PERIOD,
@@ -2550,18 +2309,7 @@ def api_get_settings():
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             "vwap_filter_enabled": VWAP_FILTER_ENABLED,
             "bb_filter_enabled": BB_FILTER_ENABLED,
-            "inverse_btc_enabled": current_strategy == "inverse_btc",
             "current_strategy": current_strategy,
-            # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
-            "inverse_btc_threshold": inv_cfg.get("btc_decline_threshold_pct", 3.0),
-            "inverse_btc_rs_min": inv_cfg.get("rs_min_threshold_pct", 5.0),
-            "inverse_btc_volume_min": inv_cfg.get("min_volume_ratio", 1.2),
-            # ✅ للتوافق مع النسخ القديمة من التطبيق
-            "inverse_btc_config": inv_cfg,
-            # ✅ Range Trading BTC — استراتيجية موازية مستقلة (صفقات حقيقية BTC فقط)
-            "range_trading_enabled": RANGE_TRADING_ENABLED,
-            "range_trading_usdt_per_trade": RANGE_TRADING_USDT_PER_TRADE,
-            "range_trading_position": _range_trading_strategy.position if _range_trading_strategy else None,
             # ✅ Trend+Stoch الموازية — استراتيجية موازية مستقلة (صفقات حقيقية، سلة العملات، فريم ساعة)
             "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
             "trend_parallel_usdt_per_trade": TREND_PARALLEL_USDT_PER_TRADE,
@@ -2581,9 +2329,6 @@ def api_set_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
-    global INVERSE_BTC_ENABLED, INVERSE_BTC_CONFIG
-    global BREAKEVEN_ACTIVATE_PCT, BREAKEVEN_MARGIN_PCT
-    global RANGE_TRADING_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     data = request.get_json(silent=True) or {}
@@ -2629,12 +2374,9 @@ def api_set_settings():
             current_strategy = "stoch_rsi"
         if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
             current_strategy = "trend_stoch"
-        if "inverse_btc_enabled" in data and data["inverse_btc_enabled"]:
-            current_strategy = "inverse_btc"
 
         # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
-        # (بما فيها inverse_btc — كانت ناقصة من القائمة، وهذا سبب "الزرار يضل مثبت")
-        if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled", "inverse_btc_enabled")):
+        if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled")):
             if _regime_detector:
                 _regime_detector.current_strategy = current_strategy
                 _regime_detector.last_switch_time = time.time()
@@ -2651,15 +2393,6 @@ def api_set_settings():
         if "activate_trailing_pct" in data:
             v = float(data["activate_trailing_pct"]) / 100
             if v >= 0: TRAIL_ACTIVATE_PCT = v
-
-        if "breakeven_activate_pct" in data:
-            v = float(data["breakeven_activate_pct"]) / 100
-            if v > 0: BREAKEVEN_ACTIVATE_PCT = v
-            else: errors.append("breakeven_activate_pct لازم أكبر من صفر")
-        if "breakeven_margin_pct" in data:
-            v = float(data["breakeven_margin_pct"]) / 100
-            if v >= 0: BREAKEVEN_MARGIN_PCT = v
-            else: errors.append("breakeven_margin_pct لازم صفر أو أكبر")
 
         if "rsi_buy_prev" in data or "rsi_buy_curr" in data:
             new_prev = float(data["rsi_buy_prev"]) if "rsi_buy_prev" in data else RSI_BUY_PREV
@@ -2689,31 +2422,6 @@ def api_set_settings():
             VWAP_FILTER_ENABLED = bool(data["vwap_filter_enabled"])
         if "bb_filter_enabled" in data:
             BB_FILTER_ENABLED = bool(data["bb_filter_enabled"])
-        if "inverse_btc_enabled" in data and data["inverse_btc_enabled"]:
-            current_strategy = "inverse_btc"
-
-        # ✅ إعدادات Inverse BTC منفصلة (سهلة على التطبيق)
-        if "inverse_btc_threshold" in data:
-            INVERSE_BTC_CONFIG["btc_decline_threshold_pct"] = float(data["inverse_btc_threshold"])
-        if "inverse_btc_rs_min" in data:
-            INVERSE_BTC_CONFIG["rs_min_threshold_pct"] = float(data["inverse_btc_rs_min"])
-        if "inverse_btc_volume_min" in data:
-            INVERSE_BTC_CONFIG["min_volume_ratio"] = float(data["inverse_btc_volume_min"])
-
-        # ✅ للتوافق مع النسخ القديمة من التطبيق
-        if "inverse_btc_config" in data:
-            inv_cfg = data["inverse_btc_config"]
-            if isinstance(inv_cfg, dict):
-                for key, val in inv_cfg.items():
-                    if key in INVERSE_BTC_CONFIG:
-                        INVERSE_BTC_CONFIG[key] = float(val)
-
-        # ✅ نزامن إعدادات inverse_btc مع المكتبة
-        set_inverse_config(**INVERSE_BTC_CONFIG)
-
-        # ✅ Range Trading BTC — تشغيل/إيقاف من التطبيق (صفقة حقيقية بمبلغ ثابت مسبقاً)
-        if "range_trading_enabled" in data:
-            RANGE_TRADING_ENABLED = bool(data["range_trading_enabled"])
 
         # ✅ Trend+Stoch الموازية — تشغيل/إيقاف من التطبيق
         if "trend_parallel_enabled" in data:
@@ -2739,7 +2447,6 @@ def api_strategies():
             "rsi_enabled": current_strategy == "rsi",
             "stochastic_enabled": current_strategy == "stoch_rsi",
             "trend_stoch_enabled": current_strategy == "trend_stoch",
-            "inverse_btc_enabled": current_strategy == "inverse_btc",
             "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
             "strategy_label": STRATEGY_LABELS.get(current_strategy, current_strategy),
         })
@@ -2818,10 +2525,7 @@ def api_close_trade():
     # نغلقها من نفس الاستراتيجية يلي فاتحتها — مش عبر close_trade() العادية،
     # لأنها مش مسجّلة أصلاً بـ open_trades.
     if full_symbol not in open_trades:
-        if _range_trading_strategy and _range_trading_strategy.position and \
-                _range_trading_strategy.position.get("symbol", "BTCUSDT") == full_symbol:
-            sell_price, status = _range_trading_strategy.close_manually()
-        elif _trend_parallel_strategy and _trend_parallel_strategy.position and \
+        if _trend_parallel_strategy and _trend_parallel_strategy.position and \
                 _trend_parallel_strategy.position["symbol"] == full_symbol:
             sell_price, status = _trend_parallel_strategy.close_manually()
         elif _squeeze_breakout_strategy and _squeeze_breakout_strategy.position and \
@@ -2919,7 +2623,7 @@ def start_dashboard():
 def run_bot():
     global consecutive_losses, pause_until, trading_enabled
     global _binance_client, _regime_detector, _last_correlation_update
-    global current_strategy, INVERSE_BTC_ENABLED
+    global current_strategy
 
     os.makedirs(DATA_DIR, exist_ok=True)   # 📁 تأكد إن مجلد البيانات (Volume) موجود
     log.info(f"📁 مجلد البيانات: {DATA_DIR}")
@@ -2933,16 +2637,8 @@ def run_bot():
     load_circuit_state()   # 🛑 استرجاع حالة التوقف التلقائي لو موجودة
     load_settings()        # ⚙️ استرجاع الإعدادات المحفوظة (حجم الصفقة، الاستراتيجية، ...) لو موجودة
 
-    # تزامن إعدادات Inverse BTC مع المكتبة (فرض القيم الصحيحة)
-    set_inverse_config(**INVERSE_BTC_CONFIG)
-
     # 🧠 إنشاء كاشف حالة السوق (يُستخدم فقط لو AUTO_STRATEGY_ENABLED مفعّل)
     _regime_detector = MarketRegimeDetector(client, cooldown_minutes=20)   # ⬅️ بطلب المستخدم: كانت 45، خُفّفت لـ 20 دقيقة
-    # تفعيل/إطفاء Inverse BTC بالتبديل التلقائي حسب الإعدادات المحفوظة
-    _regime_detector.set_inverse_btc_enabled(
-        INVERSE_BTC_ENABLED,
-        INVERSE_BTC_CONFIG.get("btc_decline_threshold_pct", 3.0) / 100.0
-    )
 
     try:
         log.info("🔍 جاري مطابقة وتصفية القائمة مع أسواق الـ Spot الرسمية...")
@@ -2966,31 +2662,12 @@ def run_bot():
     dashboard_thread = threading.Thread(target=start_dashboard, daemon=True)
     dashboard_thread.start()
 
-    # ── 📊 Range Trading BTC — Thread مستقل تماماً عن حلقة الفحص الرئيسية ──
-    global _range_trading_strategy
-    _range_trading_strategy = RangeTradingBTC(
-        client,
-        notify_fn=send_telegram,
-        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing/Breakeven حية من إعدادات البوت الأساسي
-        usdt_per_trade=RANGE_TRADING_USDT_PER_TRADE,
-        live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ RANGE_TRADING_ENABLED (مطفي افتراضياً)
-        state_file=os.path.join(DATA_DIR, "range_trading_state.json"),
-        history_file=os.path.join(DATA_DIR, "range_trading_history.json"),
-        coin_memory_db_path=COIN_MEMORY_FILE,   # ⬅️ نفس قاعدة الذاكرة الموحّدة يلي البوت الأساسي يكتب فيها
-    )
-    range_trading_thread = threading.Thread(
-        target=_range_trading_strategy.run,
-        kwargs={"poll_seconds": 1800, "is_enabled_fn": lambda: RANGE_TRADING_ENABLED},
-        daemon=True,
-    )
-    range_trading_thread.start()
-
-    # ── 📈 Trend+Stoch الموازية — Thread مستقل تماماً كمان ──
+    # ── 📈 Trend+Stoch الموازية — Thread مستقل تماماً ──
     global _trend_parallel_strategy
     _trend_parallel_strategy = TrendStochParallel(
         client,
         notify_fn=send_telegram,
-        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing/Breakeven حية من إعدادات البوت الأساسي
+        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing حية من إعدادات البوت الأساسي
         symbols_fn=lambda: list(SYMBOLS),  # ⬅️ بطلب المستخدم: تفحص نفس الـ144 عملة المعتمدة، مش كل أزواج USDT ببينانس
         usdt_per_trade=TREND_PARALLEL_USDT_PER_TRADE,
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ TREND_PARALLEL_ENABLED (مطفي افتراضياً)
@@ -3010,7 +2687,7 @@ def run_bot():
     _squeeze_breakout_strategy = SqueezeBreakout(
         client,
         notify_fn=send_telegram,
-        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing/Breakeven حية من إعدادات البوت الأساسي
+        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing حية من إعدادات البوت الأساسي
         symbols_fn=lambda: list(SYMBOLS),  # ⬅️ نفس الـ144 عملة المعتمدة
         usdt_per_trade=SQUEEZE_BREAKOUT_USDT_PER_TRADE,
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ SQUEEZE_BREAKOUT_ENABLED (مطفي افتراضياً)
@@ -3065,16 +2742,6 @@ def run_bot():
             # 🧠 فحص حالة السوق وتبديل الاستراتيجية تلقائياً (لو مفعّل)
             with _lock:
                 auto_on = AUTO_STRATEGY_ENABLED
-                inv_cfg = dict(INVERSE_BTC_CONFIG)
-            # 🧠 نزامن حالة Inverse BTC بالكاشف — تلقائي حسب الاستراتيجية الحالية
-            inv_enabled = (current_strategy == "inverse_btc")
-            INVERSE_BTC_ENABLED = inv_enabled
-            new_threshold = inv_cfg.get("btc_decline_threshold_pct", 3.0) / 100.0
-            if _regime_detector and (
-                _regime_detector.inverse_btc_enabled != inv_enabled
-                or abs(_regime_detector.inverse_btc_decline_threshold - new_threshold) > 1e-9
-            ):
-                _regime_detector.set_inverse_btc_enabled(inv_enabled, new_threshold)
             if auto_on and _regime_detector and (now - last_regime_check >= AUTO_STRATEGY_INTERVAL):
                 last_regime_check = now
                 try:
@@ -3135,37 +2802,14 @@ def run_bot():
                     if fresh_atr:
                         save_trades()
 
-                    # ⬅️ تحسين 2: نقاط تفعيل Breakeven/Trailing بمضاعف ATR بدل نسبة ثابتة —
+                    # ⬅️ تحسين: نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة —
                     # تتكيف تلقائياً مع تذبذب كل عملة، مع رجوع للنسبة الثابتة كاحتياطي فقط
                     # لو تعذر حساب ATR بلحظة الفحص.
                     if atr_val:
-                        breakeven_atr_multiple = trade.get("breakeven_activate_atr_multiple", BREAKEVEN_ACTIVATE_ATR_MULTIPLE)
                         trail_atr_multiple     = trade.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
-                        breakeven_trigger_price = trade["entry_price"] + (breakeven_atr_multiple * atr_val)
                         trail_trigger_price     = trade["entry_price"] + (trail_atr_multiple * atr_val)
                     else:
-                        breakeven_trigger_price = trade["entry_price"] * (1 + trade.get("breakeven_activate_pct", BREAKEVEN_ACTIVATE_PCT))
                         trail_trigger_price     = trade["entry_price"] * (1 + trade.get("trail_activate_pct", TRAIL_ACTIVATE_PCT))
-
-                    # 🛡️ مرحلة حماية التعادل (Breakeven): تُفعّل بربح بسيط
-                    # قبل التريلينج الكامل بكتير. الستوب ينتقل لسعر الدخول + هامش يغطي العمولة،
-                    # ويُخزَّن كـ"أرضية" (breakeven_floor) بالصفقة — لا يقدر أي حساب لاحق (حتى
-                    # التريلينج نفسه لو مسافة ATR أوسع من الربح الحالي) ينزل تحتها أبداً طول عمر الصفقة.
-                    # هذا يمنع حالة "الستوب بينقفل بالضبط على سعر الدخول الخام (بدون هامش)"
-                    # يلي كانت بتتحول لخسارة بسيطة بعد العمولة والانزلاق عند التنفيذ الفعلي.
-                    if trade.get("breakeven_floor") is None:
-                        breakeven_margin_pct   = trade.get("breakeven_margin_pct", BREAKEVEN_MARGIN_PCT)
-                        if price >= breakeven_trigger_price:
-                            floor_price = round(trade["entry_price"] * (1 + breakeven_margin_pct), 8)
-                            trade["breakeven_floor"] = floor_price
-                            # الستوب ينتقل فوراً للأرضية الجديدة، بس فقط لو هيك بيرفعه (ما ينزل الستوب أبداً)
-                            if floor_price > trade["stop_loss"]:
-                                trade["stop_loss"] = floor_price
-                            log.info(f"🛡️ حماية تعادل مفعّلة لـ {coin} | أرضية: {floor_price} (دخول + هامش عمولة)")
-                            save_trades()
-
-                    # الأرضية الفعّالة لأي حساب ستوب لاحق: أرضية التعادل لو اتفعّلت، وإلا سعر الدخول الخام
-                    stop_floor = trade.get("breakeven_floor") or trade["entry_price"]
 
                     if not trade["trailing_active"]:
                         # 🧠 لو الصفقة دخلت بوضع Strict Mode (عملة ذات تاريخ ضعيف بذاكرة العملات)،
@@ -3173,17 +2817,14 @@ def run_bot():
                         if price >= trail_trigger_price:
                             trade["trailing_active"] = True
                             trade["highest_price"]   = price
-                            # ✅ الستوب وقت تفعيل التريلينج ما ينزل تحت أرضية التعادل (دخول+هامش)،
-                            # حتى لو مسافة الـ ATR كانت أوسع من الربح الحالي وقت التفعيل.
-                            trade["stop_loss"]       = max(compute_trail_stop(price, trade), stop_floor)
-                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']} (محمي عند {('أرضية التعادل' if trade.get('breakeven_floor') else 'سعر الدخول')} كحد أدنى)")
+                            trade["stop_loss"]       = compute_trail_stop(price, trade)
+                            log.info(f"🎯 Trailing مفعّل لـ {coin} | ستوب: {trade['stop_loss']}")
                             save_trades()
 
                     if trade["trailing_active"]:
                         if price > trade["highest_price"]:
                             trade["highest_price"] = price
-                            # ✅ نفس الحماية: الستوب بعد التفعيل ما ينزل تحت أرضية التعادل أبداً
-                            trade["stop_loss"]     = max(compute_trail_stop(price, trade), stop_floor)
+                            trade["stop_loss"]     = compute_trail_stop(price, trade)
                             save_trades()
                         elif price <= trade["stop_loss"]:
                             sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
@@ -3331,21 +2972,6 @@ def run_bot():
                             )
                             candidates.append((trend_sig.get("momentum_score", 0.0), symbol, trend_sig["price"], trend_sig.get("atr"), signal_info))
 
-                    # ── استراتيجية Inverse BTC ──────────────────
-                    elif strategy == "inverse_btc":
-                        inv_sig = check_inverse_btc(client, symbol)
-                        if not inv_sig:
-                            time.sleep(0.2)
-                            continue
-                        # كل الشروط اتفحصت جوا check_inverse_btc
-                        buy_signal = True
-                        signal_info = inv_sig["signal_info"]
-                        price = inv_sig["price"]
-                        atr_value = inv_sig.get("atr")
-                        # نستخدم نسبة صعود العملة الفعلية كـ momentum score للترتيب
-                        momentum = inv_sig.get("coin_return_pct", 0.0) / 100.0
-                        candidates.append((momentum, symbol, price, atr_value, signal_info))
-
                     else:
                         time.sleep(0.2)
                         continue
@@ -3401,8 +3027,8 @@ def run_bot():
                             continue
 
                         if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):   # ✅ RESERVE_USDT = 0.0 الآن، أي بدون احتياطي جانبي
-                            # 🔐 حجز العملة قبل الشراء — لو استراتيجية موازية (Range Trading أو
-                            # Trend+Stoch) حاجزاها حالياً، نتراجع ونكمل على عملة تانية بدل ما نتضارب.
+                            # 🔐 حجز العملة قبل الشراء — لو استراتيجية موازية (Trend+Stoch أو
+                            # Squeeze Breakout) حاجزاها حالياً، نتراجع ونكمل على عملة تانية بدل ما نتضارب.
                             if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
                                 watch_list.discard(symbol)
                                 continue
@@ -3412,7 +3038,6 @@ def run_bot():
                             if res:
                                 res["trailing_active"] = False
                                 res["highest_price"]   = res["entry_price"]
-                                res["breakeven_floor"]  = None
                                 res["strict_mode"]     = is_strict
 
                                 # 📐 صمام أمان ATR/SL: مرتبط بحالة السوق (BULL/BEAR/SIDEWAYS)، مع سقف
@@ -3451,13 +3076,6 @@ def run_bot():
                                 res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
                                 # ⬅️ نفس المضاعفة، بس بمصطلح مضاعف ATR (يُستخدم أولوية لو ATR متاح وقت الفحص)
                                 res["trail_activate_atr_multiple"] = round(TRAIL_ACTIVATE_ATR_MULTIPLE * tp_multiplier, 4)
-
-                                # 🛡️ قفل إعدادات حماية التعادل الحالية وقت الشراء بالصفقة نفسها،
-                                # عشان أي تعديل لاحق على الإعدادات العامة ما يأثر على صفقة مفتوحة أصلاً
-                                with _lock:
-                                    res["breakeven_activate_pct"] = BREAKEVEN_ACTIVATE_PCT
-                                    res["breakeven_margin_pct"]   = BREAKEVEN_MARGIN_PCT
-                                    res["breakeven_activate_atr_multiple"] = BREAKEVEN_ACTIVATE_ATR_MULTIPLE
 
                                 open_trades[symbol]    = res
                                 save_trades()
