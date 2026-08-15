@@ -17,11 +17,11 @@
 3) حد أمان ضد مطاردة القمة: السعر الحالي ما يكون ابتعد أكتر من 3% عن سعر آخر
    شمعة كانت بوضع انكماش (يعني نمسك أول لحظات الانفجار، مش بعد ما يركض بعيد).
 
-4) الحماية بعد الشراء: نفس نظام البوت الحقيقي بالضبط (ATR Stop Loss + Breakeven
-   + Trailing) — زي باقي الاستراتيجيات الموازية، بلا تكرار أو اختراع نظام جديد.
+4) الحماية بعد الشراء: نفس نظام البوت الحقيقي بالضبط (ATR Stop Loss + Trailing)
+   — زي باقي الاستراتيجيات الموازية، بلا تكرار أو اختراع نظام جديد.
 
 ⚠️ بدون أي LLM أو تحليل نصي — رياضيات بحتة قابلة للحساب الفوري على آلاف العملات.
-⚠️ استقلالية "المشتركات المتغيّرة": نفس مبدأ range_trading_btc.py و
+⚠️ استقلالية "المشتركات المتغيّرة": نفس مبدأ
 trend_stoch_parallel.py بالضبط — PortfolioManager لمنع تضارب الشراء، ATRGuard/
 MarketRegimeDetector كأدوات حساب بلا حالة، config_fn/symbols_fn كحقن تبعيات
 بدل استيراد مباشر من bot.py.
@@ -63,10 +63,7 @@ DEFAULT_CONFIG = {
     "atr_multiplier": 2.0,
     "trail_atr_multiplier": 1.5,
     "trail_activate_atr_multiple": 1.0,     # ⬅️ بدل نسبة ثابتة: تفعيل Trailing عند ربح = 1.0×ATR الحالي
-    "breakeven_activate_atr_multiple": 0.5, # ⬅️ بدل نسبة ثابتة: تفعيل Breakeven عند ربح = 0.5×ATR الحالي
     "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
-    "breakeven_activate_pct": 0.005,   # احتياطي فقط — يُستخدم لو تعذر حساب ATR
-    "breakeven_margin_pct": 0.002,
     "stop_loss_fallback_pct": 0.02,
     "fallback_trail_pct": 0.01,
 
@@ -433,7 +430,6 @@ class SqueezeBreakout:
             "stop_loss": round(stop_loss, 8),
             "trailing_active": False,
             "highest_price": entry_price,
-            "breakeven_floor": None,
             "entry_time": _utc_now_iso(),
             "market_regime_at_entry": market_regime,
         }
@@ -479,7 +475,7 @@ class SqueezeBreakout:
         return round(price * (1 - self.cfg["fallback_trail_pct"]), 8)
 
     # ──────────────────────────────────────────────
-    # 🔍 إدارة الصفقة المفتوحة (Breakeven + Trailing + Stop Loss)
+    # 🔍 إدارة الصفقة المفتوحة (Trailing + Stop Loss)
     # ──────────────────────────────────────────────
     def manage_open_position(self):
         symbol = self.position["symbol"]
@@ -492,36 +488,24 @@ class SqueezeBreakout:
         fresh_atr = self._refresh_position_atr(symbol)
         atr_val = fresh_atr if fresh_atr else self.position.get("atr")
 
-        # ⬅️ تحسين 2: نقاط تفعيل Breakeven/Trailing بمضاعف ATR بدل نسبة ثابتة
+        # ⬅️ نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة
         if atr_val:
-            breakeven_trigger = self.position["entry_price"] + (self.cfg["breakeven_activate_atr_multiple"] * atr_val)
             trail_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
         else:
-            breakeven_trigger = self.position["entry_price"] * (1 + self.cfg["breakeven_activate_pct"])
             trail_trigger = self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"])
-
-        if self.position.get("breakeven_floor") is None:
-            if price >= breakeven_trigger:
-                floor_price = round(self.position["entry_price"] * (1 + self.cfg["breakeven_margin_pct"]), 8)
-                self.position["breakeven_floor"] = floor_price
-                if floor_price > self.position["stop_loss"]:
-                    self.position["stop_loss"] = floor_price
-                self._save_state()
-
-        stop_floor = self.position.get("breakeven_floor") or self.position["entry_price"]
 
         if not self.position["trailing_active"]:
             if price >= trail_trigger:
                 self.position["trailing_active"] = True
                 self.position["highest_price"] = price
-                self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
+                self.position["stop_loss"] = self._compute_trail_stop(price)
                 self._save_state()
                 self._notify(f"🎯 Squeeze Breakout ({symbol.replace('USDT','')}): تفعيل Trailing | ستوب: {self.position['stop_loss']}")
 
         if self.position["trailing_active"]:
             if price > self.position["highest_price"]:
                 self.position["highest_price"] = price
-                self.position["stop_loss"] = max(self._compute_trail_stop(price), stop_floor)
+                self.position["stop_loss"] = self._compute_trail_stop(price)
                 self._save_state()
             elif price <= self.position["stop_loss"]:
                 self._execute_sell(price, "trailing_stop")
