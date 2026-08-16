@@ -31,6 +31,8 @@ from functools import wraps
 from market_regime import MarketRegimeDetector
 from trend_stoch_parallel import TrendStochParallel
 from squeeze_breakout import SqueezeBreakout
+from breakout_parallel import BreakoutParallel
+from mean_reversion_parallel import MeanReversionParallel
 from portfolio_manager import get_portfolio_manager
 
 _PORTFOLIO_OWNER = "main_bot"
@@ -289,6 +291,27 @@ SQUEEZE_BREAKOUT_USDT_PER_TRADE = 15.0
 _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحيدة
 
 # ──────────────────────────────────────────────
+# 🚀 استراتيجية Breakout الموازية المستقلة (ملف breakout_parallel.py)
+# اختراق قمة N شمعة (Donchian) + تأكيد فوليوم — يشتري عند كسر سقف سعري واضح،
+# مستقلة كلياً. مطفية افتراضياً — تفعّل/تطفى من تيليغرام (/set_breakout_parallel
+# on|off) أو التطبيق.
+# ──────────────────────────────────────────────
+BREAKOUT_PARALLEL_ENABLED = False
+BREAKOUT_PARALLEL_USDT_PER_TRADE = 15.0
+_breakout_parallel_strategy = None   # ⬅️ نسخة BreakoutParallel الوحيدة
+
+# ──────────────────────────────────────────────
+# 🔻 استراتيجية Mean Reversion الموازية المستقلة (ملف mean_reversion_parallel.py)
+# ارتداد من تشبع بيعي (RSI + بولينجر + تأكيد ارتداد فعلي + فحص فوليوم البيع +
+# فلتر ضد السكين الساقطة + فلتر INVERSE_STRENGTH وقت BTC هابط). حماية بعد
+# الشراء أضيق من العادي (منطقة ضعف = مخاطرة أعلى). مستقلة كلياً، مطفية
+# افتراضياً — تفعّل/تطفى من تيليغرام (/set_mean_reversion on|off) أو التطبيق.
+# ──────────────────────────────────────────────
+MEAN_REVERSION_ENABLED = False
+MEAN_REVERSION_USDT_PER_TRADE = 15.0
+_mean_reversion_strategy = None   # ⬅️ نسخة MeanReversionParallel الوحيدة
+
+# ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
 logging.basicConfig(
@@ -410,6 +433,8 @@ def save_settings():
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global BREAKOUT_PARALLEL_ENABLED
+    global MEAN_REVERSION_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -433,6 +458,8 @@ def save_settings():
                 "bb_filter_enabled"  : BB_FILTER_ENABLED,
                 "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
+                "breakout_parallel_enabled": BREAKOUT_PARALLEL_ENABLED,
+                "mean_reversion_enabled": MEAN_REVERSION_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -446,6 +473,8 @@ def load_settings():
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global BREAKOUT_PARALLEL_ENABLED
+    global MEAN_REVERSION_ENABLED
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -479,6 +508,8 @@ def load_settings():
         BB_FILTER_ENABLED   = s.get("bb_filter_enabled", BB_FILTER_ENABLED)
         TREND_PARALLEL_ENABLED = s.get("trend_parallel_enabled", TREND_PARALLEL_ENABLED)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
+        BREAKOUT_PARALLEL_ENABLED = s.get("breakout_parallel_enabled", BREAKOUT_PARALLEL_ENABLED)
+        MEAN_REVERSION_ENABLED = s.get("mean_reversion_enabled", MEAN_REVERSION_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -736,6 +767,8 @@ def telegram_command_listener(client):
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global BREAKOUT_PARALLEL_ENABLED
+    global MEAN_REVERSION_ENABLED
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -1092,6 +1125,79 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
+                    # ── /set_breakout_parallel (تشغيل/إيقاف استراتيجية Breakout الموازية المستقلة) ──
+                    elif text.startswith("/set_breakout_parallel "):
+                        value = text.replace("/set_breakout_parallel ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                BREAKOUT_PARALLEL_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّلة" if BREAKOUT_PARALLEL_ENABLED else "❌ متوقفة"
+                            send_admin(
+                                f"{status_txt} استراتيجية Breakout\n"
+                                f"↳ صفقات حقيقية بمبلغ {BREAKOUT_PARALLEL_USDT_PER_TRADE} USDT/صفقة، سلة العملات، فريم ساعة، صفقة وحدة بس"
+                                if BREAKOUT_PARALLEL_ENABLED else
+                                "❌ تم إيقاف Breakout — أي صفقة مفتوحة حالياً بتضل تكمل لحد ما توقف عادي (ستوب/ترايلنك)، بس ما رح تنفتح صفقة جديدة"
+                            )
+                        else:
+                            send_admin("❌ مثال: /set_breakout_parallel on  أو  /set_breakout_parallel off")
+
+                    # ── /breakout_parallel_status ──────────────────────
+                    elif text == "/breakout_parallel_status":
+                        with _lock:
+                            bp_status = "✅ مفعّلة" if BREAKOUT_PARALLEL_ENABLED else "❌ متوقفة"
+                        pos = _breakout_parallel_strategy.position if _breakout_parallel_strategy else None
+                        if pos:
+                            pos_line = (
+                                f"📍 صفقة مفتوحة: {pos['symbol'].replace('USDT','')} | دخول {pos['entry_price']:.6f} | "
+                                f"ستوب حالي {pos['stop_loss']:.6f} | Trailing: {'مفعّل' if pos['trailing_active'] else 'غير مفعّل'}"
+                            )
+                        else:
+                            pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
+                        send_admin(
+                            f"🚀 <b>Breakout</b>\n"
+                            f"الحالة: {bp_status}\n"
+                            f"المبلغ لكل صفقة: {BREAKOUT_PARALLEL_USDT_PER_TRADE} USDT\n"
+                            f"{pos_line}"
+                        )
+
+                    # ── /set_mean_reversion (تشغيل/إيقاف استراتيجية Mean Reversion الموازية المستقلة) ──
+                    elif text.startswith("/set_mean_reversion "):
+                        value = text.replace("/set_mean_reversion ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                MEAN_REVERSION_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّلة" if MEAN_REVERSION_ENABLED else "❌ متوقفة"
+                            send_admin(
+                                f"{status_txt} استراتيجية Mean Reversion\n"
+                                f"↳ صفقات حقيقية بمبلغ {MEAN_REVERSION_USDT_PER_TRADE} USDT/صفقة، سلة العملات، فريم 30 دقيقة، صفقة وحدة بس\n"
+                                f"⚠️ منطقة مخاطرة أعلى (شراء ضعف) — ستوب لوز وTrailing أضيق من باقي الاستراتيجيات"
+                                if MEAN_REVERSION_ENABLED else
+                                "❌ تم إيقاف Mean Reversion — أي صفقة مفتوحة حالياً بتضل تكمل لحد ما توقف عادي (ستوب/ترايلنك)، بس ما رح تنفتح صفقة جديدة"
+                            )
+                        else:
+                            send_admin("❌ مثال: /set_mean_reversion on  أو  /set_mean_reversion off")
+
+                    # ── /mean_reversion_status ──────────────────────
+                    elif text == "/mean_reversion_status":
+                        with _lock:
+                            mr_status = "✅ مفعّلة" if MEAN_REVERSION_ENABLED else "❌ متوقفة"
+                        pos = _mean_reversion_strategy.position if _mean_reversion_strategy else None
+                        if pos:
+                            pos_line = (
+                                f"📍 صفقة مفتوحة: {pos['symbol'].replace('USDT','')} | دخول {pos['entry_price']:.6f} | "
+                                f"ستوب حالي {pos['stop_loss']:.6f} | Trailing: {'مفعّل' if pos['trailing_active'] else 'غير مفعّل'}"
+                            )
+                        else:
+                            pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
+                        send_admin(
+                            f"🔻 <b>Mean Reversion</b>\n"
+                            f"الحالة: {mr_status}\n"
+                            f"المبلغ لكل صفقة: {MEAN_REVERSION_USDT_PER_TRADE} USDT\n"
+                            f"{pos_line}"
+                        )
+
                     # ── /filters_status ──────────────────────────
                     elif text == "/filters_status":
                         with _lock:
@@ -1433,6 +1539,14 @@ def telegram_command_listener(client):
                             "/set_squeeze_breakout on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم 30 دقيقة)\n"
                             "/set_squeeze_breakout off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/squeeze_breakout_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
+                            "<b>🚀 Breakout (استراتيجية موازية مستقلة):</b>\n"
+                            "/set_breakout_parallel on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم ساعة)\n"
+                            "/set_breakout_parallel off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
+                            "/breakout_parallel_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
+                            "<b>🔻 Mean Reversion (استراتيجية موازية مستقلة — ارتداد من تشبع بيعي):</b>\n"
+                            "/set_mean_reversion on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم 30 دقيقة)\n"
+                            "/set_mean_reversion off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
+                            "/mean_reversion_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
                             "<b>المؤشرات:</b>\n"
                             "/enable_ma20 — تشغيل فيلتر MA20 (مستقل عن الاستراتيجية)\n"
                             "/disable_ma20 — تعطيل فيلتر MA20\n\n"
@@ -2156,16 +2270,22 @@ def api_trades():
     result       = []
     trades_copy  = dict(open_trades)
 
-    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Trend+Stoch / Squeeze Breakout)
+    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Trend+Stoch / Squeeze Breakout / Breakout)
     # لنفس القائمة، حتى تظهر بشاشة "الصفقات" العادية متل أي صفقة تانية.
     trend_pos = _trend_parallel_strategy.position if _trend_parallel_strategy else None
     squeeze_pos = _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None
+    breakout_pos = _breakout_parallel_strategy.position if _breakout_parallel_strategy else None
+    mean_reversion_pos = _mean_reversion_strategy.position if _mean_reversion_strategy else None
 
     extra_symbols = set()
     if trend_pos:
         extra_symbols.add(trend_pos["symbol"])
     if squeeze_pos:
         extra_symbols.add(squeeze_pos["symbol"])
+    if breakout_pos:
+        extra_symbols.add(breakout_pos["symbol"])
+    if mean_reversion_pos:
+        extra_symbols.add(mean_reversion_pos["symbol"])
 
     # ✅ إصلاح: جلب كل الأسعار بطلب واحد بدل طلب لكل عملة بحلقة
     # ✅ كاش قصير المدة: أي عدد أجهزة فاتحة بنفس اللحظة بتشارك نفس النداء لبينانس
@@ -2213,6 +2333,34 @@ def api_trades():
             "strategy": "squeeze_breakout",
         })
 
+    if breakout_pos:
+        symbol = breakout_pos["symbol"]
+        current_price = all_prices.get(symbol, breakout_pos["entry_price"])
+        pnl_pct = round((current_price - breakout_pos["entry_price"]) / breakout_pos["entry_price"] * 100, 2)
+        result.append({
+            "symbol": symbol,
+            "entry_price": breakout_pos["entry_price"],
+            "current_price": current_price,
+            "trailing_active": breakout_pos.get("trailing_active", False),
+            "stop_loss": breakout_pos.get("stop_loss"),
+            "pnl_pct": pnl_pct,
+            "strategy": "breakout_parallel",
+        })
+
+    if mean_reversion_pos:
+        symbol = mean_reversion_pos["symbol"]
+        current_price = all_prices.get(symbol, mean_reversion_pos["entry_price"])
+        pnl_pct = round((current_price - mean_reversion_pos["entry_price"]) / mean_reversion_pos["entry_price"] * 100, 2)
+        result.append({
+            "symbol": symbol,
+            "entry_price": mean_reversion_pos["entry_price"],
+            "current_price": current_price,
+            "trailing_active": mean_reversion_pos.get("trailing_active", False),
+            "stop_loss": mean_reversion_pos.get("stop_loss"),
+            "pnl_pct": pnl_pct,
+            "strategy": "mean_reversion_parallel",
+        })
+
     return jsonify(result)
 
 
@@ -2230,6 +2378,8 @@ def load_parallel_strategies_history():
     sources = [
         (os.path.join(DATA_DIR, "trend_stoch_history.json"), "trend_stoch_parallel"),
         (os.path.join(DATA_DIR, "squeeze_breakout_history.json"), "squeeze_breakout"),
+        (os.path.join(DATA_DIR, "breakout_parallel_history.json"), "breakout_parallel"),
+        (os.path.join(DATA_DIR, "mean_reversion_parallel_history.json"), "mean_reversion_parallel"),
     ]
     for path, strategy_name in sources:
         if not os.path.exists(path):
@@ -2318,6 +2468,14 @@ def api_get_settings():
             "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
             "squeeze_breakout_usdt_per_trade": SQUEEZE_BREAKOUT_USDT_PER_TRADE,
             "squeeze_breakout_position": _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None,
+            # ✅ Breakout — استراتيجية موازية مستقلة (اختراق قمة N شمعة Donchian، سلة العملات، فريم ساعة)
+            "breakout_parallel_enabled": BREAKOUT_PARALLEL_ENABLED,
+            "breakout_parallel_usdt_per_trade": BREAKOUT_PARALLEL_USDT_PER_TRADE,
+            "breakout_parallel_position": _breakout_parallel_strategy.position if _breakout_parallel_strategy else None,
+            # ✅ Mean Reversion — استراتيجية موازية مستقلة (ارتداد من تشبع بيعي، سلة العملات، فريم 30 دقيقة)
+            "mean_reversion_enabled": MEAN_REVERSION_ENABLED,
+            "mean_reversion_usdt_per_trade": MEAN_REVERSION_USDT_PER_TRADE,
+            "mean_reversion_position": _mean_reversion_strategy.position if _mean_reversion_strategy else None,
         })
 
 
@@ -2331,6 +2489,8 @@ def api_set_settings():
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global BREAKOUT_PARALLEL_ENABLED
+    global MEAN_REVERSION_ENABLED
     data = request.get_json(silent=True) or {}
     errors = []
 
@@ -2430,6 +2590,14 @@ def api_set_settings():
         # ✅ Squeeze Breakout — تشغيل/إيقاف من التطبيق
         if "squeeze_breakout_enabled" in data:
             SQUEEZE_BREAKOUT_ENABLED = bool(data["squeeze_breakout_enabled"])
+
+        # ✅ Breakout — تشغيل/إيقاف من التطبيق
+        if "breakout_parallel_enabled" in data:
+            BREAKOUT_PARALLEL_ENABLED = bool(data["breakout_parallel_enabled"])
+
+        # ✅ Mean Reversion — تشغيل/إيقاف من التطبيق
+        if "mean_reversion_enabled" in data:
+            MEAN_REVERSION_ENABLED = bool(data["mean_reversion_enabled"])
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
@@ -2531,6 +2699,12 @@ def api_close_trade():
         elif _squeeze_breakout_strategy and _squeeze_breakout_strategy.position and \
                 _squeeze_breakout_strategy.position["symbol"] == full_symbol:
             sell_price, status = _squeeze_breakout_strategy.close_manually()
+        elif _breakout_parallel_strategy and _breakout_parallel_strategy.position and \
+                _breakout_parallel_strategy.position["symbol"] == full_symbol:
+            sell_price, status = _breakout_parallel_strategy.close_manually()
+        elif _mean_reversion_strategy and _mean_reversion_strategy.position and \
+                _mean_reversion_strategy.position["symbol"] == full_symbol:
+            sell_price, status = _mean_reversion_strategy.close_manually()
         else:
             return jsonify({"error": "لا توجد صفقة مفتوحة لهذه العملة"}), 404
 
@@ -2701,6 +2875,48 @@ def run_bot():
         daemon=True,
     )
     squeeze_breakout_thread.start()
+
+    # ── 🚀 Breakout — Thread مستقل تماماً كمان ──
+    global _breakout_parallel_strategy
+    _breakout_parallel_strategy = BreakoutParallel(
+        client,
+        notify_fn=send_telegram,
+        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing حية من إعدادات البوت الأساسي
+        symbols_fn=lambda: list(SYMBOLS),  # ⬅️ نفس الـ144 عملة المعتمدة
+        usdt_per_trade=BREAKOUT_PARALLEL_USDT_PER_TRADE,
+        live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ BREAKOUT_PARALLEL_ENABLED (مطفي افتراضياً)
+        state_file=os.path.join(DATA_DIR, "breakout_parallel_state.json"),
+        history_file=os.path.join(DATA_DIR, "breakout_parallel_history.json"),
+        coin_memory_db_path=COIN_MEMORY_FILE,
+    )
+    breakout_parallel_thread = threading.Thread(
+        target=_breakout_parallel_strategy.run,
+        kwargs={"poll_seconds": 3600, "is_enabled_fn": lambda: BREAKOUT_PARALLEL_ENABLED},
+        daemon=True,
+    )
+    breakout_parallel_thread.start()
+
+    # ── 🔻 Mean Reversion — Thread مستقل تماماً كمان ──
+    # ⚠️ بقصد ما بنمرر config_fn هون — هاي الاستراتيجية بطبيعتها أضيق بالمخاطرة
+    # (منطقة شراء ضعف)، وقيم ATR/Trailing الحية للبوت الأساسي أوسع وممكن تلغي
+    # هالحماية المتعمدة لو انمررت. بتشتغل دايماً بقيمها الخاصة الأضيق (DEFAULT_CONFIG).
+    global _mean_reversion_strategy
+    _mean_reversion_strategy = MeanReversionParallel(
+        client,
+        notify_fn=send_telegram,
+        symbols_fn=lambda: list(SYMBOLS),  # ⬅️ نفس الـ144 عملة المعتمدة
+        usdt_per_trade=MEAN_REVERSION_USDT_PER_TRADE,
+        live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ MEAN_REVERSION_ENABLED (مطفي افتراضياً)
+        state_file=os.path.join(DATA_DIR, "mean_reversion_parallel_state.json"),
+        history_file=os.path.join(DATA_DIR, "mean_reversion_parallel_history.json"),
+        coin_memory_db_path=COIN_MEMORY_FILE,
+    )
+    mean_reversion_thread = threading.Thread(
+        target=_mean_reversion_strategy.run,
+        kwargs={"poll_seconds": 1800, "is_enabled_fn": lambda: MEAN_REVERSION_ENABLED},
+        daemon=True,
+    )
+    mean_reversion_thread.start()
 
     last_heartbeat = time.time()
     last_scan      = 0
