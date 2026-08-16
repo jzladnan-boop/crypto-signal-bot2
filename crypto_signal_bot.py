@@ -40,16 +40,26 @@ _PORTFOLIO_OWNER = "main_bot"
 
 def _get_live_risk_config():
     """
-    يرجع أحدث قيم ATR/Trailing من إعدادات البوت الأساسي الحية —
-    تُمرَّر للاستراتيجيات الموازية (trend_stoch_parallel.py، squeeze_breakout.py)
-    عشان تشتغل دايماً بنفس القيم الحية، بدون ما تحتاج إعادة تشغيل عند أي تعديل
-    من التطبيق أو تيليغرام.
+    يرجع أحدث قيم الحماية (الستوب والـ Trailing بكل تفاصيله) من إعدادات البوت
+    الأساسي الحية — تُمرَّر لكل الاستراتيجيات الموازية (trend_stoch_parallel.py،
+    squeeze_breakout.py، breakout_parallel.py، mean_reversion_parallel.py) عشان
+    تشتغل دايماً بنفس قيم الحماية بالضبط متل البوت الأساسي، بدون ما تحتاج إعادة
+    تشغيل عند أي تعديل من التطبيق أو تيليغرام.
+
+    ⬅️ بطلب المستخدم: هلق كل الاستراتيجيات الموازية (بما فيهم Mean Reversion)
+    مربوطة بالكامل بإعدادات البوت الأساسي — نفس فترة حساب ATR، نفس مضاعف ATR
+    للستوب الأولي، نفس مضاعف الـ Trailing، ونفس نقطة تفعيله (بالنسبة الثابتة
+    أو بمضاعف ATR)، ونفس السقف الاحتياطي لو تعذر حساب ATR. ما في أي استراتيجية
+    موازية عندها إعدادات حماية مستقلة عن البوت الأساسي بعد هلق.
     """
     with _lock:
         return {
+            "atr_period": ATR_PERIOD,
             "atr_multiplier": ATR_MULTIPLIER,
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
             "trail_activate_pct": TRAIL_ACTIVATE_PCT,
+            "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
+            "stop_loss_fallback_pct": STOP_LOSS_PCT,
         }
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_beta
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
@@ -241,6 +251,14 @@ STRATEGY_LABELS = {
     "rsi"        : "RSI العادي",
     "stoch_rsi"  : "Stochastic RSI",
     "trend_stoch": "Trend + StochRSI",
+    # ⬅️ الاستراتيجيات الموازية المستقلة (كل وحدة عندها Thread وصفقة خاصة فيها،
+    # منفصلة عن current_strategy) — مضافة هون كمان حتى أي سجل صفقة (من profit_log
+    # أو من load_parallel_strategies_history) يقدر ياخد اسم عرض ودّي موحّد.
+    "trend_stoch_parallel"   : "Trend+Stoch الموازية",
+    "squeeze_breakout"       : "Squeeze Breakout",
+    "breakout_parallel"      : "Breakout",
+    "mean_reversion_parallel": "Mean Reversion",
+    "unknown"                : "غير معروف",
 }
 consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
 pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
@@ -595,6 +613,10 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
     buy_amount  = round(entry_price * qty, 4)
     sell_amount = round(exit_price * qty, 4)
     pct         = round((exit_price - entry_price) / entry_price * 100, 2) if entry_price else 0.0
+    # ⬅️ بطلب المستخدم: نخزّن اسم الاستراتيجية الفعّالة وقت الصفقة مع كل سجل —
+    # قبل هيك كانت تُسجَّل فقط بذاكرة العملات (coin_memory) لأغراض الترتيب
+    # الداخلي، بدون ما تظهر بسجل الصفقات نفسه (profit_log) اللي التطبيق يعرضه.
+    strategy_name = current_strategy or "unknown"
     profit_log.append({
         "symbol"     : symbol,
         "entry_price": entry_price,
@@ -605,7 +627,8 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
         "sell_amount": sell_amount,
         "pct"        : pct,
         "reason"     : reason,
-        "time"       : utc_now_iso()
+        "time"       : utc_now_iso(),
+        "strategy"   : strategy_name,
     })
     save_profit_log(profit_log, month)
 
@@ -617,7 +640,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
             is_win=(profit > 0),
             pnl=profit,
             slippage_pct=entry_slippage_pct,
-            strategy=current_strategy or "unknown",   # ⬅️ اسم الاستراتيجية الفعّالة وقت الصفقة (rsi/stoch_rsi/trend_stoch)
+            strategy=strategy_name,   # ⬅️ اسم الاستراتيجية الفعّالة وقت الصفقة (rsi/stoch_rsi/trend_stoch)
         )
     except Exception as e:
         log.error(f"❌ تسجيل ذاكرة العملة {symbol}: {e}")
@@ -2428,8 +2451,16 @@ def api_history():
         records += [r for r in load_parallel_strategies_history()
                     if parse_record_time_epoch(r["time"]) >= cutoff]
     else:
-        records = load_all_profit_log() + load_parallel_strategies_history()   # ✅ كل الشهور + الاستراتيجيتين الموازيتين
+        records = load_all_profit_log() + load_parallel_strategies_history()   # ✅ كل الشهور + كل الاستراتيجيات الموازية
     records = sorted(records, key=lambda r: r["time"], reverse=True)
+    # ⬅️ بطلب المستخدم: نضيف اسم عرض ودّي (strategy_label) لكل سجل، حتى التطبيق
+    # يعرضه مباشرة بدون ما يحتاج جدول تحويل أسماء (mapping) خاص فيه. سجلات
+    # قديمة جداً (قبل إضافة هالحقل) ما رح يكون فيها "strategy" أصلاً — نتعامل
+    # معها كـ "unknown" بدل ما نطيح بخطأ.
+    for r in records:
+        strategy_key = r.get("strategy") or "unknown"
+        r["strategy"] = strategy_key
+        r["strategy_label"] = STRATEGY_LABELS.get(strategy_key, strategy_key)
     return jsonify(records)
 
 
@@ -2897,13 +2928,15 @@ def run_bot():
     breakout_parallel_thread.start()
 
     # ── 🔻 Mean Reversion — Thread مستقل تماماً كمان ──
-    # ⚠️ بقصد ما بنمرر config_fn هون — هاي الاستراتيجية بطبيعتها أضيق بالمخاطرة
-    # (منطقة شراء ضعف)، وقيم ATR/Trailing الحية للبوت الأساسي أوسع وممكن تلغي
-    # هالحماية المتعمدة لو انمررت. بتشتغل دايماً بقيمها الخاصة الأضيق (DEFAULT_CONFIG).
+    # ⬅️ بطلب المستخدم: صارت مربوطة بالكامل بإعدادات الحماية الحية للبوت
+    # الأساسي (config_fn) — نفس مضاعف ATR للستوب، نفس مضاعف ونقطة تفعيل
+    # Trailing، ونفس الاحتياطي — بدل إعداداتها المستقلة الأضيق يلي كانت
+    # افتراضياً. أي تعديل عالبوت الأساسي بينعكس عليها فوراً بدون إعادة تشغيل.
     global _mean_reversion_strategy
     _mean_reversion_strategy = MeanReversionParallel(
         client,
         notify_fn=send_telegram,
+        config_fn=_get_live_risk_config,   # ⬅️ قيم الستوب/Trailing الحية من إعدادات البوت الأساسي
         symbols_fn=lambda: list(SYMBOLS),  # ⬅️ نفس الـ144 عملة المعتمدة
         usdt_per_trade=MEAN_REVERSION_USDT_PER_TRADE,
         live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ MEAN_REVERSION_ENABLED (مطفي افتراضياً)
