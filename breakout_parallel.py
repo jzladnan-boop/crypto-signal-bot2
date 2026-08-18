@@ -52,6 +52,11 @@ DEFAULT_CONFIG = {
     "volume_multiplier": 1.2,        # الفوليوم الحالي لازم يكون 1.2× المتوسط على الأقل
     "max_rise_from_breakout_pct": 3.0,  # حد الأمان — ما نلحق لو ابتعد أكتر من 3% فوق سقف الاختراق
 
+    # ⬅️ بطلب المستخدم: تعديلين ضد الاختراق الوهمي (False Breakout) — كتير
+    # صفقات كانت تضرب ستوب لوز بسرعة بأول ساعة-ساعتين، بالذات وقت BTC جانبي.
+    "require_confirmation_candle": True,   # لازم شمعتين متتاليتين فوق السقف، مش وحدة بس
+    "require_bull_regime": True,           # ما نشتري اختراق إلا لو حالة السوق العامة BULL (ترند صاعد واضح)
+
     # ── الحماية (نفس نظام البوت بالضبط) ──
     "atr_period": 14,
     "atr_multiplier": 2.0,
@@ -287,9 +292,12 @@ class BreakoutParallel:
     # ──────────────────────────────────────────────
     def check_symbol_entry(self, symbol):
         try:
-            limit = self.cfg["lookback_candles"] + self.cfg["volume_ma_length"] + self.cfg["atr_period"] + 10
+            # ⬅️ لو تأكيد الشمعتين مفعّل، محتاجين شمعة وحدة زيادة للخلف (عشان نقدر
+            # نتحقق من شمعة الاختراق الأصلية + الشمعة التالية يلي تؤكدها).
+            confirm_offset = 1 if self.cfg["require_confirmation_candle"] else 0
+            limit = self.cfg["lookback_candles"] + self.cfg["volume_ma_length"] + self.cfg["atr_period"] + 10 + confirm_offset
             klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=limit)
-            if not klines or len(klines) < self.cfg["lookback_candles"] + 5:
+            if not klines or len(klines) < self.cfg["lookback_candles"] + 5 + confirm_offset:
                 return None
             closes = pd.Series([float(k[4]) for k in klines])
             highs = pd.Series([float(k[2]) for k in klines])
@@ -297,38 +305,64 @@ class BreakoutParallel:
             volumes = pd.Series([float(k[5]) for k in klines])
 
             closed_idx = -2   # آخر شمعة مغلقة (تجنب شمعة لسا مفتوحة)
+            # ⬅️ شمعة الاختراق "المرشحة": لو تأكيد الشمعتين مفعّل، هي الشمعة يلي
+            # قبل آخر شمعة مغلقة (يعني آخر شمعة مغلقة هلق هي "شمعة التأكيد")،
+            # وإلا هي نفسها آخر شمعة مغلقة (نفس السلوك القديم بدون تأكيد إضافي).
+            breakout_idx = closed_idx - 1 if self.cfg["require_confirmation_candle"] else closed_idx
 
             # ── الخطوة 1: سقف Donchian — أعلى قمة بآخر lookback_candles شمعة
-            # **قبل** الشمعة الحالية المغلقة (ما بتدخل هي نفسها بحساب السقف،
-            # وإلا أي شمعة رح تكون "دايماً" فوق سقف يشملها).
-            window_start = closed_idx - self.cfg["lookback_candles"]
-            prior_highs = highs.iloc[window_start:closed_idx]
+            # **قبل** شمعة الاختراق نفسها (ما بتدخل هي بحساب السقف، وإلا أي شمعة
+            # رح تكون "دايماً" فوق سقف يشملها).
+            window_start = breakout_idx - self.cfg["lookback_candles"]
+            prior_highs = highs.iloc[window_start:breakout_idx]
             if len(prior_highs) < self.cfg["lookback_candles"] * 0.8:
                 return None   # بيانات ناقصة كتير — نتجاهل بدل ما نقرر بثقة زايفة
             donchian_high = float(prior_highs.max())
             if donchian_high <= 0:
                 return None
 
-            # ── الخطوة 2: تأكيد الاختراق — الشمعة المغلقة تقفل فوق السقف ──
-            candle_close = float(closes.iloc[closed_idx])
-            if candle_close <= donchian_high:
+            # ── الخطوة 2: تأكيد الاختراق — شمعة الاختراق تقفل فوق السقف ──
+            breakout_close = float(closes.iloc[breakout_idx])
+            if breakout_close <= donchian_high:
                 return None
 
-            # ── الخطوة 3: تأكيد الفوليوم ──
-            vol_ma = volumes.rolling(window=self.cfg["volume_ma_length"]).mean().iloc[closed_idx]
+            # ⬅️ بطلب المستخدم: تأكيد بشمعتين ضد الاختراق الوهمي — نتحقق إن
+            # الشمعة التالية (آخر شمعة مغلقة فعلياً، closed_idx) لسا صامدة فوق
+            # نفس السقف. لو رجعت تحته، يعني الاختراق كان وهمي ونرفض الإشارة.
+            if self.cfg["require_confirmation_candle"]:
+                confirm_close = float(closes.iloc[closed_idx])
+                if confirm_close <= donchian_high:
+                    return None   # الاختراق ما صمد — رجع تحت السقف بالشمعة التالية
+
+            candle_close = float(closes.iloc[closed_idx])   # سعر الدخول الفعلي = آخر شمعة مغلقة
+
+            # ── الخطوة 3: تأكيد الفوليوم (على شمعة الاختراق الأصلية) ──
+            vol_ma = volumes.rolling(window=self.cfg["volume_ma_length"]).mean().iloc[breakout_idx]
             if pd.isna(vol_ma) or vol_ma <= 0:
                 return None
-            volume_ratio = float(volumes.iloc[closed_idx]) / vol_ma
+            volume_ratio = float(volumes.iloc[breakout_idx]) / vol_ma
             if volume_ratio < self.cfg["volume_multiplier"]:
                 return None
 
-            # ── الخطوة 4: حد الأمان ضد مطاردة القمة ──
+            # ── الخطوة 4: حد الأمان ضد مطاردة القمة (نقيسه من سعر الدخول الفعلي) ──
             rise_pct = ((candle_close - donchian_high) / donchian_high) * 100
             if rise_pct > self.cfg["max_rise_from_breakout_pct"]:
                 return None
 
+            # ⬅️ بطلب المستخدم: فلتر حالة السوق — ما نشتري اختراق إلا وقت ترند
+            # صاعد واضح (BULL). الاختراقات بسوق جانبي/هابط أضعف بطبيعتها وأكتر
+            # عرضة للانعكاس السريع (Whipsaw).
+            if self.cfg["require_bull_regime"]:
+                try:
+                    regime = self.regime_detector.get_regime_label()
+                except Exception:
+                    regime = "SIDEWAYS"   # تعذر التحليل — نتعامل بحذر ونرفض
+                if regime != "BULL":
+                    return None
+
             atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
 
+            confirm_note = " (مؤكد بشمعتين)" if self.cfg["require_confirmation_candle"] else ""
             return {
                 "symbol": symbol,
                 "price": candle_close,
@@ -337,7 +371,7 @@ class BreakoutParallel:
                 "volume_ratio": round(volume_ratio, 2),
                 "atr": atr_value,
                 "signal_info": (
-                    f"🚀 <b>Breakout — {symbol.replace('USDT','')}</b>\n"
+                    f"🚀 <b>Breakout — {symbol.replace('USDT','')}</b>{confirm_note}\n"
                     f"💰 السعر: {candle_close:.6f} | كسر قمة {self.cfg['lookback_candles']} شمعة: {donchian_high:.6f} (+{rise_pct:.2f}%)\n"
                     f"📊 فوليوم: {volume_ratio:.2f}× المتوسط"
                 ),
