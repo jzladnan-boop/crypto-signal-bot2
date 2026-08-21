@@ -31,7 +31,6 @@ from functools import wraps
 from market_regime import MarketRegimeDetector
 from trend_stoch_parallel import TrendStochParallel
 from squeeze_breakout import SqueezeBreakout
-from breakout_parallel import BreakoutParallel
 from mean_reversion_parallel import MeanReversionParallel
 from portfolio_manager import get_portfolio_manager
 
@@ -42,7 +41,7 @@ def _get_live_risk_config():
     """
     يرجع أحدث قيم الحماية (الستوب والـ Trailing بكل تفاصيله) من إعدادات البوت
     الأساسي الحية — تُمرَّر لكل الاستراتيجيات الموازية (trend_stoch_parallel.py،
-    squeeze_breakout.py، breakout_parallel.py، mean_reversion_parallel.py) عشان
+    squeeze_breakout.py، mean_reversion_parallel.py) عشان
     تشتغل دايماً بنفس قيم الحماية بالضبط متل البوت الأساسي، بدون ما تحتاج إعادة
     تشغيل عند أي تعديل من التطبيق أو تيليغرام.
 
@@ -54,6 +53,7 @@ def _get_live_risk_config():
     """
     with _lock:
         return {
+            "atr_enabled": ATR_ENABLED,
             "atr_period": ATR_PERIOD,
             "atr_multiplier": ATR_MULTIPLIER,
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
@@ -61,7 +61,7 @@ def _get_live_risk_config():
             "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
             "stop_loss_fallback_pct": STOP_LOSS_PCT,
         }
-from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_beta
+from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
 # ──────────────────────────────────────────────
@@ -149,22 +149,19 @@ PAUSE_DURATION_SECONDS = 2 * 60 * 60  # مدة التوقف (ساعتين)
 # ──────────────────────────────────────────────
 # 📐 ATR: ستوب لوس متحرك حسب تقلب كل عملة
 # ──────────────────────────────────────────────
+ATR_ENABLED    = True  # ⬅️ بطلب المستخدم: زر تشغيل/إيقاف صريح لـ ATR — لو مطفي، البوت
+                       # (وكل الاستراتيجيات الموازية المربوطة معه) بيعتمد دايماً على القيم
+                       # الاحتياطية الثابتة (Trailing Stop % / Stop Loss % / Activate Trailing %)
+                       # بدل ما يحسب ATR أصلاً، حتى لو الحساب كان ممكن ينجح تقنياً.
 ATR_PERIOD     = 14    # عدد الشموع لحساب ATR
 ATR_MULTIPLIER = 2.0   # مضاعف ATR لتحديد مسافة الستوب الأولي (كلما زاد، اتسعت مساحة التنفس)
 TRAIL_ATR_MULTIPLIER = 1.5   # مضاعف ATR لمسافة الـ Trailing بعد التفعيل (عادة أضيق من الستوب الأولي)
 
 # ──────────────────────────────────────────────
-# 🚀 Trend + StochRSI: استراتيجية ثالثة مستقلة (StochRSI + فوليوم + فلتر Beta مقابل BTC)
+# 🌐 ارتباط العملات مع BTC (Correlation Engine) — يُستخدم بترتيب SmartRanker
+# لكل الاستراتيجيات، ومن ضمنها فلتر INVERSE_STRENGTH وقت BTC هابط بـ Mean Reversion
 # ──────────────────────────────────────────────
-TREND_STOCH_INTERVAL   = Client.KLINE_INTERVAL_4HOUR   # (لم يعد يُستخدم لتأكيد الاتجاه — أُبقي للتوافق)
-TREND_STOCH_MA_LENGTH  = 50    # (لم يعد يُستخدم — أُبقي للتوافق مع إعدادات قديمة محفوظة)
-VOLUME_MA_LENGTH        = 20    # طول متوسط الفوليوم للمقارنة (فريم الدخول)
-VOLUME_MULTIPLIER       = 1.0   # الفوليوم الحالي لازم يكون أعلى من (أو يساوي) هذا المضاعف × المتوسط
-
-# ✅ فلتر Beta: بدل "تأكيد ترند العملة لحالها"، نطلب إن العملة تتحرك أعنف من BTC
-# (Beta > 1.2 يعني: لو BTC طلع 1%، العملة عادة بتطلع أكثر — استغلال زخم الترند الصاعد)
-TREND_STOCH_BETA_THRESHOLD = 1.2   # أقل Beta مقبول للشراء بهالاستراتيجية
-TREND_STOCH_BETA_LOOKBACK  = 30    # عدد الشموع (على نفس فريم الدخول الحالي) لحساب Beta
+CORRELATION_BETA_LOOKBACK  = 30    # عدد الشموع (على نفس فريم الدخول الحالي) لحساب Beta/الارتباط
 BETA_CACHE_TTL_SECONDS      = 120   # نكاش شموع BTC 120 ثانية — نفس البيانات تُستخدم لكل عملات الدورة
 
 # ──────────────────────────────────────────────
@@ -245,20 +242,19 @@ trading_enabled = True
 watch_list      = set()
 open_trades     = {}
 ma20_enabled    = True
-current_strategy   = "rsi"   # 🎯 الاستراتيجية الحالية: "rsi" أو "stoch_rsi" أو "trend_stoch"
+current_strategy   = "rsi"   # 🎯 الاستراتيجية الحالية: "rsi" أو "stoch_rsi"
 
 STRATEGY_LABELS = {
     "rsi"        : "RSI العادي",
     "stoch_rsi"  : "Stochastic RSI",
-    "trend_stoch": "Trend + StochRSI",
     # ⬅️ الاستراتيجيات الموازية المستقلة (كل وحدة عندها Thread وصفقة خاصة فيها،
     # منفصلة عن current_strategy) — مضافة هون كمان حتى أي سجل صفقة (من profit_log
     # أو من load_parallel_strategies_history) يقدر ياخد اسم عرض ودّي موحّد.
     "trend_stoch_parallel"   : "Trend+Stoch الموازية",
     "squeeze_breakout"       : "Squeeze Breakout",
-    "breakout_parallel"      : "Breakout",
     "mean_reversion_parallel": "Mean Reversion",
     "unknown"                : "غير معروف",
+    "manual"                 : "شراء يدوي",
 }
 consecutive_losses = 0   # 🛑 عدّاد الستوب لوز المتتالية
 pause_until        = 0   # 🛑 timestamp لنهاية التوقف التلقائي (0 = مافي توقف)
@@ -307,16 +303,6 @@ _trend_parallel_strategy = None   # ⬅️ نسخة TrendStochParallel الوح�
 SQUEEZE_BREAKOUT_ENABLED = False
 SQUEEZE_BREAKOUT_USDT_PER_TRADE = 15.0
 _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحيدة
-
-# ──────────────────────────────────────────────
-# 🚀 استراتيجية Breakout الموازية المستقلة (ملف breakout_parallel.py)
-# اختراق قمة N شمعة (Donchian) + تأكيد فوليوم — يشتري عند كسر سقف سعري واضح،
-# مستقلة كلياً. مطفية افتراضياً — تفعّل/تطفى من تيليغرام (/set_breakout_parallel
-# on|off) أو التطبيق.
-# ──────────────────────────────────────────────
-BREAKOUT_PARALLEL_ENABLED = False
-BREAKOUT_PARALLEL_USDT_PER_TRADE = 15.0
-_breakout_parallel_strategy = None   # ⬅️ نسخة BreakoutParallel الوحيدة
 
 # ──────────────────────────────────────────────
 # 🔻 استراتيجية Mean Reversion الموازية المستقلة (ملف mean_reversion_parallel.py)
@@ -447,11 +433,11 @@ def save_settings():
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global ATR_ENABLED
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
-    global BREAKOUT_PARALLEL_ENABLED
     global MEAN_REVERSION_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -468,6 +454,7 @@ def save_settings():
                 "trail_activate_pct": TRAIL_ACTIVATE_PCT,
                 "rsi_buy_prev"     : RSI_BUY_PREV,
                 "rsi_buy_curr"     : RSI_BUY_CURR,
+                "atr_enabled"      : ATR_ENABLED,
                 "atr_period"       : ATR_PERIOD,
                 "atr_multiplier"   : ATR_MULTIPLIER,
                 "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
@@ -476,7 +463,6 @@ def save_settings():
                 "bb_filter_enabled"  : BB_FILTER_ENABLED,
                 "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
-                "breakout_parallel_enabled": BREAKOUT_PARALLEL_ENABLED,
                 "mean_reversion_enabled": MEAN_REVERSION_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -487,11 +473,11 @@ def load_settings():
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global ATR_ENABLED
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
-    global BREAKOUT_PARALLEL_ENABLED
     global MEAN_REVERSION_ENABLED
     if not os.path.exists(SETTINGS_FILE):
         return
@@ -514,10 +500,18 @@ def load_settings():
             current_interval = intervals_map[minutes]
         ma20_enabled        = s.get("ma20_enabled", ma20_enabled)
         current_strategy    = s.get("current_strategy", current_strategy)
+        # ⬅️ إصلاح ترحيل: "trend_stoch" انحذفت من ثلاثية البوت الأساسي — لو إعدادات
+        # قديمة محفوظة من قبل الحذف لسا مشيرة عليها، نرجعها لـ "rsi" تلقائياً
+        # بدل ما يعلق البوت على استراتيجية ما عاد فيه أي كود يطبّقها (فحص صامت
+        # بيرجع "continue" بلا أي إشارة شراء بلا أي تنبيه).
+        if current_strategy == "trend_stoch":
+            log.warning("⚠️ الإعدادات المحفوظة كانت مضبوطة على trend_stoch (محذوفة) — رجّعناها لـ rsi تلقائياً")
+            current_strategy = "rsi"
         STOP_LOSS_PCT       = s.get("stop_loss_pct", STOP_LOSS_PCT)
         TRAIL_ACTIVATE_PCT  = s.get("trail_activate_pct", TRAIL_ACTIVATE_PCT)
         RSI_BUY_PREV        = s.get("rsi_buy_prev", RSI_BUY_PREV)
         RSI_BUY_CURR        = s.get("rsi_buy_curr", RSI_BUY_CURR)
+        ATR_ENABLED         = s.get("atr_enabled", ATR_ENABLED)
         ATR_PERIOD          = s.get("atr_period", ATR_PERIOD)
         ATR_MULTIPLIER      = s.get("atr_multiplier", ATR_MULTIPLIER)
         TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
@@ -526,7 +520,6 @@ def load_settings():
         BB_FILTER_ENABLED   = s.get("bb_filter_enabled", BB_FILTER_ENABLED)
         TREND_PARALLEL_ENABLED = s.get("trend_parallel_enabled", TREND_PARALLEL_ENABLED)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
-        BREAKOUT_PARALLEL_ENABLED = s.get("breakout_parallel_enabled", BREAKOUT_PARALLEL_ENABLED)
         MEAN_REVERSION_ENABLED = s.get("mean_reversion_enabled", MEAN_REVERSION_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
@@ -603,7 +596,7 @@ def save_profit_log(log_data, month=None):
     except Exception as e:
         log.error(f"❌ خطأ حفظ الأرباح: {e}")
 
-def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slippage_pct=0.0):
+def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slippage_pct=0.0, strategy=None):
     """يسجل نتيجة كل صفقة في ملف الشهر الحالي"""
     month       = time.strftime("%Y_%m")
     profit_log  = load_profit_log(month)
@@ -613,10 +606,13 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
     buy_amount  = round(entry_price * qty, 4)
     sell_amount = round(exit_price * qty, 4)
     pct         = round((exit_price - entry_price) / entry_price * 100, 2) if entry_price else 0.0
-    # ⬅️ بطلب المستخدم: نخزّن اسم الاستراتيجية الفعّالة وقت الصفقة مع كل سجل —
-    # قبل هيك كانت تُسجَّل فقط بذاكرة العملات (coin_memory) لأغراض الترتيب
-    # الداخلي، بدون ما تظهر بسجل الصفقات نفسه (profit_log) اللي التطبيق يعرضه.
-    strategy_name = current_strategy or "unknown"
+    # ⬅️ بطلب المستخدم: نخزّن اسم الاستراتيجية الفعّالة وقت الصفقة مع كل سجل.
+    # ⬅️ إصلاح: نفضّل الاستراتيجية المخزّنة فعلياً بالصفقة نفسها (trade["strategy"])
+    # يلي بيمررها الكولر (strategy=...)، مش current_strategy الحالية دايماً —
+    # لأن current_strategy ممكن تكون تبدّلت من وقت فتح الصفقة لوقت إغلاقها،
+    # وأهم شي إنه الصفقات اليدوية (/api/manual_buy) لازم تنسجل "manual"
+    # مش تنسجل غلط باسم أي استراتيجية تلقائية شغالة حالياً وقت الإغلاق.
+    strategy_name = strategy or current_strategy or "unknown"
     profit_log.append({
         "symbol"     : symbol,
         "entry_price": entry_price,
@@ -640,7 +636,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
             is_win=(profit > 0),
             pnl=profit,
             slippage_pct=entry_slippage_pct,
-            strategy=strategy_name,   # ⬅️ اسم الاستراتيجية الفعّالة وقت الصفقة (rsi/stoch_rsi/trend_stoch)
+            strategy=strategy_name,
         )
     except Exception as e:
         log.error(f"❌ تسجيل ذاكرة العملة {symbol}: {e}")
@@ -786,11 +782,11 @@ def telegram_command_listener(client):
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global ATR_ENABLED
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
-    global BREAKOUT_PARALLEL_ENABLED
     global MEAN_REVERSION_ENABLED
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
@@ -1010,6 +1006,27 @@ def telegram_command_listener(client):
                         except:
                             send_admin("❌ مثال: /set_rsi_range 20 38")
 
+                    # ── /set_atr_enabled ────────────────────────
+                    elif text.startswith("/set_atr_enabled "):
+                        value = text.replace("/set_atr_enabled ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                ATR_ENABLED = (value == "on")
+                            save_settings()
+                            status_txt = "✅ مفعّل" if ATR_ENABLED else "❌ مطفي"
+                            send_admin(
+                                f"{status_txt} الستوب لوس المتحرك بـ ATR\n"
+                                + (
+                                    "↳ الستوب والـ Trailing هلق بيحسبوا حسب تقلب كل عملة (ATR)."
+                                    if ATR_ENABLED else
+                                    "↳ الستوب والـ Trailing هلق بيعتمدوا دايماً على النسب الثابتة "
+                                    "الاحتياطية (Stop Loss % / Trailing % / Activate Trailing %) بدل ATR — "
+                                    "حتى الصفقات المفتوحة حالياً برجعوا يعتمدوا عليها فوراً."
+                                )
+                            )
+                        else:
+                            send_admin("❌ مثال: /set_atr_enabled on  أو  /set_atr_enabled off")
+
                     # ── /set_atr_period ────────────────────────
                     elif text.startswith("/set_atr_period "):
                         try:
@@ -1148,42 +1165,6 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
-                    # ── /set_breakout_parallel (تشغيل/إيقاف استراتيجية Breakout الموازية المستقلة) ──
-                    elif text.startswith("/set_breakout_parallel "):
-                        value = text.replace("/set_breakout_parallel ", "").strip().lower()
-                        if value in ("on", "off"):
-                            with _lock:
-                                BREAKOUT_PARALLEL_ENABLED = (value == "on")
-                            save_settings()
-                            status_txt = "✅ مفعّلة" if BREAKOUT_PARALLEL_ENABLED else "❌ متوقفة"
-                            send_admin(
-                                f"{status_txt} استراتيجية Breakout\n"
-                                f"↳ صفقات حقيقية بمبلغ {BREAKOUT_PARALLEL_USDT_PER_TRADE} USDT/صفقة، سلة العملات، فريم ساعة، صفقة وحدة بس"
-                                if BREAKOUT_PARALLEL_ENABLED else
-                                "❌ تم إيقاف Breakout — أي صفقة مفتوحة حالياً بتضل تكمل لحد ما توقف عادي (ستوب/ترايلنك)، بس ما رح تنفتح صفقة جديدة"
-                            )
-                        else:
-                            send_admin("❌ مثال: /set_breakout_parallel on  أو  /set_breakout_parallel off")
-
-                    # ── /breakout_parallel_status ──────────────────────
-                    elif text == "/breakout_parallel_status":
-                        with _lock:
-                            bp_status = "✅ مفعّلة" if BREAKOUT_PARALLEL_ENABLED else "❌ متوقفة"
-                        pos = _breakout_parallel_strategy.position if _breakout_parallel_strategy else None
-                        if pos:
-                            pos_line = (
-                                f"📍 صفقة مفتوحة: {pos['symbol'].replace('USDT','')} | دخول {pos['entry_price']:.6f} | "
-                                f"ستوب حالي {pos['stop_loss']:.6f} | Trailing: {'مفعّل' if pos['trailing_active'] else 'غير مفعّل'}"
-                            )
-                        else:
-                            pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
-                        send_admin(
-                            f"🚀 <b>Breakout</b>\n"
-                            f"الحالة: {bp_status}\n"
-                            f"المبلغ لكل صفقة: {BREAKOUT_PARALLEL_USDT_PER_TRADE} USDT\n"
-                            f"{pos_line}"
-                        )
-
                     # ── /set_mean_reversion (تشغيل/إيقاف استراتيجية Mean Reversion الموازية المستقلة) ──
                     elif text.startswith("/set_mean_reversion "):
                         value = text.replace("/set_mean_reversion ", "").strip().lower()
@@ -1239,19 +1220,33 @@ def telegram_command_listener(client):
                     # ── /atr_status ─────────────────────────────
                     elif text == "/atr_status":
                         with _lock:
+                            enabled         = ATR_ENABLED
                             period          = ATR_PERIOD
                             multiplier      = ATR_MULTIPLIER
                             trail_multiplier = TRAIL_ATR_MULTIPLIER
+                        status_txt = "✅ مفعّل" if enabled else "❌ مطفي"
+                        if enabled:
+                            explain = (
+                                f"عند الشراء: Stop Loss = سعر الدخول - ({multiplier} × ATR)\n"
+                                f"بعد تفعيل Trailing: Stop Loss = أعلى سعر - ({trail_multiplier} × ATR)\n"
+                                f"الستوب يتحرك لأعلى بس (يحمي الأرباح)، وما ينزل أبداً مع نزول السعر.\n"
+                                f"كل عملة تاخذ مساحة تنفس تناسب تقلبها الخاص بدل نسبة ثابتة للكل.\n"
+                                f"لو تعذّر حساب ATR لأي سبب، يرجع البوت للنسب الثابتة (Stop Loss % / Trailing %) كاحتياطي."
+                            )
+                        else:
+                            explain = (
+                                "الستوب لوس المتحرك بـ ATR مطفي حالياً — البوت (وكل الاستراتيجيات "
+                                "الموازية المربوطة معه) بيعتمد دايماً على النسب الثابتة الاحتياطية "
+                                "(Stop Loss % / Trailing % / Activate Trailing %) بدل ما يحسب ATR.\n"
+                                "شغّله بـ /set_atr_enabled on."
+                            )
                         send_admin(
                             f"📐 <b>الستوب لوس المتحرك حسب ATR</b>\n\n"
+                            f"الحالة: {status_txt}\n"
                             f"⏱️ فترة الحساب: {period} شمعة\n"
                             f"✖️ مضاعف الستوب الأولي: {multiplier}x\n"
                             f"✖️ مضاعف Trailing بعد التفعيل: {trail_multiplier}x\n\n"
-                            f"عند الشراء: Stop Loss = سعر الدخول - ({multiplier} × ATR)\n"
-                            f"بعد تفعيل Trailing: Stop Loss = أعلى سعر - ({trail_multiplier} × ATR)\n"
-                            f"الستوب يتحرك لأعلى بس (يحمي الأرباح)، وما ينزل أبداً مع نزول السعر.\n"
-                            f"كل عملة تاخذ مساحة تنفس تناسب تقلبها الخاص بدل نسبة ثابتة للكل.\n"
-                            f"لو تعذّر حساب ATR لأي سبب، يرجع البوت للنسب الثابتة (Stop Loss % / Trailing %) كاحتياطي."
+                            f"{explain}"
                         )
 
                     # ── /set_interval ────────────────────────
@@ -1392,7 +1387,7 @@ def telegram_command_listener(client):
                     # ── /set_strategy ─────────────────────────
                     elif text.startswith("/set_strategy "):
                         strategy = text.replace("/set_strategy ", "").strip().lower()
-                        if strategy in ("rsi", "stoch_rsi", "trend_stoch"):
+                        if strategy in ("rsi", "stoch_rsi"):
                             with _lock:
                                 current_strategy = strategy
                                 auto_on = AUTO_STRATEGY_ENABLED
@@ -1405,14 +1400,13 @@ def telegram_command_listener(client):
                             labels = {
                                 "rsi"        : "RSI العادي (ارتداد فوق 30)",
                                 "stoch_rsi"  : "Stochastic RSI (تقاطع K فوق D واختراق 20)",
-                                "trend_stoch": "Trend + StochRSI (تأكيد اتجاه 4 ساعات + فوليوم)",
                             }
                             msg = f"✅ تم تغيير الاستراتيجية إلى: {labels[strategy]}"
                             if auto_on:
                                 msg += "\n⚠️ التبديل التلقائي مفعّل — ممكن يبدلها تلقائياً بعد فترة التبريد (20 دقيقة) لو حالة السوق تغيّرت. أوقفه بـ /set_auto_strategy off لو تبي تثبيتها يدوياً."
                             send_admin(msg)
                         else:
-                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi\n/set_strategy trend_stoch")
+                            send_admin("❌ الاستراتيجيات المتاحة:\n/set_strategy rsi\n/set_strategy stoch_rsi")
 
                     # ── /set_auto_strategy ─────────────────────
                     elif text.startswith("/set_auto_strategy "):
@@ -1473,6 +1467,7 @@ def telegram_command_listener(client):
                             atr_period_val   = ATR_PERIOD
                             atr_mult_val     = ATR_MULTIPLIER
                             trail_atr_val    = TRAIL_ATR_MULTIPLIER
+                            atr_status_cfg   = "✅ مفعّل" if ATR_ENABLED else "❌ مطفي"
                             auto_strategy_status = "✅ مفعّل" if AUTO_STRATEGY_ENABLED else "❌ مطفي"
                             vwap_status_cfg  = "✅" if VWAP_FILTER_ENABLED else "❌"
                             bb_status_cfg    = "✅" if BB_FILTER_ENABLED else "❌"
@@ -1488,7 +1483,7 @@ def telegram_command_listener(client):
                             f"🎯 تفعيل Trailing عند: {activate}% ربح\n"
                             f"🔍 مساحة Trailing الاحتياطية: {trail}%\n"
                             f"📩 شرط الشراء: RSI السابق أصغر من {RSI_BUY_PREV} | الحالي >= {RSI_BUY_CURR}\n"
-                            f"📐 ATR: فترة {atr_period_val} شمعة | مضاعف الستوب {atr_mult_val}x | مضاعف Trailing {trail_atr_val}x\n"
+                            f"📐 ATR: {atr_status_cfg} | فترة {atr_period_val} شمعة | مضاعف الستوب {atr_mult_val}x | مضاعف Trailing {trail_atr_val}x\n"
                             f"📊 فلاتر تأكيد: VWAP {vwap_status_cfg} | Bollinger {bb_status_cfg}"
                         )
 
@@ -1538,14 +1533,15 @@ def telegram_command_listener(client):
                             "/set_interval 30 — الفريم الزمني للشموع (15/30/60/240 دقيقة)\n"
                             "/set_buy_rsi 25 30 — شرط الشراء: RSI السابق أصغر من 25 والحالي أكبر من 30\n\n"
                             "<b>📐 الستوب لوس المتحرك (ATR):</b>\n"
+                            "/set_atr_enabled on — تفعيل الستوب المتحرك حسب ATR\n"
+                            "/set_atr_enabled off — إيقافه (يرجع للنسب الثابتة الاحتياطية دايماً)\n"
                             "/set_atr_period 14 — عدد الشموع لحساب تقلب العملة\n"
                             "/set_atr_multiplier 2 — مضاعف مسافة الستوب الأولي\n"
                             "/set_trail_atr_multiplier 1.5 — مضاعف مسافة الـ Trailing بعد التفعيل\n"
                             "/atr_status — شرح وعرض إعدادات ATR الحالية\n\n"
                             "<b>الاستراتيجية:</b>\n"
                             "/set_strategy rsi — شراء عند ارتداد RSI فوق 30\n"
-                            "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n"
-                            "/set_strategy trend_stoch — StochRSI + فوليوم قوي + تأكيد اتجاه صاعد على فريم 4 ساعات\n\n"
+                            "/set_strategy stoch_rsi — شراء عند تقاطع Stochastic RSI واختراق مستوى 20\n\n"
                             "<b>🧠 التبديل التلقائي بين الاستراتيجيات:</b>\n"
                             "/set_auto_strategy on — تفعيل التبديل التلقائي حسب حالة السوق\n"
                             "/set_auto_strategy off — إيقافه (يرجع كل شي يدوي)\n"
@@ -1562,10 +1558,6 @@ def telegram_command_listener(client):
                             "/set_squeeze_breakout on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم 30 دقيقة)\n"
                             "/set_squeeze_breakout off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/squeeze_breakout_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
-                            "<b>🚀 Breakout (استراتيجية موازية مستقلة):</b>\n"
-                            "/set_breakout_parallel on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم ساعة)\n"
-                            "/set_breakout_parallel off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
-                            "/breakout_parallel_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
                             "<b>🔻 Mean Reversion (استراتيجية موازية مستقلة — ارتداد من تشبع بيعي):</b>\n"
                             "/set_mean_reversion on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم 30 دقيقة)\n"
                             "/set_mean_reversion off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
@@ -1681,6 +1673,11 @@ def get_all_prices(client, symbols=None):
 # ──────────────────────────────────────────────
 def calculate_atr(highs, lows, closes):
     """يحسب قيمة ATR الحالية (آخر شمعة) لسلسلة high/low/close معطاة"""
+    if not ATR_ENABLED:
+        # ⬅️ بطلب المستخدم: زر ATR مطفي — نرجع None مباشرة بدون أي حساب، فكل
+        # منطق الاحتياط الموجود أصلاً (Trailing/Stop Loss % الثابتة) يشتغل
+        # تلقائياً بكل الأماكن يلي بتستخدم القيمة هاي، بدون ما نحتاج نلمسهم.
+        return None
     try:
         atr_series = ta.volatility.AverageTrueRange(
             high=highs, low=lows, close=closes, window=ATR_PERIOD
@@ -1700,6 +1697,12 @@ def refresh_trade_atr(client, symbol, trade):
     القيمة الجديدة أو None لو تعذر (بهاي الحالة القيمة القديمة تضل مستخدمة).
     """
     try:
+        # ⬅️ بطلب المستخدم: لو زر ATR مطفي، لازم نمسح أي قيمة ATR قديمة محفوظة
+        # بالصفقة صراحة (مش بس نوقف حسابها من جديد) — وإلا الصفقة بتضل تستخدم
+        # قيمة ATR "عالقة" من قبل التطفية، وما بترجع فعلياً للقيم الاحتياطية.
+        if not ATR_ENABLED:
+            trade["atr"] = None
+            return None
         klines = client.get_klines(symbol=symbol, interval=current_interval, limit=ATR_PERIOD + 10)
         if not klines or len(klines) < ATR_PERIOD + 2:
             return None
@@ -1809,9 +1812,10 @@ def check_stoch_rsi(client, symbol):
         return None
 
 # ──────────────────────────────────────────────
-# 🚀 Trend + StochRSI — استراتيجية ثالثة مستقلة
-# الشروط: StochRSI بمنطقة تشبع بيعي + تقاطع إيجابي فوق السعر > MA20،
-#         فوليوم أعلى من متوسطه، وتأكيد اتجاه صاعد على فريم 4 ساعات (السعر > MA50)
+# 🌐 أدوات مساعدة لمحرك الارتباط مع BTC (Correlation Engine) — تُستخدم من
+# update_symbol_correlations لتصنيف كل عملة (TREND_FOLLOWER/INVERSE_STRENGTH/
+# NEUTRAL) بذاكرة العملات، وSmartRanker بيستخدم هالتصنيف بترتيب المرشحين
+# لكل الاستراتيجيات (بما فيها فلتر INVERSE_STRENGTH وقت BEAR بـ Mean Reversion)
 # ──────────────────────────────────────────────
 def get_btc_closes_cached(client):
     """
@@ -1824,7 +1828,7 @@ def get_btc_closes_cached(client):
             klines = client.get_klines(
                 symbol="BTCUSDT",
                 interval=current_interval,
-                limit=TREND_STOCH_BETA_LOOKBACK + 5,
+                limit=CORRELATION_BETA_LOOKBACK + 5,
             )
             if not klines:
                 return None
@@ -1882,84 +1886,8 @@ def update_symbol_correlations(client, symbols):
         log.error(f"❌ تحديث ارتباط العملات (عام): {e}")
 
 
-def check_trend_stoch(client, symbol):
-    """
-    إشارة الشراء (الثلاث شروط لازم تتحقق كلها):
-    - نفس شرط Stochastic RSI (تشبع بيعي + تقاطع إيجابي + اختراق 20) + السعر فوق MA20
-    - الفوليوم الحالي أعلى من متوسطه (VOLUME_MULTIPLIER × المتوسط)
-    - Beta العملة مقابل BTC أعلى من TREND_STOCH_BETA_THRESHOLD (تتحرك أعنف من BTC،
-      فلو BTC بترند صاعد، هاي العملة عادة بتطلع أكثر منه — استغلال الزخم)
-    يعيد dict بالقيم أو None لو مافي إشارة
-    """
-    try:
-        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
-        closes  = pd.Series([float(k[4]) for k in klines])
-        highs   = pd.Series([float(k[2]) for k in klines])
-        lows    = pd.Series([float(k[3]) for k in klines])
-        volumes = pd.Series([float(k[5]) for k in klines])
-
-        stoch  = ta.momentum.StochRSIIndicator(close=closes, window=14, smooth1=3, smooth2=3)
-        k_line = stoch.stochrsi_k() * 100
-        d_line = stoch.stochrsi_d() * 100
-
-        k_curr = round(k_line.iloc[-1], 2)
-        k_prev = round(k_line.iloc[-2], 2)
-        d_curr = round(d_line.iloc[-1], 2)
-        d_prev = round(d_line.iloc[-2], 2)
-        price  = float(closes.iloc[-1])
-        ma20   = round(closes.rolling(window=MA_PERIOD).mean().iloc[-1], 8)
-
-        base_condition = (
-            k_prev < 20 and d_prev < 20 and
-            k_curr >= 20 and
-            k_prev < d_prev and
-            k_curr > d_curr and
-            price > ma20
-        )
-        if not base_condition:
-            return None
-
-        # فلتر الفوليوم: لازم فوليوم آخر شمعة أعلى من متوسطه
-        vol_ma = volumes.rolling(window=VOLUME_MA_LENGTH).mean().iloc[-1]
-        if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * VOLUME_MULTIPLIER):
-            return None
-
-        # فلتر Beta: العملة لازم تكون أعنف حركة من BTC
-        btc_closes = get_btc_closes_cached(client)
-        if btc_closes is None or len(btc_closes) < TREND_STOCH_BETA_LOOKBACK:
-            return None   # ما قدرنا نتأكد من Beta — نتجاهل الإشارة احتياطاً
-
-        coin_closes_for_beta = closes.iloc[-len(btc_closes):]   # نفس عدد الشموع بالضبط
-        beta_value = calculate_beta(coin_closes_for_beta, btc_closes)
-        if beta_value is None or beta_value < TREND_STOCH_BETA_THRESHOLD:
-            return None
-
-        bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
-        return {
-            "k_curr": k_curr,
-            "k_prev": k_prev,
-            "d_curr": d_curr,
-            "d_prev": d_prev,
-            "price" : price,
-            "ma20"  : ma20,
-            "beta"  : beta_value,
-            "atr"   : calculate_atr(highs, lows, closes),
-            "vwap"    : calculate_vwap(highs, lows, closes, volumes),
-            "bb_lower": bb_lower,
-            "momentum_score": calculate_momentum_score(closes, volumes),
-        }
-    except BinanceAPIException as e:
-        if is_rate_limit_error(e):
-            register_api_block(f"check_trend_stoch({symbol})")
-        else:
-            log.error(f"❌ Trend+StochRSI {symbol}: {e}")
-        return None
-    except Exception as e:
-        log.error(f"❌ Trend+StochRSI {symbol}: {e}")
-        return None
-
 # ──────────────────────────────────────────────
-# 📐 فحص فلاتر التأكيد الاختيارية (VWAP + Bollinger) — مشتركة بين الاستراتيجيات الثلاث
+# 📐 فحص فلاتر التأكيد الاختيارية (VWAP + Bollinger) — مشتركة بين الاستراتيجيتين
 # ──────────────────────────────────────────────
 def passes_confirmation_filters(signal_data):
     """
@@ -2030,7 +1958,8 @@ def close_trade(client, symbol):
         # ✅ إصلاح: نستخدم الكمية الفعلية المُنفَّذة (sold_qty) لحساب الربح،
         # مش الكمية المسجلة بالذاكرة، عشان الربح يطابق تمامًا اللي صار على بينانس
         record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "manual_close",
-                             entry_slippage_pct=trade.get("entry_slippage_pct", 0.0))
+                             entry_slippage_pct=trade.get("entry_slippage_pct", 0.0),
+                             strategy=trade.get("strategy"))
         with _lock:
             if symbol in open_trades:
                 del open_trades[symbol]
@@ -2055,6 +1984,98 @@ def close_trade(client, symbol):
         log.error(f"❌ فحص رصيد {symbol} بعد فشل البيع: {e}")
 
     return None, "sell_failed"
+
+# ──────────────────────────────────────────────
+# 🟢 شراء يدوي — المستخدم بيكتب اسم العملة والمبلغ من التطبيق
+# ──────────────────────────────────────────────
+def manual_buy(client, symbol, usdt_amount):
+    """
+    شراء يدوي فوري بأمر من التطبيق — نفس بالضبط نظام الحماية المستخدم بالشراء
+    التلقائي (ATR Stop Loss + Trailing)، بس القرار والتوقيت والمبلغ يدوي بالكامل.
+    الصفقة بتنضاف مباشرة لـ open_trades تبع البوت الأساسي، فبتاخد نفس حلقة
+    إدارة الصفقات المفتوحة (ستوب لوز/Trailing) الموجودة أصلاً بدون أي كود إضافي.
+    يرجع (trade_dict, error_message) — trade_dict=None لو فشل.
+    """
+    symbol = symbol.upper().strip()
+    if not symbol.endswith("USDT"):
+        symbol = f"{symbol}USDT"
+
+    if usdt_amount <= 0:
+        return None, "المبلغ لازم يكون أكبر من صفر"
+
+    with _lock:
+        if symbol in open_trades:
+            return None, f"فيه صفقة مفتوحة أصلاً على {symbol.replace('USDT','')}"
+
+    # 🔐 حجز العملة قبل الشراء — نفس آلية الحماية من التضارب المستخدمة بكل مكان
+    if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
+        owner = get_portfolio_manager().owner_of(symbol)
+        return None, f"العملة محجوزة حالياً لاستراتيجية تانية ({owner})"
+
+    try:
+        info = client.get_symbol_info(symbol)
+        if info is None:
+            get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
+            return None, f"{symbol} غير موجودة على بينانس"
+    except Exception as e:
+        get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
+        return None, f"تعذر التحقق من العملة: {e}"
+
+    res = buy_market(client, symbol, usdt_amount)
+    if res is None:
+        get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
+        return None, "فشل تنفيذ أمر الشراء (راجع تنبيهات تيليغرام لتفاصيل الخطأ)"
+
+    # 📐 نفس صمام أمان ATR/SL بالضبط يلي البوت الأساسي يستخدمه بالشراء التلقائي
+    try:
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=ATR_PERIOD + 20)
+        highs  = pd.Series([float(k[2]) for k in klines])
+        lows   = pd.Series([float(k[3]) for k in klines])
+        closes = pd.Series([float(k[4]) for k in klines])
+        atr_value = calculate_atr(highs, lows, closes)
+    except Exception:
+        atr_value = None
+
+    market_regime = _regime_detector.get_regime_label() if _regime_detector else "SIDEWAYS"
+    with _lock:
+        multiplier = ATR_MULTIPLIER
+        fallback_stop_pct = STOP_LOSS_PCT
+    if atr_value:
+        sl_info = atr_guard.compute_stop_loss(
+            entry_price=res["entry_price"],
+            raw_atr_value=atr_value,
+            market_regime=market_regime,
+            strict_mode=False,   # ⬅️ شراء يدوي — بلا Strict Mode (المستخدم قرر بنفسه، مش SmartRanker)
+            atr_sl_multiple=multiplier,
+            strict_cap_pct=fallback_stop_pct * 100,
+        )
+        stop_price = sl_info["sl_price"]
+        used_atr   = atr_value
+    else:
+        fallback_pct = min(fallback_stop_pct * 100, atr_guard.HARD_CAP_PCT) / 100
+        stop_price   = res["entry_price"] * (1 - fallback_pct)
+        used_atr     = None
+
+    res["stop_loss"]       = round(stop_price, 8)
+    res["atr"]              = used_atr
+    res["trailing_active"]  = False
+    res["highest_price"]    = res["entry_price"]
+    res["strict_mode"]      = False
+    res["market_regime_at_entry"] = market_regime
+    res["strategy"]         = "manual"   # ⬅️ يظهر بالتطبيق كـ "شراء يدوي"، ويتسجّل صح بالسجل عند الإغلاق
+
+    with _lock:
+        open_trades[symbol] = res
+    save_trades()
+
+    coin_name = symbol.replace("USDT", "")
+    send_telegram(
+        f"🟢 <b>شراء يدوي — {coin_name}</b>\n"
+        f"💵 السعر: {res['entry_price']}\n"
+        f"🛡️ Stop Loss: {res['stop_loss']} | حالة السوق: {market_regime}\n"
+        f"💰 المبلغ: {usdt_amount} USDT"
+    )
+    return res, None
 
 def buy_market(client, symbol, usdt_amount):
     """
@@ -2293,11 +2314,10 @@ def api_trades():
     result       = []
     trades_copy  = dict(open_trades)
 
-    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Trend+Stoch / Squeeze Breakout / Breakout)
+    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Trend+Stoch / Squeeze Breakout)
     # لنفس القائمة، حتى تظهر بشاشة "الصفقات" العادية متل أي صفقة تانية.
     trend_pos = _trend_parallel_strategy.position if _trend_parallel_strategy else None
     squeeze_pos = _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None
-    breakout_pos = _breakout_parallel_strategy.position if _breakout_parallel_strategy else None
     mean_reversion_pos = _mean_reversion_strategy.position if _mean_reversion_strategy else None
 
     extra_symbols = set()
@@ -2305,8 +2325,6 @@ def api_trades():
         extra_symbols.add(trend_pos["symbol"])
     if squeeze_pos:
         extra_symbols.add(squeeze_pos["symbol"])
-    if breakout_pos:
-        extra_symbols.add(breakout_pos["symbol"])
     if mean_reversion_pos:
         extra_symbols.add(mean_reversion_pos["symbol"])
 
@@ -2356,20 +2374,6 @@ def api_trades():
             "strategy": "squeeze_breakout",
         })
 
-    if breakout_pos:
-        symbol = breakout_pos["symbol"]
-        current_price = all_prices.get(symbol, breakout_pos["entry_price"])
-        pnl_pct = round((current_price - breakout_pos["entry_price"]) / breakout_pos["entry_price"] * 100, 2)
-        result.append({
-            "symbol": symbol,
-            "entry_price": breakout_pos["entry_price"],
-            "current_price": current_price,
-            "trailing_active": breakout_pos.get("trailing_active", False),
-            "stop_loss": breakout_pos.get("stop_loss"),
-            "pnl_pct": pnl_pct,
-            "strategy": "breakout_parallel",
-        })
-
     if mean_reversion_pos:
         symbol = mean_reversion_pos["symbol"]
         current_price = all_prices.get(symbol, mean_reversion_pos["entry_price"])
@@ -2401,7 +2405,6 @@ def load_parallel_strategies_history():
     sources = [
         (os.path.join(DATA_DIR, "trend_stoch_history.json"), "trend_stoch_parallel"),
         (os.path.join(DATA_DIR, "squeeze_breakout_history.json"), "squeeze_breakout"),
-        (os.path.join(DATA_DIR, "breakout_parallel_history.json"), "breakout_parallel"),
         (os.path.join(DATA_DIR, "mean_reversion_parallel_history.json"), "mean_reversion_parallel"),
     ]
     for path, strategy_name in sources:
@@ -2479,12 +2482,12 @@ def api_get_settings():
             "ma20_enabled": ma20_enabled,
             "rsi_enabled": current_strategy == "rsi",
             "stochastic_enabled": current_strategy == "stoch_rsi",
-            "trend_stoch_enabled": current_strategy == "trend_stoch",
             "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
             "stop_loss_pct": round(STOP_LOSS_PCT * 100, 4),
             "activate_trailing_pct": round(TRAIL_ACTIVATE_PCT * 100, 4),
             "rsi_buy_prev": RSI_BUY_PREV,
             "rsi_buy_curr": RSI_BUY_CURR,
+            "atr_enabled": ATR_ENABLED,
             "atr_period": ATR_PERIOD,
             "atr_multiplier": ATR_MULTIPLIER,
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
@@ -2499,10 +2502,6 @@ def api_get_settings():
             "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
             "squeeze_breakout_usdt_per_trade": SQUEEZE_BREAKOUT_USDT_PER_TRADE,
             "squeeze_breakout_position": _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None,
-            # ✅ Breakout — استراتيجية موازية مستقلة (اختراق قمة N شمعة Donchian، سلة العملات، فريم ساعة)
-            "breakout_parallel_enabled": BREAKOUT_PARALLEL_ENABLED,
-            "breakout_parallel_usdt_per_trade": BREAKOUT_PARALLEL_USDT_PER_TRADE,
-            "breakout_parallel_position": _breakout_parallel_strategy.position if _breakout_parallel_strategy else None,
             # ✅ Mean Reversion — استراتيجية موازية مستقلة (ارتداد من تشبع بيعي، سلة العملات، فريم 30 دقيقة)
             "mean_reversion_enabled": MEAN_REVERSION_ENABLED,
             "mean_reversion_usdt_per_trade": MEAN_REVERSION_USDT_PER_TRADE,
@@ -2516,11 +2515,11 @@ def api_set_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global ATR_ENABLED
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
-    global BREAKOUT_PARALLEL_ENABLED
     global MEAN_REVERSION_ENABLED
     data = request.get_json(silent=True) or {}
     errors = []
@@ -2563,11 +2562,9 @@ def api_set_settings():
             current_strategy = "rsi"
         if "stochastic_enabled" in data and data["stochastic_enabled"]:
             current_strategy = "stoch_rsi"
-        if "trend_stoch_enabled" in data and data["trend_stoch_enabled"]:
-            current_strategy = "trend_stoch"
 
         # ✅ إصلاح خلل: نزامن ذاكرة الكاشف مع أي تغيير يدوي من التطبيق أيضاً
-        if any(k in data for k in ("rsi_enabled", "stochastic_enabled", "trend_stoch_enabled")):
+        if any(k in data for k in ("rsi_enabled", "stochastic_enabled")):
             if _regime_detector:
                 _regime_detector.current_strategy = current_strategy
                 _regime_detector.last_switch_time = time.time()
@@ -2594,6 +2591,8 @@ def api_set_settings():
                 RSI_BUY_PREV, RSI_BUY_CURR = new_prev, new_curr
 
         # ✅ إصلاح: قبول إعدادات ATR من التطبيق (كانت مفقودة كلياً)
+        if "atr_enabled" in data:
+            ATR_ENABLED = bool(data["atr_enabled"])
         if "atr_period" in data:
             v = int(data["atr_period"])
             if v <= 1: errors.append("atr_period لازم أكبر من 1")
@@ -2622,10 +2621,6 @@ def api_set_settings():
         if "squeeze_breakout_enabled" in data:
             SQUEEZE_BREAKOUT_ENABLED = bool(data["squeeze_breakout_enabled"])
 
-        # ✅ Breakout — تشغيل/إيقاف من التطبيق
-        if "breakout_parallel_enabled" in data:
-            BREAKOUT_PARALLEL_ENABLED = bool(data["breakout_parallel_enabled"])
-
         # ✅ Mean Reversion — تشغيل/إيقاف من التطبيق
         if "mean_reversion_enabled" in data:
             MEAN_REVERSION_ENABLED = bool(data["mean_reversion_enabled"])
@@ -2645,7 +2640,6 @@ def api_strategies():
             "current_strategy": current_strategy,
             "rsi_enabled": current_strategy == "rsi",
             "stochastic_enabled": current_strategy == "stoch_rsi",
-            "trend_stoch_enabled": current_strategy == "trend_stoch",
             "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
             "strategy_label": STRATEGY_LABELS.get(current_strategy, current_strategy),
         })
@@ -2730,9 +2724,6 @@ def api_close_trade():
         elif _squeeze_breakout_strategy and _squeeze_breakout_strategy.position and \
                 _squeeze_breakout_strategy.position["symbol"] == full_symbol:
             sell_price, status = _squeeze_breakout_strategy.close_manually()
-        elif _breakout_parallel_strategy and _breakout_parallel_strategy.position and \
-                _breakout_parallel_strategy.position["symbol"] == full_symbol:
-            sell_price, status = _breakout_parallel_strategy.close_manually()
         elif _mean_reversion_strategy and _mean_reversion_strategy.position and \
                 _mean_reversion_strategy.position["symbol"] == full_symbol:
             sell_price, status = _mean_reversion_strategy.close_manually()
@@ -2756,6 +2747,49 @@ def api_close_trade():
     elif status == "no_balance_removed":
         return jsonify({"ok": True, "note": "لا يوجد رصيد، تم حذف الصفقة من السجل"})
     return jsonify({"ok": True, "sell_price": sell_price})
+
+
+# ── شراء يدوي ──────────────────────────────────
+@app.route("/api/manual_buy", methods=["POST"])
+@login_required
+def api_manual_buy():
+    """
+    شراء يدوي فوري من التطبيق — المستخدم بيكتب اسم العملة والمبلغ، والبوت
+    بيشتريها فوراً بسعر السوق وبيطبّق عليها نفس نظام الحماية بالضبط (ATR Stop
+    Loss + Trailing) يلي البوت الأساسي مستخدمه بكل الصفقات التلقائية.
+    """
+    if not _binance_client:
+        return jsonify({"error": "البوت غير متصل ببينانس"}), 503
+
+    data   = request.get_json(silent=True) or {}
+    symbol = str(data.get("symbol", "")).strip()
+    if not symbol:
+        return jsonify({"error": "symbol مفقود"}), 400
+
+    try:
+        amount = float(data.get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "amount غير صحيح"}), 400
+    if amount <= 0:
+        return jsonify({"error": "amount لازم يكون أكبر من صفر"}), 400
+
+    try:
+        usdt_balance = float(_binance_client.get_asset_balance(asset="USDT")["free"])
+    except Exception as e:
+        return jsonify({"error": f"تعذر التحقق من رصيد USDT: {e}"}), 500
+    if usdt_balance < amount:
+        return jsonify({"error": f"رصيد USDT غير كافٍ (المتاح: {usdt_balance:.2f})"}), 400
+
+    trade, error = manual_buy(_binance_client, symbol, amount)
+    if trade is None:
+        return jsonify({"error": error}), 400
+    return jsonify({
+        "ok": True,
+        "symbol": symbol if symbol.upper().endswith("USDT") else f"{symbol.upper()}USDT",
+        "entry_price": trade["entry_price"],
+        "qty": trade["qty"],
+        "stop_loss": trade["stop_loss"],
+    })
 
 
 
@@ -2906,26 +2940,6 @@ def run_bot():
         daemon=True,
     )
     squeeze_breakout_thread.start()
-
-    # ── 🚀 Breakout — Thread مستقل تماماً كمان ──
-    global _breakout_parallel_strategy
-    _breakout_parallel_strategy = BreakoutParallel(
-        client,
-        notify_fn=send_telegram,
-        config_fn=_get_live_risk_config,   # ⬅️ قيم ATR/Trailing حية من إعدادات البوت الأساسي
-        symbols_fn=lambda: list(SYMBOLS),  # ⬅️ نفس الـ144 عملة المعتمدة
-        usdt_per_trade=BREAKOUT_PARALLEL_USDT_PER_TRADE,
-        live_trading=True,   # ⚠️ صفقات حقيقية — التفعيل الفعلي محكوم بـ BREAKOUT_PARALLEL_ENABLED (مطفي افتراضياً)
-        state_file=os.path.join(DATA_DIR, "breakout_parallel_state.json"),
-        history_file=os.path.join(DATA_DIR, "breakout_parallel_history.json"),
-        coin_memory_db_path=COIN_MEMORY_FILE,
-    )
-    breakout_parallel_thread = threading.Thread(
-        target=_breakout_parallel_strategy.run,
-        kwargs={"poll_seconds": 3600, "is_enabled_fn": lambda: BREAKOUT_PARALLEL_ENABLED},
-        daemon=True,
-    )
-    breakout_parallel_thread.start()
 
     # ── 🔻 Mean Reversion — Thread مستقل تماماً كمان ──
     # ⬅️ بطلب المستخدم: صارت مربوطة بالكامل بإعدادات الحماية الحية للبوت
@@ -3085,7 +3099,8 @@ def run_bot():
                                 sell_amount = round(sell_price * sold_qty, 4)
                                 pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
                                 record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "trailing_stop",
-                                                     entry_slippage_pct=trade.get("entry_slippage_pct", 0.0))  # ✅ إصلاح #3
+                                                     entry_slippage_pct=trade.get("entry_slippage_pct", 0.0),
+                                                     strategy=trade.get("strategy"))  # ✅ إصلاح #3
                                 consecutive_losses = 0   # 🛑 صفقة رابحة → تصفير عدّاد الخسارات المتتالية
                                 save_circuit_state()
                                 send_telegram(
@@ -3113,7 +3128,8 @@ def run_bot():
                                 sell_amount = round(sell_price * sold_qty, 4)
                                 pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
                                 record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "stop_loss",
-                                                     entry_slippage_pct=trade.get("entry_slippage_pct", 0.0))  # ✅ إصلاح #3
+                                                     entry_slippage_pct=trade.get("entry_slippage_pct", 0.0),
+                                                     strategy=trade.get("strategy"))  # ✅ إصلاح #3
                                 send_telegram(
                                     f"🚨 <b>ستوب لوز - {coin}</b>\n"
                                     f"📉 السعر: {sell_price:.6f}$\n"
@@ -3205,21 +3221,6 @@ def run_bot():
                         if buy_signal:
                             signal_info = f"📊 Stoch K: {stoch['k_prev']} → {stoch['k_curr']} | D: {stoch['d_prev']} → {stoch['d_curr']}"
                             candidates.append((stoch.get("momentum_score", 0.0), symbol, stoch["price"], stoch.get("atr"), signal_info))
-
-                    # ── استراتيجية Trend + StochRSI ─────────────
-                    elif strategy == "trend_stoch":
-                        trend_sig = check_trend_stoch(client, symbol)
-                        if not trend_sig:
-                            time.sleep(0.2)
-                            continue
-                        # كل شروط trend_stoch الأساسية اتفحصت جوا الدالة نفسها؛ يضل بس فلاتر VWAP/BB الاختيارية
-                        if passes_confirmation_filters(trend_sig):
-                            signal_info = (
-                                f"🚀 Trend+Stoch K: {trend_sig['k_prev']} → {trend_sig['k_curr']} | "
-                                f"D: {trend_sig['d_prev']} → {trend_sig['d_curr']} | "
-                                f"β={trend_sig.get('beta', '؟')} (أعنف من BTC) + فوليوم قوي"
-                            )
-                            candidates.append((trend_sig.get("momentum_score", 0.0), symbol, trend_sig["price"], trend_sig.get("atr"), signal_info))
 
                     else:
                         time.sleep(0.2)
@@ -3325,6 +3326,11 @@ def run_bot():
                                 res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
                                 # ⬅️ نفس المضاعفة، بس بمصطلح مضاعف ATR (يُستخدم أولوية لو ATR متاح وقت الفحص)
                                 res["trail_activate_atr_multiple"] = round(TRAIL_ACTIVATE_ATR_MULTIPLE * tp_multiplier, 4)
+
+                                # ⬅️ بطلب المستخدم: نسجّل اسم الاستراتيجية الفعّالة وقت الشراء صراحة
+                                # بالصفقة نفسها — مش نعتمد بس على current_strategy وقت العرض/الإغلاق،
+                                # لأنها ممكن تكون تبدّلت (تلقائياً أو يدوياً) من وقت فتح الصفقة لوقت إغلاقها.
+                                res["strategy"] = strategy
 
                                 open_trades[symbol]    = res
                                 save_trades()
