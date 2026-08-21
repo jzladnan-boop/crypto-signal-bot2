@@ -76,6 +76,7 @@ DEFAULT_CONFIG = {
     "require_inverse_strength_in_bear": True,  # وقت BTC هابط بقوة، نشترط تصنيف INVERSE_STRENGTH بذاكرة العملات
 
     # ── الحماية بعد الشراء (أضيق من العادي — منطقة ضعف) ──
+    "atr_enabled": True,   # ⬅️ بطلب المستخدم: زر تشغيل/إيقاف ATR — ينعكس من إعدادات البوت الأساسي عبر config_fn
     "atr_period": 14,
     "atr_multiplier": 1.3,            # ⬅️ أضيق من باقي الاستراتيجيات (كانت 2.0) — تقبّل أقل، بمنطقة ضعف
     "trail_atr_multiplier": 1.2,      # ⬅️ أضيق كمان
@@ -375,7 +376,7 @@ class MeanReversionParallel:
                 if stats is None or stats.correlation_type != CorrelationType.INVERSE_STRENGTH.value:
                     return None
 
-            atr_value = _calculate_atr(highs, lows, closes, cfg["atr_period"])
+            atr_value = _calculate_atr(highs, lows, closes, cfg["atr_period"]) if cfg.get("atr_enabled", True) else None
 
             return {
                 "symbol": symbol,
@@ -483,6 +484,12 @@ class MeanReversionParallel:
     # 🔄 ستوب الـ Trailing
     # ──────────────────────────────────────────────
     def _refresh_position_atr(self, symbol):
+        # ⬅️ بطلب المستخدم: لو زر ATR مطفي، لازم نمسح أي قيمة ATR قديمة محفوظة
+        # بالصفقة صراحة (مش بس نوقف حسابها) — وإلا الصفقة بتضل تستخدم قيمة
+        # عالقة من قبل التطفية، وما بترجع فعلياً للقيم الاحتياطية الثابتة.
+        if not self.cfg.get("atr_enabled", True):
+            self.position["atr"] = None
+            return None
         try:
             klines = self.client.get_klines(
                 symbol=symbol, interval=self.cfg["interval"],
