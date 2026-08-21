@@ -1,12 +1,11 @@
 """
 🧠 Market Regime Detector
 =========================
-يحلل حالة السوق العامة (اتجاه + تذبذب + مزاج عام) بناءً على BTC ومؤشر الخوف
-والجشع، ويقرر أنسب استراتيجية:
+يحلل تذبذب سوق BTC (ومؤشر الخوف والجشع للمعلومية) ويقرر أنسب استراتيجية
+من ثنائية البوت الأساسي:
 
-- ترند واضح  (BTC فوق MA50 على فريم 4 ساعات بهامش واضح)  → trend_stoch
-- جانبي + تذبذب عالي (ATR% مرتفع على فريم الساعة)         → stoch_rsi
-- جانبي + هادئ                                            → rsi
+- تذبذب عالي (ATR% مرتفع على فريم الساعة)  → stoch_rsi
+- هادئ                                      → rsi
 
 مؤشر الخوف والجشع (Fear & Greed) يُستخدم فقط للمعلومية بالسبب المعروض،
 بدون أي تأثير فعلي على القرار.
@@ -163,19 +162,17 @@ class MarketRegimeDetector:
             return None, "تعذر تحليل حالة السوق (بيانات غير كافية أو خطأ اتصال)"
 
         fg_suffix = f" | مزاج السوق: {fear_greed}/100" if fear_greed is not None else ""
-        effective_trend_margin = self.trend_margin_pct
 
-        # ترند واضح: BTC فوق MA50 (فريم 4 ساعات) بهامش أكبر من الحد المطلوب
-        if is_uptrend and trend_margin >= effective_trend_margin:
-            reason = f"BTC فوق MA50 (4 ساعات) بهامش {trend_margin*100:.2f}%{fg_suffix}"
-            return "trend_stoch", reason
-
-        # جانبي (لا يوجد ترند صعودي واضح بهامش كافٍ)
+        # ⬅️ بطلب المستخدم: "Trend + StochRSI" انحذفت من ثلاثية البوت الأساسي —
+        # هلق القرار صار ثنائي بالكامل (RSI العادي / Stochastic RSI)، معتمد فقط
+        # على مستوى التذبذب (ATR%)، بغض النظر عن اتجاه الترند. شرط الترند
+        # (is_uptrend/trend_margin) ما عاد له أي تأثير هون — بس get_regime_label()
+        # بالأسفل لسا بتستخدمه لتصنيف BULL/BEAR/SIDEWAYS لأغراض تانية (ATRGuard).
         if volatility_pct >= self.high_volatility_pct:
-            reason = f"سوق جانبي + تذبذب عالٍ (ATR {volatility_pct*100:.2f}%){fg_suffix}"
+            reason = f"تذبذب عالٍ (ATR {volatility_pct*100:.2f}%){fg_suffix}"
             return "stoch_rsi", reason
 
-        reason = f"سوق جانبي + هادئ (ATR {volatility_pct*100:.2f}%){fg_suffix}"
+        reason = f"هادئ (ATR {volatility_pct*100:.2f}%){fg_suffix}"
         return "rsi", reason
 
     # ──────────────────────────────────────────────
@@ -225,7 +222,7 @@ class MarketRegimeDetector:
         """
         يرجع str من {"BULL", "BEAR", "SIDEWAYS"} لاستخدامه مباشرة مع
         coin_memory.ATRGuard.compute_stop_loss(market_regime=...).
-        - BULL     : اتجاه صاعد واضح (نفس شرط trend_stoch: السعر فوق MA50 بهامش كافٍ)
+        - BULL     : اتجاه صاعد واضح (السعر فوق MA50 بهامش كافٍ)
         - BEAR     : اتجاه هابط واضح (تحت MA50 بهامش سلبي واضح)
         - SIDEWAYS : غير ذلك (ترند غير واضح، أو تعذر التحليل)
         """
