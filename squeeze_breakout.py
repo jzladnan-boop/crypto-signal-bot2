@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     "max_rise_from_squeeze_pct": 3.0,  # حد الأمان — ما نلحق لو ابتعد أكتر من 3% عن نقطة الانكماش
 
     # ── الحماية (نفس نظام البوت بالضبط) ──
+    "atr_enabled": True,   # ⬅️ بطلب المستخدم: زر تشغيل/إيقاف ATR — ينعكس من إعدادات البوت الأساسي عبر config_fn
     "atr_period": 14,
     "atr_multiplier": 2.0,
     "trail_atr_multiplier": 1.5,
@@ -346,7 +347,7 @@ class SqueezeBreakout:
             if rise_pct > self.cfg["max_rise_from_squeeze_pct"]:
                 return None
 
-            atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
+            atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"]) if self.cfg.get("atr_enabled", True) else None
 
             return {
                 "symbol": symbol,
@@ -448,6 +449,12 @@ class SqueezeBreakout:
     # ──────────────────────────────────────────────
     def _refresh_position_atr(self, symbol):
         """⬅️ تحسين 1: يعيد حساب ATR الحالي لعملة الصفقة المفتوحة كل دورة فحص."""
+        # ⬅️ بطلب المستخدم: لو زر ATR مطفي، لازم نمسح أي قيمة ATR قديمة محفوظة
+        # بالصفقة صراحة (مش بس نوقف حسابها) — وإلا الصفقة بتضل تستخدم قيمة
+        # عالقة من قبل التطفية، وما بترجع فعلياً للقيم الاحتياطية الثابتة.
+        if not self.cfg.get("atr_enabled", True):
+            self.position["atr"] = None
+            return None
         try:
             klines = self.client.get_klines(
                 symbol=symbol, interval=self.cfg["interval"],
