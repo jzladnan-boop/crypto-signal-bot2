@@ -65,6 +65,7 @@ DEFAULT_CONFIG = {
     "volume_ma_length": 20,
     "volume_multiplier": 1.0,
     # ⬅️ بطلب المستخدم: فلتر Beta (مقارنة الزخم بـ BTC) أُلغي بالكامل من شروط الدخول
+    "atr_enabled": True,   # ⬅️ بطلب المستخدم: زر تشغيل/إيقاف ATR — ينعكس من إعدادات البوت الأساسي عبر config_fn
     "atr_period": 14,
 
     # ── الحماية (نفس نظام البوت بالضبط) ──
@@ -338,7 +339,7 @@ class TrendStochParallel:
             if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * self.cfg["volume_multiplier"]):
                 return None
 
-            atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"])
+            atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"]) if self.cfg.get("atr_enabled", True) else None
 
             return {
                 "symbol": symbol, "price": price, "ma20": ma20,
@@ -436,6 +437,12 @@ class TrendStochParallel:
     # ──────────────────────────────────────────────
     def _refresh_position_atr(self, symbol):
         """⬅️ تحسين 1: يعيد حساب ATR الحالي لعملة الصفقة المفتوحة كل دورة فحص."""
+        # ⬅️ بطلب المستخدم: لو زر ATR مطفي، لازم نمسح أي قيمة ATR قديمة محفوظة
+        # بالصفقة صراحة (مش بس نوقف حسابها) — وإلا الصفقة بتضل تستخدم قيمة
+        # عالقة من قبل التطفية، وما بترجع فعلياً للقيم الاحتياطية الثابتة.
+        if not self.cfg.get("atr_enabled", True):
+            self.position["atr"] = None
+            return None
         try:
             klines = self.client.get_klines(
                 symbol=symbol, interval=self.cfg["interval"],
