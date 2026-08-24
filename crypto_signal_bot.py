@@ -60,6 +60,7 @@ def _get_live_risk_config():
             "trail_activate_pct": TRAIL_ACTIVATE_PCT,
             "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
             "stop_loss_fallback_pct": STOP_LOSS_PCT,
+            "trail_trigger_max_pct": TRAIL_TRIGGER_MAX_PCT,
         }
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
@@ -116,6 +117,13 @@ TRAIL_ACTIVATE_PCT = 0.01
 # ⬅️ بدل نسبة ثابتة: تفعيل Trailing بمضاعف ATR الحالي (يتكيف مع تذبذب كل عملة)،
 # مع رجوع للنسبة الثابتة (TRAIL_ACTIVATE_PCT) كاحتياطي لو تعذر حساب ATR بلحظة الفحص.
 TRAIL_ACTIVATE_ATR_MULTIPLE     = 1.0
+
+# ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing، بغض النظر عن
+# قيمة ATR الخام. بدون هالسقف، عملة متقلبة (ATR كبير) ممكن تحتاج ربح كبير
+# جداً (5-6%+) لتفعيل Trailing بينما الـ Stop Loss النازل مقيّد بسقف صلب
+# 2.5-3% فقط (ATRGuard.HARD_CAP_PCT) — عدم تناسق يخلي صفقات رابحة فعلياً
+# تفوت تفعيل الحماية وترجع تنزل بدون ما "تقفل" أي ربح.
+TRAIL_TRIGGER_MAX_PCT           = 3.0
 
 TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي بناءً على طلب المستخدم (كان 2.0)
@@ -1921,15 +1929,26 @@ def compute_trail_stop(price, trade):
     - غير هيك: نرجع للنسبة الثابتة TRAIL_PCT كاحتياطي.
     ملاحظة: هذا السعر يُستخدم فقط لما يصير سعر قمة جديدة (price > highest_price)،
     فالستوب يتحرك لأعلى بس ولا ينزل أبداً مع نزول السعر.
+
+    🔒 Breakeven Lock: أول ما Trailing يتفعّل (يعني تأكدنا إنه فيه ربح فعلي)،
+    الستوب ما ينزل أبداً تحت سعر الدخول — أسوأ سيناريو ممكن يصير هو الخروج
+    بدون ربح ولا خسارة، مش الرجوع لخسارة فعلية بعد ما كانت الصفقة رابحة.
+    (قبل هالإصلاح: عملة متقلبة (ATR كبير) كانت ممكن تفعّل Trailing عند ربح
+    بسيط، وبعدين الستوب المحسوب بـ ATR يرجع ينزل تحت الدخول، فتوقف الصفقة
+    على خسارة رغم إنها كانت رابحة فعلياً بلحظة معينة.)
     """
     atr_val = trade.get("atr")
     if atr_val:
         with _lock:
             multiplier = TRAIL_ATR_MULTIPLIER
         candidate = price - (multiplier * atr_val)
-        if 0 < candidate < price:
-            return round(candidate, 8)
-    return round(price * (1 - TRAIL_PCT), 8)
+        if not (0 < candidate < price):
+            candidate = price * (1 - TRAIL_PCT)
+    else:
+        candidate = price * (1 - TRAIL_PCT)
+
+    candidate = max(candidate, trade["entry_price"])   # 🔒 Breakeven Lock
+    return round(candidate, 8)
 
 # ──────────────────────────────────────────────
 # تنفيذ الصفقات
@@ -3068,9 +3087,15 @@ def run_bot():
                     # ⬅️ تحسين: نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة —
                     # تتكيف تلقائياً مع تذبذب كل عملة، مع رجوع للنسبة الثابتة كاحتياطي فقط
                     # لو تعذر حساب ATR بلحظة الفحص.
+                    # ⬅️ إصلاح: نقيّد العتبة بسقف أقصى (TRAIL_TRIGGER_MAX_PCT) — بدونه،
+                    # عملة عندها ATR خام كبير كانت ممكن تطلب ربح ضخم (5-6%+) لتفعيل
+                    # Trailing، رغم إن الـ Stop Loss النازل مقيّد بسقف صلب أضيق بكثير
+                    # (2.5-3%) — عدم تناسق يخلي صفقات رابحة فعلياً تفوت "قفل" أي ربح.
                     if atr_val:
                         trail_atr_multiple     = trade.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
-                        trail_trigger_price     = trade["entry_price"] + (trail_atr_multiple * atr_val)
+                        raw_trigger_price       = trade["entry_price"] + (trail_atr_multiple * atr_val)
+                        capped_trigger_price    = trade["entry_price"] * (1 + TRAIL_TRIGGER_MAX_PCT / 100)
+                        trail_trigger_price     = min(raw_trigger_price, capped_trigger_price)
                     else:
                         trail_trigger_price     = trade["entry_price"] * (1 + trade.get("trail_activate_pct", TRAIL_ACTIVATE_PCT))
 
