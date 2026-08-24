@@ -65,6 +65,7 @@ DEFAULT_CONFIG = {
     "trail_atr_multiplier": 1.5,
     "trail_activate_atr_multiple": 1.0,     # ⬅️ بدل نسبة ثابتة: تفعيل Trailing عند ربح = 1.0×ATR الحالي
     "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
+    "trail_trigger_max_pct": 3.0,      # ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing
     "stop_loss_fallback_pct": 0.02,
     "fallback_trail_pct": 0.01,
 
@@ -474,12 +475,20 @@ class SqueezeBreakout:
             return None
 
     def _compute_trail_stop(self, price):
+        """
+        🔒 Breakeven Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً تحت
+        سعر الدخول.
+        """
         atr_val = self.position.get("atr")
         if atr_val:
             candidate = price - (self.cfg["trail_atr_multiplier"] * atr_val)
-            if 0 < candidate < price:
-                return round(candidate, 8)
-        return round(price * (1 - self.cfg["fallback_trail_pct"]), 8)
+            if not (0 < candidate < price):
+                candidate = price * (1 - self.cfg["fallback_trail_pct"])
+        else:
+            candidate = price * (1 - self.cfg["fallback_trail_pct"])
+
+        candidate = max(candidate, self.position["entry_price"])   # 🔒 Breakeven Lock
+        return round(candidate, 8)
 
     # ──────────────────────────────────────────────
     # 🔍 إدارة الصفقة المفتوحة (Trailing + Stop Loss)
@@ -495,9 +504,11 @@ class SqueezeBreakout:
         fresh_atr = self._refresh_position_atr(symbol)
         atr_val = fresh_atr if fresh_atr else self.position.get("atr")
 
-        # ⬅️ نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة
+        # ⬅️ نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة، مقيّدة بسقف أقصى
         if atr_val:
-            trail_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
+            raw_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
+            capped_trigger = self.position["entry_price"] * (1 + self.cfg["trail_trigger_max_pct"] / 100)
+            trail_trigger = min(raw_trigger, capped_trigger)
         else:
             trail_trigger = self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"])
 
