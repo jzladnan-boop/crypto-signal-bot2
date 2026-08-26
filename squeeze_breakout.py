@@ -66,10 +66,11 @@ DEFAULT_CONFIG = {
     "trail_activate_atr_multiple": 1.0,     # ⬅️ بدل نسبة ثابتة: تفعيل Trailing عند ربح = 1.0×ATR الحالي
     "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
     "trail_trigger_max_pct": 3.0,      # ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing
+    "min_profit_lock_pct": 0.80,       # ⬅️ بطلب المستخدم: ربح مضمون بعد تفعيل Trailing، مش مجرد Breakeven
     "stop_loss_fallback_pct": 0.02,
     "fallback_trail_pct": 0.01,
 
-    "usdt_per_trade": 15.0,
+    "usdt_per_trade": 20.0,
     "live_trading": False,
     "state_file": "squeeze_breakout_state.json",
     "history_file": "squeeze_breakout_history.json",
@@ -476,8 +477,8 @@ class SqueezeBreakout:
 
     def _compute_trail_stop(self, price):
         """
-        🔒 Breakeven Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً تحت
-        سعر الدخول.
+        🔒 Minimum Profit Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً
+        تحت (سعر الدخول + min_profit_lock_pct%).
         """
         atr_val = self.position.get("atr")
         if atr_val:
@@ -487,7 +488,8 @@ class SqueezeBreakout:
         else:
             candidate = price * (1 - self.cfg["fallback_trail_pct"])
 
-        candidate = max(candidate, self.position["entry_price"])   # 🔒 Breakeven Lock
+        min_locked_price = self.position["entry_price"] * (1 + self.cfg["min_profit_lock_pct"] / 100)
+        candidate = max(candidate, min_locked_price)   # 🔒 Minimum Profit Lock
         return round(candidate, 8)
 
     # ──────────────────────────────────────────────
