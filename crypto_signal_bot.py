@@ -61,6 +61,7 @@ def _get_live_risk_config():
             "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
             "stop_loss_fallback_pct": STOP_LOSS_PCT,
             "trail_trigger_max_pct": TRAIL_TRIGGER_MAX_PCT,
+            "min_profit_lock_pct": MIN_PROFIT_LOCK_PCT,
         }
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
@@ -124,6 +125,11 @@ TRAIL_ACTIVATE_ATR_MULTIPLE     = 1.0
 # 2.5-3% فقط (ATRGuard.HARD_CAP_PCT) — عدم تناسق يخلي صفقات رابحة فعلياً
 # تفوت تفعيل الحماية وترجع تنزل بدون ما "تقفل" أي ربح.
 TRAIL_TRIGGER_MAX_PCT           = 3.0
+
+# ⬅️ بطلب المستخدم: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً تحت هالنسبة
+# من الربح فوق سعر الدخول — يعني أسوأ سيناريو ممكن يصير هو الخروج بربح
+# 0.80% على الأقل، مش مجرد Breakeven (صفر) ولا أسوأ.
+MIN_PROFIT_LOCK_PCT             = 0.80
 
 TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي بناءً على طلب المستخدم (كان 2.0)
@@ -299,7 +305,7 @@ BB_LOWER_MARGIN_PCT = 0.01    # هامش القرب المسموح من الحد
 # مطفية افتراضياً — تفعّل/تطفى من تيليغرام (/set_trend_parallel on|off) أو التطبيق.
 # ──────────────────────────────────────────────
 TREND_PARALLEL_ENABLED = False
-TREND_PARALLEL_USDT_PER_TRADE = 15.0
+TREND_PARALLEL_USDT_PER_TRADE = 20.0
 _trend_parallel_strategy = None   # ⬅️ نسخة TrendStochParallel الوحيدة
 
 # ──────────────────────────────────────────────
@@ -309,7 +315,7 @@ _trend_parallel_strategy = None   # ⬅️ نسخة TrendStochParallel الوح�
 # (/set_squeeze_breakout on|off) أو التطبيق.
 # ──────────────────────────────────────────────
 SQUEEZE_BREAKOUT_ENABLED = False
-SQUEEZE_BREAKOUT_USDT_PER_TRADE = 15.0
+SQUEEZE_BREAKOUT_USDT_PER_TRADE = 20.0
 _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحيدة
 
 # ──────────────────────────────────────────────
@@ -320,7 +326,7 @@ _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحي
 # افتراضياً — تفعّل/تطفى من تيليغرام (/set_mean_reversion on|off) أو التطبيق.
 # ──────────────────────────────────────────────
 MEAN_REVERSION_ENABLED = False
-MEAN_REVERSION_USDT_PER_TRADE = 15.0
+MEAN_REVERSION_USDT_PER_TRADE = 20.0
 _mean_reversion_strategy = None   # ⬅️ نسخة MeanReversionParallel الوحيدة
 
 # ──────────────────────────────────────────────
@@ -1930,9 +1936,10 @@ def compute_trail_stop(price, trade):
     ملاحظة: هذا السعر يُستخدم فقط لما يصير سعر قمة جديدة (price > highest_price)،
     فالستوب يتحرك لأعلى بس ولا ينزل أبداً مع نزول السعر.
 
-    🔒 Breakeven Lock: أول ما Trailing يتفعّل (يعني تأكدنا إنه فيه ربح فعلي)،
-    الستوب ما ينزل أبداً تحت سعر الدخول — أسوأ سيناريو ممكن يصير هو الخروج
-    بدون ربح ولا خسارة، مش الرجوع لخسارة فعلية بعد ما كانت الصفقة رابحة.
+    🔒 Minimum Profit Lock: أول ما Trailing يتفعّل (يعني تأكدنا إنه فيه ربح فعلي)،
+    الستوب ما ينزل أبداً تحت (سعر الدخول + MIN_PROFIT_LOCK_PCT%) — أسوأ سيناريو
+    ممكن يصير هو الخروج بربح MIN_PROFIT_LOCK_PCT% مضمون على الأقل، مش مجرد
+    Breakeven (صفر) ولا الرجوع لخسارة فعلية بعد ما كانت الصفقة رابحة.
     (قبل هالإصلاح: عملة متقلبة (ATR كبير) كانت ممكن تفعّل Trailing عند ربح
     بسيط، وبعدين الستوب المحسوب بـ ATR يرجع ينزل تحت الدخول، فتوقف الصفقة
     على خسارة رغم إنها كانت رابحة فعلياً بلحظة معينة.)
@@ -1947,7 +1954,8 @@ def compute_trail_stop(price, trade):
     else:
         candidate = price * (1 - TRAIL_PCT)
 
-    candidate = max(candidate, trade["entry_price"])   # 🔒 Breakeven Lock
+    min_locked_price = trade["entry_price"] * (1 + MIN_PROFIT_LOCK_PCT / 100)
+    candidate = max(candidate, min_locked_price)   # 🔒 Minimum Profit Lock (0.80% افتراضياً)
     return round(candidate, 8)
 
 # ──────────────────────────────────────────────
