@@ -76,10 +76,12 @@ DEFAULT_CONFIG = {
     "trail_trigger_max_pct": 3.0,      # ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing — يمنع
                                         # عملة متقلبة (ATR خام كبير) من طلب ربح ضخم لتفعيل الحماية، رغم إن
                                         # الـ Stop Loss النازل مقيّد بسقف أضيق بكثير (atr_multiplier + الحد الصلب)
+    "min_profit_lock_pct": 0.80,       # ⬅️ بطلب المستخدم: أول ما Trailing يتفعّل، الستوب ما ينزل تحت
+                                        # (سعر الدخول + هالنسبة) — ربح مضمون على الأقل، مش مجرد Breakeven
     "stop_loss_fallback_pct": 0.02,    # احتياطي لو ما قدرنا نحسب ATR
     "fallback_trail_pct": 0.01,        # احتياطي Trailing لو ما قدرنا نحسب ATR
 
-    "usdt_per_trade": 15.0,
+    "usdt_per_trade": 20.0,
     "live_trading": False,             # ⚠️ لازم True صراحة لتنفيذ صفقات حقيقية
     "state_file": "trend_stoch_state.json",
     "history_file": "trend_stoch_history.json",
@@ -466,9 +468,10 @@ class TrendStochParallel:
 
     def _compute_trail_stop(self, price):
         """
-        🔒 Breakeven Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً تحت
-        سعر الدخول — أسوأ سيناريو هو الخروج بدون ربح ولا خسارة، مش الرجوع
-        لخسارة فعلية بعد ما كانت الصفقة رابحة.
+        🔒 Minimum Profit Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً
+        تحت (سعر الدخول + min_profit_lock_pct%) — أسوأ سيناريو هو الخروج
+        بربح مضمون بهالنسبة على الأقل، مش الرجوع لخسارة فعلية بعد ما كانت
+        الصفقة رابحة.
         """
         atr_val = self.position.get("atr")
         if atr_val:
@@ -478,7 +481,8 @@ class TrendStochParallel:
         else:
             candidate = price * (1 - self.cfg["fallback_trail_pct"])
 
-        candidate = max(candidate, self.position["entry_price"])   # 🔒 Breakeven Lock
+        min_locked_price = self.position["entry_price"] * (1 + self.cfg["min_profit_lock_pct"] / 100)
+        candidate = max(candidate, min_locked_price)   # 🔒 Minimum Profit Lock
         return round(candidate, 8)
 
     # ──────────────────────────────────────────────
