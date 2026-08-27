@@ -2961,7 +2961,7 @@ def run_bot():
     )
     trend_parallel_thread = threading.Thread(
         target=_trend_parallel_strategy.run,
-        kwargs={"poll_seconds": 3600, "is_enabled_fn": lambda: TREND_PARALLEL_ENABLED},
+        kwargs={"poll_seconds": 300, "is_enabled_fn": lambda: TREND_PARALLEL_ENABLED},  # 5 دقايق - نفس معدل فحص صياد
         daemon=True,
     )
     trend_parallel_thread.start()
