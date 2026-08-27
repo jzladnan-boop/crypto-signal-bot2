@@ -67,6 +67,7 @@ DEFAULT_CONFIG = {
     "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
     "trail_trigger_max_pct": 3.0,      # ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing
     "min_profit_lock_pct": 0.80,       # ⬅️ بطلب المستخدم: ربح مضمون بعد تفعيل Trailing، مش مجرد Breakeven
+    "trail_distance_max_pct": 1.0,     # ⬅️ بطلب المستخدم: سقف أقصى لمسافة تراجع Trailing عن القمة
     "stop_loss_fallback_pct": 0.02,
     "fallback_trail_pct": 0.01,
 
@@ -477,12 +478,18 @@ class SqueezeBreakout:
 
     def _compute_trail_stop(self, price):
         """
+        🔒 سقف مسافة التراجع (trail_distance_max_pct): مسافة الستوب عن القمة
+        ما تتجاوز هالنسبة من السعر، بغض النظر عن قيمة ATR الخام.
+
         🔒 Minimum Profit Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً
         تحت (سعر الدخول + min_profit_lock_pct%).
         """
         atr_val = self.position.get("atr")
         if atr_val:
-            candidate = price - (self.cfg["trail_atr_multiplier"] * atr_val)
+            atr_distance = self.cfg["trail_atr_multiplier"] * atr_val
+            max_distance = price * (self.cfg["trail_distance_max_pct"] / 100)
+            distance = min(atr_distance, max_distance)   # 🔒 الأصغر بين ATR والسقف النسبي
+            candidate = price - distance
             if not (0 < candidate < price):
                 candidate = price * (1 - self.cfg["fallback_trail_pct"])
         else:
