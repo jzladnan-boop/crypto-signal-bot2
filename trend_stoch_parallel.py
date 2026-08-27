@@ -49,12 +49,14 @@ from indicators import calculate_bollinger_bands, calculate_vwap, calculate_mome
 from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
+import sayyad_logic
 
 _PORTFOLIO_OWNER = "trend_parallel"
 
 
 DEFAULT_CONFIG = {
-    "interval": Client.KLINE_INTERVAL_1HOUR,   # ⬅️ بطلب المستخدم: فريم ساعة
+    "interval": Client.KLINE_INTERVAL_30MINUTE,   # منطق صياد: شمعة 30 دقيقة
+    "kline_lookback": 48,                          # 48 شمعة × 30 دقيقة = 24 ساعة (نظرة صياد)
     "symbols": None,   # None = يجيب قائمة عملات USDT Spot النشطة تلقائياً (نفس نطاق البوت)
     "exclude_leveraged": True,   # يستبعد UP/DOWN/BULL/BEAR (توكنز رافعة مالية)
 
@@ -308,50 +310,37 @@ class TrendStochParallel:
             return self._symbols_cache or []
 
     # ──────────────────────────────────────────────
-    # 🟢 فحص إشارة الدخول لعملة وحدة (نفس check_trend_stoch، بدون فلتر Beta)
+    # 🟢 فحص إشارة الدخول لعملة وحدة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
     # ──────────────────────────────────────────────
     def check_symbol_entry(self, symbol):
         try:
-            klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=100)
-            if not klines or len(klines) < 30:
+            klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=self.cfg["kline_lookback"])
+            if len(klines) < sayyad_logic.MOMENTUM_WINDOW_CANDLES + 1:
                 return None
-            closes  = pd.Series([float(k[4]) for k in klines])
-            highs   = pd.Series([float(k[2]) for k in klines])
-            lows    = pd.Series([float(k[3]) for k in klines])
-            volumes = pd.Series([float(k[5]) for k in klines])
 
-            stoch = ta.momentum.StochRSIIndicator(
-                close=closes, window=self.cfg["stoch_window"],
-                smooth1=self.cfg["stoch_smooth1"], smooth2=self.cfg["stoch_smooth2"],
-            )
-            k_line = stoch.stochrsi_k() * 100
-            d_line = stoch.stochrsi_d() * 100
+            momentum = sayyad_logic.compute_momentum(klines)
+            if momentum is None or momentum["price_change_pct"] <= 0:
+                return None
 
-            k_curr, k_prev = round(k_line.iloc[-1], 2), round(k_line.iloc[-2], 2)
-            d_curr, d_prev = round(d_line.iloc[-1], 2), round(d_line.iloc[-2], 2)
+            ob_imbalance = sayyad_logic.compute_order_book_imbalance(self.client, symbol)
+            whale_data = sayyad_logic.detect_whale_trades(self.client, symbol)
+            score, breakdown = sayyad_logic.compute_score(momentum, ob_imbalance, whale_data)
+
+            if score < sayyad_logic.MIN_SCORE_TO_ACCEPT:
+                return None
+            if sayyad_logic.is_extreme_move(breakdown):
+                return None
+
+            closes = pd.Series([float(k[4]) for k in klines])
+            highs = pd.Series([float(k[2]) for k in klines])
+            lows = pd.Series([float(k[3]) for k in klines])
             price = float(closes.iloc[-1])
-            ma20  = round(closes.rolling(window=self.cfg["ma_period"]).mean().iloc[-1], 8)
-            level = self.cfg["stoch_entry_level"]
-
-            base_condition = (
-                k_prev < level and d_prev < level and
-                k_curr >= level and
-                k_prev < d_prev and k_curr > d_curr and
-                price > ma20
-            )
-            if not base_condition:
-                return None
-
-            vol_ma = volumes.rolling(window=self.cfg["volume_ma_length"]).mean().iloc[-1]
-            if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * self.cfg["volume_multiplier"]):
-                return None
-
             atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"]) if self.cfg.get("atr_enabled", True) else None
 
             return {
-                "symbol": symbol, "price": price, "ma20": ma20,
-                "k_curr": k_curr, "d_curr": d_curr, "atr": atr_value,
-                "momentum_score": calculate_momentum_score(closes, volumes),
+                "symbol": symbol, "price": price, "atr": atr_value,
+                "momentum_score": score,
+                "sayyad_breakdown": breakdown,
             }
         except BinanceAPIException:
             return None
