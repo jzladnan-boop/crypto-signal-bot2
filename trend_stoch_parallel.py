@@ -78,6 +78,8 @@ DEFAULT_CONFIG = {
                                         # الـ Stop Loss النازل مقيّد بسقف أضيق بكثير (atr_multiplier + الحد الصلب)
     "min_profit_lock_pct": 0.80,       # ⬅️ بطلب المستخدم: أول ما Trailing يتفعّل، الستوب ما ينزل تحت
                                         # (سعر الدخول + هالنسبة) — ربح مضمون على الأقل، مش مجرد Breakeven
+    "trail_distance_max_pct": 1.0,     # ⬅️ بطلب المستخدم: سقف أقصى لمسافة تراجع Trailing عن القمة، بغض
+                                        # النظر عن ATR — يمنع عملة متقلبة من "أكل" ربح كبير بمسافة واسعة
     "stop_loss_fallback_pct": 0.02,    # احتياطي لو ما قدرنا نحسب ATR
     "fallback_trail_pct": 0.01,        # احتياطي Trailing لو ما قدرنا نحسب ATR
 
@@ -468,6 +470,10 @@ class TrendStochParallel:
 
     def _compute_trail_stop(self, price):
         """
+        🔒 سقف مسافة التراجع (trail_distance_max_pct): مسافة الستوب عن القمة
+        ما تتجاوز هالنسبة من السعر، بغض النظر عن قيمة ATR الخام — عملة
+        متقلبة ما عاد تاخد مساحة واسعة تبتلع الربح.
+
         🔒 Minimum Profit Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً
         تحت (سعر الدخول + min_profit_lock_pct%) — أسوأ سيناريو هو الخروج
         بربح مضمون بهالنسبة على الأقل، مش الرجوع لخسارة فعلية بعد ما كانت
@@ -475,7 +481,10 @@ class TrendStochParallel:
         """
         atr_val = self.position.get("atr")
         if atr_val:
-            candidate = price - (self.cfg["trail_atr_multiplier"] * atr_val)
+            atr_distance = self.cfg["trail_atr_multiplier"] * atr_val
+            max_distance = price * (self.cfg["trail_distance_max_pct"] / 100)
+            distance = min(atr_distance, max_distance)   # 🔒 الأصغر بين ATR والسقف النسبي
+            candidate = price - distance
             if not (0 < candidate < price):
                 candidate = price * (1 - self.cfg["fallback_trail_pct"])
         else:
