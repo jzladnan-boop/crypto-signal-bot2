@@ -62,6 +62,7 @@ def _get_live_risk_config():
             "stop_loss_fallback_pct": STOP_LOSS_PCT,
             "trail_trigger_max_pct": TRAIL_TRIGGER_MAX_PCT,
             "min_profit_lock_pct": MIN_PROFIT_LOCK_PCT,
+            "trail_distance_max_pct": TRAIL_DISTANCE_MAX_PCT,
         }
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
@@ -130,6 +131,15 @@ TRAIL_TRIGGER_MAX_PCT           = 3.0
 # من الربح فوق سعر الدخول — يعني أسوأ سيناريو ممكن يصير هو الخروج بربح
 # 0.80% على الأقل، مش مجرد Breakeven (صفر) ولا أسوأ.
 MIN_PROFIT_LOCK_PCT             = 0.80
+
+# ⬅️ بطلب المستخدم: سقف أقصى (%) لمسافة تراجع الـ Trailing نفسها (الفرق بين
+# أعلى سعر والستوب)، بغض النظر عن قيمة ATR الخام. المشكلة قبل هالسقف: عملة
+# متقلبة (ATR كبير بالقيمة المطلقة) كانت تعطي مسافة تراجع كبيرة حتى لو
+# المضاعف (trail_atr_multiplier) صغير، لأنه 0.2×ATR الكبير ممكن يطلع أكبر
+# من 0.2×ATR لعملة هادية. هلق المسافة الفعلية = الأصغر بين (المضاعف×ATR)
+# و(هالسقف% من السعر الحالي) — فمهما كان تقلب العملة، الفجوة المسموحة من
+# القمة محدودة، وبالتالي "يحترم" الربح المتحقق بدل ما يبتلعه تراجع كبير.
+TRAIL_DISTANCE_MAX_PCT          = 1.0
 
 TRADE_AMOUNT       = 15.0
 RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي بناءً على طلب المستخدم (كان 2.0)
@@ -1936,6 +1946,10 @@ def compute_trail_stop(price, trade):
     ملاحظة: هذا السعر يُستخدم فقط لما يصير سعر قمة جديدة (price > highest_price)،
     فالستوب يتحرك لأعلى بس ولا ينزل أبداً مع نزول السعر.
 
+    🔒 سقف مسافة التراجع (TRAIL_DISTANCE_MAX_PCT): مسافة الستوب عن القمة ما
+    تتجاوز هالنسبة من السعر، بغض النظر عن قيمة ATR الخام — عملة متقلبة (ATR
+    كبير) ما عاد تاخد "مساحة تنفّس" واسعة تبتلع الربح؛ الفجوة محدودة دايماً.
+
     🔒 Minimum Profit Lock: أول ما Trailing يتفعّل (يعني تأكدنا إنه فيه ربح فعلي)،
     الستوب ما ينزل أبداً تحت (سعر الدخول + MIN_PROFIT_LOCK_PCT%) — أسوأ سيناريو
     ممكن يصير هو الخروج بربح MIN_PROFIT_LOCK_PCT% مضمون على الأقل، مش مجرد
@@ -1948,7 +1962,11 @@ def compute_trail_stop(price, trade):
     if atr_val:
         with _lock:
             multiplier = TRAIL_ATR_MULTIPLIER
-        candidate = price - (multiplier * atr_val)
+            max_distance_pct = TRAIL_DISTANCE_MAX_PCT
+        atr_distance = multiplier * atr_val
+        max_distance = price * (max_distance_pct / 100)
+        distance = min(atr_distance, max_distance)   # 🔒 الأصغر بين ATR والسقف النسبي
+        candidate = price - distance
         if not (0 < candidate < price):
             candidate = price * (1 - TRAIL_PCT)
     else:
