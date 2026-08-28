@@ -364,6 +364,14 @@ class TrendStochParallel:
         if not symbols:
             return None
 
+        # فحص اتساع السوق أول شي — طلب واحد بس لكل دورة. لو أغلب السوق نازل
+        # (24 ساعة)، نوقف كل محاولة دخول هالدورة بغض النظر عن قوة أي إشارة
+        # فردية — تجنّب "السباحة عكس التيار" (زي صفقة ENSO يلي خسرت بيوم
+        # كان 81% من السوق أحمر).
+        breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
+        if breadth and breadth["is_bearish"]:
+            return None
+
         portfolio = get_portfolio_manager()
         best_signal = None
         for symbol in symbols:

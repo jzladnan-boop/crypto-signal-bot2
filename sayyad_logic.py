@@ -16,6 +16,7 @@ EXTREME_MOVE_THRESHOLD_PCT = 20    # حركة أكبر من كذا % (4س أو 2
 LARGE_TRADE_USDT_THRESHOLD = 10_000
 MIN_SCORE_TO_ACCEPT = 60
 RSI_OVERBOUGHT_THRESHOLD = 70      # RSI للعملة فوق هالرقم = تشبّع شرائي، رفض احترازي
+MARKET_BREADTH_DANGER_THRESHOLD = 75  # % من العملات نازلة (24س) = سوق ضعيف عام، نوقف كل دخول هالدورة
 
 
 def compute_momentum(klines, momentum_window=MOMENTUM_WINDOW_CANDLES):
@@ -117,6 +118,33 @@ def compute_rsi(closes, period=14):
 def is_overbought(rsi_value):
     """فلتر مستقل: RSI فوق الحد = تشبّع شرائي، رفض احترازي بغض النظر عن النقاط"""
     return rsi_value is not None and rsi_value >= RSI_OVERBOUGHT_THRESHOLD
+
+
+def compute_market_breadth(client, symbols, threshold_pct=MARKET_BREADTH_DANGER_THRESHOLD):
+    """
+    يحسب نسبة العملات النازلة (24 ساعة رسمية) من أصل قائمة رموز محددة —
+    طلب API واحد بس (get_ticker بدون رمز = كل الأسواق دفعة وحدة)، بيرجع
+    النسبة المئوية للنازلة. لو تجاوزت الحد، نعتبر السوق "ضعيف عام" ونوقف
+    كل دخول هالدورة، حتى لو عملة معينة عندها إشارة قوية فردياً (زي ما صار
+    مع ENSO بيوم كان 81% من السوق أحمر).
+    """
+    try:
+        tickers = client.get_ticker()  # كل الرموز دفعة وحدة — طلب واحد فقط
+        change_map = {t["symbol"]: float(t["priceChangePercent"]) for t in tickers}
+        watched_changes = [change_map[s] for s in symbols if s in change_map]
+        if not watched_changes:
+            return None
+
+        down_count = sum(1 for c in watched_changes if c <= 0)
+        pct_down = round(down_count / len(watched_changes) * 100)
+
+        return {
+            "pct_down_24h": pct_down,
+            "total_checked": len(watched_changes),
+            "is_bearish": pct_down >= threshold_pct,
+        }
+    except Exception:
+        return None
 
 
 def _normalize(value, low, high):
