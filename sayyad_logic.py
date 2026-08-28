@@ -18,6 +18,30 @@ MIN_SCORE_TO_ACCEPT = 60
 RSI_OVERBOUGHT_THRESHOLD = 70      # RSI للعملة فوق هالرقم = تشبّع شرائي، رفض احترازي
 MARKET_BREADTH_DANGER_THRESHOLD = 75  # % من العملات نازلة (24س) = سوق ضعيف عام، نوقف كل دخول هالدورة
 
+# نفس قائمة الـ151 عملة يلي صياد بيراقبهم بالضبط — نستخدمها بس لحساب اتساع
+# السوق (compute_market_breadth) حتى يكون القياس متّسق مع تقارير صياد، مش
+# لتضييق نطاق البحث عن فرص دخول (هاد يضل يغطي كل عملات USDT النشطة زي ما هو)
+SAYYAD_WATCHLIST_BASES = [
+    "WLD", "VANA", "BIO", "AIXBT", "S", "GPS", "SHELL", "IMX", "BMT", "NIL",
+    "XVG", "APE", "AMP", "ADA", "AGLD", "SCR", "POL", "KAIA", "BANANA", "ME",
+    "ARB", "WAXP", "POLYX", "DOT", "GRT", "PHA", "BAND", "LINK", "ZIL", "GAS",
+    "APT", "VET", "TWT", "FIL", "MOVR", "GMT", "OP", "ENS", "DIA", "ROSE",
+    "QNT", "POWR", "RLC", "ZEN", "CELR", "FIDA", "SEI", "FET", "LPT", "IOTA",
+    "LTC", "RVN", "CTSI", "TFUEL", "THETA", "CELO", "ICP", "SAND", "SOL", "MANTRA",
+    "XLM", "XRP", "AVAX", "ONE", "CFX", "BTC", "IQ", "BCH", "AVA", "MEGA",
+    "ETC", "BAT",
+    "HBAR", "PORTAL", "CHZ", "CKB", "CHR", "ID", "CTK", "DUSK", "ARPA", "KAITO",
+    "ENJ", "HIVE", "GTC", "2Z", "ENSO", "KITE", "AT", "NIGHT", "EIGEN", "ZKP",
+    "SENT", "LUMIA", "BREV", "ZAMA", "ESP", "STRAX", "ATOM", "SUI", "NEAR", "TRX",
+    "DOGE", "ZEC", "TAO", "ETH", "OPG", "EDU", "DEXE", "HEI", "ALGO", "ACH",
+    "INIT", "TOWNS", "PROVE", "GALA", "SOMI", "OPEN", "HOLO", "LINEA", "OG", "XPL",
+    "SXT", "SOPH", "LA", "SSV", "RONIN", "NEWT", "CGPT", "C", "ERA", "PARTI",
+    "WAL", "WCT", "HYPER", "ARKM", "ANKR", "ALT", "SIGN", "PUNDIX", "MAGIC", "TLM",
+    "GRAM",
+    "RENDER", "STX", "TRB", "DASH", "SC", "ZRO", "ONG", "DGB",
+]
+SAYYAD_WATCHLIST_SYMBOLS = [f"{base}USDT" for base in SAYYAD_WATCHLIST_BASES]
+
 
 def compute_momentum(klines, momentum_window=MOMENTUM_WINDOW_CANDLES):
     """يحسب الزخم الحديث (آخر X شمعة) + التغير الكامل + انفجار الحجم"""
@@ -120,18 +144,19 @@ def is_overbought(rsi_value):
     return rsi_value is not None and rsi_value >= RSI_OVERBOUGHT_THRESHOLD
 
 
-def compute_market_breadth(client, symbols, threshold_pct=MARKET_BREADTH_DANGER_THRESHOLD):
+def compute_market_breadth(client, symbols=None, threshold_pct=MARKET_BREADTH_DANGER_THRESHOLD):
     """
-    يحسب نسبة العملات النازلة (24 ساعة رسمية) من أصل قائمة رموز محددة —
-    طلب API واحد بس (get_ticker بدون رمز = كل الأسواق دفعة وحدة)، بيرجع
-    النسبة المئوية للنازلة. لو تجاوزت الحد، نعتبر السوق "ضعيف عام" ونوقف
-    كل دخول هالدورة، حتى لو عملة معينة عندها إشارة قوية فردياً (زي ما صار
-    مع ENSO بيوم كان 81% من السوق أحمر).
+    يحسب نسبة العملات النازلة (24 ساعة رسمية) — طلب API واحد بس (get_ticker
+    بدون رمز = كل الأسواق دفعة وحدة). بيستخدم افتراضياً نفس قائمة الـ151
+    عملة يلي صياد بيراقبهم بالضبط (SAYYAD_WATCHLIST_SYMBOLS)، حتى القياس
+    يكون متّسق مع تقارير صياد ومقارنة مباشرة صحيحة بينهم. تمرير symbols
+    بشكل صريح (لو حبيت قائمة مختلفة) بيتجاوز الافتراضي.
     """
+    watchlist = symbols if symbols is not None else SAYYAD_WATCHLIST_SYMBOLS
     try:
         tickers = client.get_ticker()  # كل الرموز دفعة وحدة — طلب واحد فقط
         change_map = {t["symbol"]: float(t["priceChangePercent"]) for t in tickers}
-        watched_changes = [change_map[s] for s in symbols if s in change_map]
+        watched_changes = [change_map[s] for s in watchlist if s in change_map]
         if not watched_changes:
             return None
 
