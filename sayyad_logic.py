@@ -15,6 +15,7 @@ MOMENTUM_WINDOW_CANDLES = 8        # 8 شمعة × 30 دقيقة = 4 ساعات 
 EXTREME_MOVE_THRESHOLD_PCT = 20    # حركة أكبر من كذا % (4س أو 24س) = رفض احترازي
 LARGE_TRADE_USDT_THRESHOLD = 10_000
 MIN_SCORE_TO_ACCEPT = 60
+RSI_OVERBOUGHT_THRESHOLD = 70      # RSI للعملة فوق هالرقم = تشبّع شرائي، رفض احترازي
 
 
 def compute_momentum(klines, momentum_window=MOMENTUM_WINDOW_CANDLES):
@@ -84,6 +85,38 @@ def is_extreme_move(breakdown):
     pc = abs(breakdown["price_change_pct"])
     pc24 = abs(breakdown["price_change_24h_pct"])
     return pc >= EXTREME_MOVE_THRESHOLD_PCT or pc24 >= EXTREME_MOVE_THRESHOLD_PCT
+
+
+def compute_rsi(closes, period=14):
+    """
+    مؤشر القوة النسبية (RSI) — قياسي، بطريقة Wilder's Smoothing (نفس صياد بالضبط)
+    فوق 70 = تشبّع شرائي، تحت 30 = تشبّع بيعي
+    """
+    if len(closes) < period + 1:
+        return None
+
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def is_overbought(rsi_value):
+    """فلتر مستقل: RSI فوق الحد = تشبّع شرائي، رفض احترازي بغض النظر عن النقاط"""
+    return rsi_value is not None and rsi_value >= RSI_OVERBOUGHT_THRESHOLD
 
 
 def _normalize(value, low, high):

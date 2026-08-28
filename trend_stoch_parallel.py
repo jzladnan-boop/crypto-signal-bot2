@@ -337,7 +337,12 @@ class TrendStochParallel:
             if sayyad_logic.is_extreme_move(breakdown):
                 return None
 
-            closes = pd.Series([float(k[4]) for k in klines])
+            closes_list = [float(k[4]) for k in klines]
+            rsi_value = sayyad_logic.compute_rsi(closes_list, period=14)
+            if sayyad_logic.is_overbought(rsi_value):
+                return None
+
+            closes = pd.Series(closes_list)
             highs = pd.Series([float(k[2]) for k in klines])
             lows = pd.Series([float(k[3]) for k in klines])
             price = float(closes.iloc[-1])
