@@ -314,9 +314,15 @@ class TrendStochParallel:
     # ──────────────────────────────────────────────
     def check_symbol_entry(self, symbol):
         try:
-            klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=self.cfg["kline_lookback"])
-            if len(klines) < sayyad_logic.MOMENTUM_WINDOW_CANDLES + 1:
+            # نجيب شمعة إضافية واحدة عشان نستبعد الشمعة الجارية (لسا ما خلصت)
+            # من الحسابات — هاي كانت سبب دخول خاطئ فعلي شفناه بصفقات ME وTFUEL
+            # (شراء على قمة مؤقتة داخل شمعة لسا بتتكون، قبل ما ترتد لتحت بنفس الشمعة)
+            klines_raw = self.client.get_klines(
+                symbol=symbol, interval=self.cfg["interval"], limit=self.cfg["kline_lookback"] + 1
+            )
+            if len(klines_raw) < sayyad_logic.MOMENTUM_WINDOW_CANDLES + 2:
                 return None
+            klines = klines_raw[:-1]  # نتجاهل الشمعة الجارية بالحسابات
 
             momentum = sayyad_logic.compute_momentum(klines)
             if momentum is None or momentum["price_change_pct"] <= 0:
