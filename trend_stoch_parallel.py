@@ -359,18 +359,20 @@ class TrendStochParallel:
             return None
 
     def scan_for_entry(self):
-        """يفحص عملات قائمة صياد بس (151 عملة)، ويرجع أفضل إشارة (أعلى momentum_score، وغير محجوزة لاستراتيجية تانية) أو None."""
-        # بطلب المستخدم: نطاق البحث عن فرص دخول مقتصر على نفس قائمة صياد
-        # الـ151 عملة بالضبط — مش كل عملات USDT النشطة على Binance
-        symbols = sayyad_logic.SAYYAD_WATCHLIST_SYMBOLS
+        """يفحص عملات قائمة SYMBOLS المشتركة (نفس قائمة كل الاستراتيجيات)، ويرجع أفضل إشارة (أعلى momentum_score، وغير محجوزة لاستراتيجية تانية) أو None."""
+        # تصحيح: نستخدم self._get_symbols() الأصلية (نفس قائمة SYMBOLS
+        # المشتركة يلي Squeeze Breakout وMean Reversion بيستخدموها) بدل
+        # قائمة صياد المنفصلة — حتى الاستراتيجيات الثلاث تضل متّسقة على
+        # نفس مصدر واحد قابل للتعديل من إعدادات التطبيق
+        symbols = self._get_symbols()
         if not symbols:
             return None
 
-        # فحص اتساع السوق أول شي — طلب واحد بس لكل دورة، على نفس القائمة.
-        # لو أغلب السوق نازل (24 ساعة)، نوقف كل محاولة دخول هالدورة بغض
-        # النظر عن قوة أي إشارة فردية — تجنّب "السباحة عكس التيار" (زي
-        # صفقة ENSO يلي خسرت بيوم كان 81% من السوق أحمر حسب صياد).
-        breadth = sayyad_logic.compute_market_breadth(self.client)
+        # فحص اتساع السوق أول شي — طلب واحد بس لكل دورة، على نفس قائمة
+        # SYMBOLS المشتركة. لو أغلب السوق نازل (24 ساعة)، نوقف كل محاولة
+        # دخول هالدورة بغض النظر عن قوة أي إشارة فردية — تجنّب "السباحة
+        # عكس التيار" (زي صفقة ENSO يلي خسرت بيوم كان السوق أحمر بشكل عام).
+        breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
         if breadth and breadth["is_bearish"]:
             return None
 
