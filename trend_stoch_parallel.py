@@ -91,6 +91,9 @@ DEFAULT_CONFIG = {
     "history_file": "trend_stoch_history.json",
     "coin_memory_db_path": "coin_memory.db",   # ⬅️ نفس قاعدة الذاكرة الموحّدة يلي البوت الأساسي يستخدمها
     "scan_pause_seconds": 0.4,         # ⬅️ بطلب المستخدم: كانت 0.15 — بطّأنا الفحص (144 عملة كل ساعة) لتخفيف الضغط على مفتاح API المشترك مع البوت الأساسي
+    "max_deep_scan_candidates": 8,      # ⬅️ إصلاح: بعد فلترة الزخم الخفيفة على كل السوق، بس أفضل هالعدد
+                                         # من المرشحين بياخدوا الفحص الثقيل (دفتر أوامر + حيتان) — يمنع
+                                         # مئات الاستدعاءات الثقيلة كل دورة فحص (كل 5 دقايق هلق بدل ساعة)
 }
 
 
@@ -312,11 +315,14 @@ class TrendStochParallel:
     # ──────────────────────────────────────────────
     # 🟢 فحص إشارة الدخول لعملة وحدة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
     # ──────────────────────────────────────────────
-    def check_symbol_entry(self, symbol):
+    def check_symbol_momentum(self, symbol):
+        """
+        🟢 المرحلة الأولى (خفيفة): استدعاء API وحيد (klines) بس — تحسب
+        الزخم الأولي وترجع (klines, momentum) خام بدون أي استدعاء ثقيل
+        (دفتر أوامر / صفقات حيتان). تُستخدم لفلترة كل عملات السوق بسرعة
+        قبل ما نصرف استدعاءات ثقيلة إلا على أفضل مرشحين بس.
+        """
         try:
-            # نجيب شمعة إضافية واحدة عشان نستبعد الشمعة الجارية (لسا ما خلصت)
-            # من الحسابات — هاي كانت سبب دخول خاطئ فعلي شفناه بصفقات ME وTFUEL
-            # (شراء على قمة مؤقتة داخل شمعة لسا بتتكون، قبل ما ترتد لتحت بنفس الشمعة)
             klines_raw = self.client.get_klines(
                 symbol=symbol, interval=self.cfg["interval"], limit=self.cfg["kline_lookback"] + 1
             )
@@ -327,6 +333,29 @@ class TrendStochParallel:
             momentum = sayyad_logic.compute_momentum(klines)
             if momentum is None or momentum["price_change_pct"] <= 0:
                 return None
+
+            return {"symbol": symbol, "klines": klines, "momentum": momentum}
+        except BinanceAPIException:
+            return None
+        except Exception:
+            return None
+
+    # ──────────────────────────────────────────────
+    # 🟢 فحص إشارة الدخول لعملة وحدة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
+    # ──────────────────────────────────────────────
+    def check_symbol_entry(self, symbol, klines=None, momentum=None):
+        """
+        🔴 المرحلة الثانية (ثقيلة): دفتر الأوامر + صفقات الحيتان — تُستدعى
+        بس لأفضل مرشحين (max_deep_scan_candidates) بعد فلترة الزخم الأولية،
+        مش لكل عملة عندها زخم إيجابي. لو klines/momentum غير ممررة (استخدام
+        مباشر لعملة وحدة)، بتحسبهم من الصفر بنفسها.
+        """
+        try:
+            if klines is None or momentum is None:
+                pre = self.check_symbol_momentum(symbol)
+                if pre is None:
+                    return None
+                klines, momentum = pre["klines"], pre["momentum"]
 
             ob_imbalance = sayyad_logic.compute_order_book_imbalance(self.client, symbol)
             whale_data = sayyad_logic.detect_whale_trades(self.client, symbol)
@@ -383,16 +412,36 @@ class TrendStochParallel:
             return None
 
         portfolio = get_portfolio_manager()
-        best_signal = None
+
+        # ⬅️ إصلاح (حمل API): المرحلة الأولى — فحص خفيف (klines بس) لكل
+        # عملات السوق. المرحلة الثانية الثقيلة (دفتر أوامر + حيتان) ما
+        # بتصير إلا لأفضل عدد محدود من المرشحين (max_deep_scan_candidates)،
+        # مش لكل عملة عندها زخم إيجابي — كان هذا يولّد مئات الاستدعاءات
+        # الثقيلة كل 5 دقايق على مفتاح API مشترك مع 3 استراتيجيات تانية.
+        momentum_candidates = []
         for symbol in symbols:
             if symbol == "BTCUSDT":   # مستبعدة من هالاستراتيجية دائماً (BTC ما إلها استراتيجية موازية مخصصة حالياً)
                 continue
             if portfolio.is_claimed_by_other(symbol, _PORTFOLIO_OWNER):
                 continue   # عملة محجوزة لاستراتيجية تانية حالياً — نتجاوزها
-            signal = self.check_symbol_entry(symbol)
+            pre = self.check_symbol_momentum(symbol)
+            if pre is not None:
+                momentum_candidates.append(pre)
+            time.sleep(self.cfg["scan_pause_seconds"])
+
+        if not momentum_candidates:
+            return None
+
+        # نرتب تنازلياً بقوة الزخم (% التغيّر) ونكتفي بأفضل عدد محدود
+        # للمرحلة الثقيلة — الفلترة السريعة الأولى كافية لاستبعاد الضعيف
+        momentum_candidates.sort(key=lambda c: c["momentum"]["price_change_pct"], reverse=True)
+        top_candidates = momentum_candidates[: self.cfg["max_deep_scan_candidates"]]
+
+        best_signal = None
+        for cand in top_candidates:
+            signal = self.check_symbol_entry(cand["symbol"], klines=cand["klines"], momentum=cand["momentum"])
             if signal and (best_signal is None or signal["momentum_score"] > best_signal["momentum_score"]):
                 best_signal = signal
-            time.sleep(self.cfg["scan_pause_seconds"])
         return best_signal
 
     # ──────────────────────────────────────────────
