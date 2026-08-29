@@ -40,6 +40,7 @@ from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 import sayyad_logic
+import shared_trading_logic as trading
 
 _PORTFOLIO_OWNER = "squeeze_breakout"
 
@@ -86,97 +87,12 @@ def _utc_now_iso():
 
 
 # ──────────────────────────────────────────────
-# 🔧 تنفيذ شراء/بيع مستقل (نفس نمط باقي الاستراتيجيات الموازية)
+# 🔧 تنفيذ شراء/بيع/ATR — مستوردة من shared_trading_logic.py (بدل التكرار
+# اليدوي بالثلاث ملفات الموازية — أي تعديل مستقبلي هلق بمكان واحد بس)
 # ──────────────────────────────────────────────
-def _get_step_size(client, symbol):
-    try:
-        info = client.get_symbol_info(symbol)
-        if not info:
-            return None
-        for f in info["filters"]:
-            if f["filterType"] == "LOT_SIZE":
-                return float(f["stepSize"])
-    except Exception:
-        pass
-    return None
-
-
-def _get_quantity(client, symbol, usdt_amount):
-    step_size = _get_step_size(client, symbol)
-    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-    qty = usdt_amount / price
-    if step_size:
-        precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0
-        qty = round(qty - (qty % step_size), precision)
-    return qty, price
-
-
-def _buy_market(client, symbol, usdt_amount):
-    try:
-        qty, price = _get_quantity(client, symbol, usdt_amount)
-        if qty <= 0:
-            return None, f"الكمية المحسوبة صفر أو أقل (السعر: {price}, المبلغ: {usdt_amount})"
-        order = client.order_market_buy(symbol=symbol, quantity=qty)
-        fills = order.get("fills", [])
-        if fills:
-            total_qty = sum(float(f["qty"]) for f in fills)
-            total_spent = sum(float(f["price"]) * float(f["qty"]) for f in fills)
-            asset = symbol.replace("USDT", "")
-            commission_in_asset = sum(
-                float(f.get("commission", 0)) for f in fills
-                if f.get("commissionAsset") == asset
-            )
-            net_qty = total_qty - commission_in_asset
-            actual_price = total_spent / total_qty if total_qty > 0 else price
-            if net_qty <= 0:
-                net_qty = qty
-        else:
-            actual_price = price
-            net_qty = qty
-        return {"qty": net_qty, "entry_price": actual_price, "order_id": order["orderId"]}, None
-    except BinanceAPIException as e:
-        return None, f"Binance API error {e.code}: {e.message}"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-
-
-def _sell_market(client, symbol, qty):
-    try:
-        asset = symbol.replace("USDT", "")
-        balance = client.get_asset_balance(asset=asset)
-        actual_qty = float(balance["free"])
-        step_size = _get_step_size(client, symbol)
-        sell_qty = actual_qty   # 🔐 نبيع كامل الرصيد المتاح (نفس آلية باقي الاستراتيجيات الموازية — تنظيف الغبار)
-        if step_size:
-            precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0
-            sell_qty = round(sell_qty - (sell_qty % step_size), precision)
-        if sell_qty <= 0:
-            return None, None, f"الكمية المتاحة للبيع صفر أو أقل (رصيد {asset}: {actual_qty})"
-        order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
-        fills = order.get("fills", [])
-        if fills:
-            executed_qty = sum(float(f["qty"]) for f in fills)
-            price = sum(float(f["price"]) * float(f["qty"]) for f in fills) / executed_qty
-        else:
-            executed_qty = sell_qty
-            price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        return price, executed_qty, None
-    except BinanceAPIException as e:
-        return None, None, f"Binance API error {e.code}: {e.message}"
-    except Exception as e:
-        return None, None, f"{type(e).__name__}: {e}"
-
-
-def _calculate_atr(highs, lows, closes, period):
-    try:
-        atr_series = ta.volatility.AverageTrueRange(high=highs, low=lows, close=closes, window=period).average_true_range()
-        value = atr_series.iloc[-1]
-        if pd.isna(value) or value <= 0:
-            return None
-        return float(value)
-    except Exception:
-        return None
-
+_buy_market = trading.buy_market
+_sell_market = trading.sell_market
+_calculate_atr = trading.calculate_atr
 
 class SqueezeBreakout:
     def __init__(self, client, notify_fn=None, config_fn=None, symbols_fn=None, **config_overrides):
@@ -488,26 +404,12 @@ class SqueezeBreakout:
 
     def _compute_trail_stop(self, price):
         """
-        🔒 سقف مسافة التراجع (trail_distance_max_pct): مسافة الستوب عن القمة
-        ما تتجاوز هالنسبة من السعر، بغض النظر عن قيمة ATR الخام.
-
-        🔒 Minimum Profit Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً
-        تحت (سعر الدخول + min_profit_lock_pct%).
+        🔒 محسوبة عبر shared_trading_logic.compute_trail_stop() — مشترك مع
+        باقي الاستراتيجيات الموازية.
         """
         atr_val = self.position.get("atr")
-        if atr_val:
-            atr_distance = self.cfg["trail_atr_multiplier"] * atr_val
-            max_distance = price * (self.cfg["trail_distance_max_pct"] / 100)
-            distance = min(atr_distance, max_distance)   # 🔒 الأصغر بين ATR والسقف النسبي
-            candidate = price - distance
-            if not (0 < candidate < price):
-                candidate = price * (1 - self.cfg["fallback_trail_pct"])
-        else:
-            candidate = price * (1 - self.cfg["fallback_trail_pct"])
-
-        min_locked_price = self.position["entry_price"] * (1 + self.cfg["min_profit_lock_pct"] / 100)
-        candidate = max(candidate, min_locked_price)   # 🔒 Minimum Profit Lock
-        return round(candidate, 8)
+        entry_price = self.position["entry_price"]
+        return trading.compute_trail_stop(price, atr_val, entry_price, self.cfg)
 
     # ──────────────────────────────────────────────
     # 🔍 إدارة الصفقة المفتوحة (Trailing + Stop Loss)
@@ -523,13 +425,8 @@ class SqueezeBreakout:
         fresh_atr = self._refresh_position_atr(symbol)
         atr_val = fresh_atr if fresh_atr else self.position.get("atr")
 
-        # ⬅️ نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة، مقيّدة بسقف أقصى
-        if atr_val:
-            raw_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
-            capped_trigger = self.position["entry_price"] * (1 + self.cfg["trail_trigger_max_pct"] / 100)
-            trail_trigger = min(raw_trigger, capped_trigger)
-        else:
-            trail_trigger = self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"])
+        # ⬅️ نقطة تفعيل Trailing — محسوبة عبر shared_trading_logic.compute_trail_trigger()
+        trail_trigger = trading.compute_trail_trigger(self.position["entry_price"], atr_val, self.cfg)
 
         if not self.position["trailing_active"]:
             if price >= trail_trigger:
