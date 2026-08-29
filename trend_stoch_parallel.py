@@ -376,6 +376,12 @@ class TrendStochParallel:
         if breadth and breadth["is_bearish"]:
             return None
 
+        # فحص إضافي: BTC نفسه بترند هابط واضح (BEAR) — وقف احترازي مستقل
+        # عن اتساع السوق (ممكن BTC يكون هابط بوضوح رغم إن الألتكوينز لسا
+        # ما انعكس أثرها بشكل واسع بعد).
+        if self.regime_detector.get_regime_label() == "BEAR":
+            return None
+
         portfolio = get_portfolio_manager()
         best_signal = None
         for symbol in symbols:

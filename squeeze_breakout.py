@@ -39,6 +39,7 @@ from binance.exceptions import BinanceAPIException
 from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
+import sayyad_logic
 
 _PORTFOLIO_OWNER = "squeeze_breakout"
 
@@ -376,6 +377,15 @@ class SqueezeBreakout:
         symbols = self._get_symbols()
         if not symbols:
             return None
+
+        # 🛑 وقف تداول احترازي — BTC هابط (BEAR) أو اتساع السوق ضعيف عام
+        # (75%+ من العملات نازلة خلال 24 ساعة). نوقف كل دخول هالدورة.
+        if self.regime_detector.get_regime_label() == "BEAR":
+            return None
+        breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
+        if breadth and breadth["is_bearish"]:
+            return None
+
         portfolio = get_portfolio_manager()
         for symbol in symbols:
             if portfolio.is_claimed_by_other(symbol, _PORTFOLIO_OWNER):

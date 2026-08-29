@@ -33,6 +33,7 @@ from trend_stoch_parallel import TrendStochParallel
 from squeeze_breakout import SqueezeBreakout
 from mean_reversion_parallel import MeanReversionParallel
 from portfolio_manager import get_portfolio_manager
+import sayyad_logic
 
 _PORTFOLIO_OWNER = "main_bot"
 
@@ -3278,6 +3279,21 @@ def run_bot():
                         continue
 
                     time.sleep(0.2)
+
+                # 🛑 وقف تداول احترازي — BTC هابط (BEAR) أو اتساع السوق ضعيف عام
+                # (75%+ من قائمة العملات نازلة خلال 24 ساعة). لو أي وحدة تحققت،
+                # نوقف كل دخول جديد هالدورة بغض النظر عن قوة أي مرشح فردي —
+                # لا يؤثر على إدارة الصفقات المفتوحة أصلاً (مستقلة عن هالمقطع).
+                regime_label_gate = _regime_detector.get_regime_label() if _regime_detector else "SIDEWAYS"
+                breadth_gate = sayyad_logic.compute_market_breadth(client, SYMBOLS) if SYMBOLS else None
+                market_is_bearish = (regime_label_gate == "BEAR") or bool(breadth_gate and breadth_gate["is_bearish"])
+                if market_is_bearish and candidates:
+                    log.info(
+                        "🛑 وقف احترازي: تجاوز %d مرشح هالدورة — BTC:%s | اتساع السوق:%s",
+                        len(candidates), regime_label_gate,
+                        f"{breadth_gate['pct_down_24h']}% نازلة" if breadth_gate else "غير متاح",
+                    )
+                    candidates = []   # لا دخول جديد هالدورة
 
                 # ══ المرحلة 2: ترتيب المرشحين — ذاكرة العملات أولاً (تاريخ نظيف يتقدّم)، والزخم كمُرجِّح ثانوي ══
                 if candidates:

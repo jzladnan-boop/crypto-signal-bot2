@@ -49,6 +49,7 @@ from binance.exceptions import BinanceAPIException
 from coin_memory import ATRGuard, CoinMemory, CorrelationType
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
+import sayyad_logic
 
 _PORTFOLIO_OWNER = "mean_reversion_parallel"
 
@@ -406,6 +407,16 @@ class MeanReversionParallel:
         symbols = self._get_symbols()
         if not symbols:
             return None
+
+        # 🛑 وقف احترازي — بس عند انهيار سوق شامل ومتطرف (75%+ من العملات
+        # نازلة خلال 24 ساعة). ملاحظة: ما نوقف عند BTC BEAR عادي، لأنه هاي
+        # الاستراتيجية أصلاً مصممة تصطاد ارتدادات وقت الهبوط (btc_regime
+        # بالأسفل بيُستخدم كفلتر تفضيل، مش كمنع) — إيقافها بمجرد BEAR
+        # بيلغي وظيفتها الأساسية.
+        breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
+        if breadth and breadth["is_bearish"]:
+            return None
+
         # 🌡️ نحسب حالة BTC العامة مرة وحدة لكل دورة فحص (مش لكل عملة) — تقليل حمل API
         try:
             btc_regime = self.regime_detector.get_regime_label()
