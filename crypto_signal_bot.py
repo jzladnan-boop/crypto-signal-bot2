@@ -275,7 +275,10 @@ STRATEGY_LABELS = {
     # ⬅️ الاستراتيجيات الموازية المستقلة (كل وحدة عندها Thread وصفقة خاصة فيها،
     # منفصلة عن current_strategy) — مضافة هون كمان حتى أي سجل صفقة (من profit_log
     # أو من load_parallel_strategies_history) يقدر ياخد اسم عرض ودّي موحّد.
-    "trend_stoch_parallel"   : "Trend+Stoch الموازية",
+    "trend_stoch_parallel"   : "🎯 صياد الزخم الموازية",   # ⬅️ اسم العرض بس تغيّر — المفتاح الداخلي ("trend_stoch_parallel")
+                                                            # ضل زي ما هو حتى ما ينكسر تاريخ الصفقات المخزّن بـ coin_memory.
+                                                            # المنطق الداخلي هلق بالكامل منطق صياد (زخم+حجم+دفتر أوامر+حيتان)
+                                                            # وما عاد يحسب StochRSI إطلاقاً — الاسم القديم كان مضلل.
     "squeeze_breakout"       : "Squeeze Breakout",
     "mean_reversion_parallel": "Mean Reversion",
     "unknown"                : "غير معروف",
@@ -1118,7 +1121,7 @@ def telegram_command_listener(client):
                         else:
                             send_admin("❌ مثال: /set_bb_filter on  أو  /set_bb_filter off")
 
-                    # ── /set_trend_parallel (تشغيل/إيقاف استراتيجية Trend+Stoch الموازية المستقلة) ──
+                    # ── /set_trend_parallel (تشغيل/إيقاف استراتيجية صياد الزخم الموازية المستقلة) ──
                     elif text.startswith("/set_trend_parallel "):
                         value = text.replace("/set_trend_parallel ", "").strip().lower()
                         if value in ("on", "off"):
@@ -1127,10 +1130,10 @@ def telegram_command_listener(client):
                             save_settings()
                             status_txt = "✅ مفعّلة" if TREND_PARALLEL_ENABLED else "❌ متوقفة"
                             send_admin(
-                                f"{status_txt} استراتيجية Trend+Stoch الموازية\n"
+                                f"{status_txt} استراتيجية صياد الزخم الموازية\n"
                                 f"↳ صفقات حقيقية بمبلغ {TREND_PARALLEL_USDT_PER_TRADE} USDT/صفقة، فريم ساعة، صفقة وحدة بس بأي لحظة"
                                 if TREND_PARALLEL_ENABLED else
-                                "❌ تم إيقاف Trend+Stoch الموازية — أي صفقة مفتوحة حالياً بتضل تكمل لحد ما توقف عادي (ستوب/ترايلنك)، بس ما رح تنفتح صفقة جديدة"
+                                "❌ تم إيقاف صياد الزخم الموازية — أي صفقة مفتوحة حالياً بتضل تكمل لحد ما توقف عادي (ستوب/ترايلنك)، بس ما رح تنفتح صفقة جديدة"
                             )
                         else:
                             send_admin("❌ مثال: /set_trend_parallel on  أو  /set_trend_parallel off")
@@ -1148,7 +1151,7 @@ def telegram_command_listener(client):
                         else:
                             pos_line = "📍 لا يوجد صفقة مفتوحة حالياً"
                         send_admin(
-                            f"📈 <b>Trend+Stoch الموازية</b>\n"
+                            f"📈 <b>صياد الزخم الموازية</b>\n"
                             f"الحالة: {tp_status}\n"
                             f"المبلغ لكل صفقة: {TREND_PARALLEL_USDT_PER_TRADE} USDT\n"
                             f"{pos_line}"
@@ -1468,10 +1471,9 @@ def telegram_command_listener(client):
                             f"🧠 <b>التبديل التلقائي بين الاستراتيجيات</b>\n\n"
                             f"الحالة: {status_txt}\n"
                             f"الاستراتيجية الحالية: {STRATEGY_LABELS.get(strategy_now, strategy_now)}\n\n"
-                            f"المنطق:\n"
-                            f"📈 ترند واضح (BTC فوق MA50 على 4س) → Trend+StochRSI\n"
-                            f"📊 جانبي + تذبذب عالٍ → Stochastic RSI\n"
-                            f"😴 جانبي + هادئ → RSI العادي\n\n"
+                            f"المنطق (ثنائي، معتمد على التذبذب فقط — الترند ما عاد له تأثير هون):\n"
+                            f"📊 تذبذب عالٍ (ATR مرتفع) → Stochastic RSI\n"
+                            f"😴 تذبذب هادئ → RSI العادي\n\n"
                             f"فحص كل 15 دقيقة، مع فترة تبريد 20 دقيقة بين كل تبديل وتاني."
                         )
                         send_admin(msg)
@@ -1575,8 +1577,8 @@ def telegram_command_listener(client):
                             "/set_vwap_filter on — الشراء يشترط السعر فوق VWAP\n"
                             "/set_bb_filter on — الشراء يشترط قرب السعر من حد بولينجر السفلي\n"
                             "/filters_status — عرض حالة الفلاتر وشرح ترتيب الزخم\n\n"
-                            "<b>📈 Trend+Stoch الموازية (استراتيجية موازية مستقلة):</b>\n"
-                            "/set_trend_parallel on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم ساعة)\n"
+                            "<b>🎯 صياد الزخم الموازية (استراتيجية موازية مستقلة):</b>\n"
+                            "/set_trend_parallel on — تشغيل (صفقات حقيقية 20 USDT، سلة العملات، فريم 30 دقيقة)\n"
                             "/set_trend_parallel off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/trend_parallel_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
                             "<b>🐍 Squeeze Breakout (استراتيجية موازية مستقلة):</b>\n"
@@ -2360,7 +2362,7 @@ def api_trades():
     result       = []
     trades_copy  = dict(open_trades)
 
-    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (Trend+Stoch / Squeeze Breakout)
+    # ✅ نضيف صفقات الاستراتيجيات الموازية المستقلة (صياد الزخم / Squeeze Breakout)
     # لنفس القائمة، حتى تظهر بشاشة "الصفقات" العادية متل أي صفقة تانية.
     trend_pos = _trend_parallel_strategy.position if _trend_parallel_strategy else None
     squeeze_pos = _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None
@@ -2441,7 +2443,7 @@ def api_trades():
 def load_parallel_strategies_history():
     """
     يقرأ سجلات الصفقات المغلقة من الاستراتيجيات الموازية المستقلة
-    (Trend+Stoch الموازية و Squeeze Breakout) — كل وحدة إلها
+    (صياد الزخم الموازية و Squeeze Breakout) — كل وحدة إلها
     ملف history خاص فيها، منفصل تماماً عن profit_log تبع البوت الأساسي —
     ويحوّلهم لنفس شكل السجل العادي (symbol/entry_price/exit_price/profit/
     pct/reason/time) حتى يظهروا بشاشة "الصفقات > السجل" بالتطبيق متل أي
@@ -2540,7 +2542,7 @@ def api_get_settings():
             "vwap_filter_enabled": VWAP_FILTER_ENABLED,
             "bb_filter_enabled": BB_FILTER_ENABLED,
             "current_strategy": current_strategy,
-            # ✅ Trend+Stoch الموازية — استراتيجية موازية مستقلة (صفقات حقيقية، سلة العملات، فريم ساعة)
+            # ✅ صياد الزخم الموازية — استراتيجية موازية مستقلة (صفقات حقيقية، سلة العملات، فريم ساعة)
             "trend_parallel_enabled": TREND_PARALLEL_ENABLED,
             "trend_parallel_usdt_per_trade": TREND_PARALLEL_USDT_PER_TRADE,
             "trend_parallel_position": _trend_parallel_strategy.position if _trend_parallel_strategy else None,
@@ -2659,7 +2661,7 @@ def api_set_settings():
         if "bb_filter_enabled" in data:
             BB_FILTER_ENABLED = bool(data["bb_filter_enabled"])
 
-        # ✅ Trend+Stoch الموازية — تشغيل/إيقاف من التطبيق
+        # ✅ صياد الزخم الموازية — تشغيل/إيقاف من التطبيق
         if "trend_parallel_enabled" in data:
             TREND_PARALLEL_ENABLED = bool(data["trend_parallel_enabled"])
 
@@ -2947,7 +2949,7 @@ def run_bot():
     dashboard_thread = threading.Thread(target=start_dashboard, daemon=True)
     dashboard_thread.start()
 
-    # ── 📈 Trend+Stoch الموازية — Thread مستقل تماماً ──
+    # ── 📈 صياد الزخم الموازية — Thread مستقل تماماً ──
     global _trend_parallel_strategy
     _trend_parallel_strategy = TrendStochParallel(
         client,
@@ -2962,7 +2964,7 @@ def run_bot():
     )
     trend_parallel_thread = threading.Thread(
         target=_trend_parallel_strategy.run,
-        kwargs={"poll_seconds": 300, "is_enabled_fn": lambda: TREND_PARALLEL_ENABLED},  # 5 دقايق - نفس معدل فحص صياد
+        kwargs={"poll_seconds": 300, "is_enabled_fn": lambda: TREND_PARALLEL_ENABLED and trading_enabled},  # 5 دقايق - نفس معدل فحص صياد
         daemon=True,
     )
     trend_parallel_thread.start()
@@ -2982,7 +2984,7 @@ def run_bot():
     )
     squeeze_breakout_thread = threading.Thread(
         target=_squeeze_breakout_strategy.run,
-        kwargs={"poll_seconds": 1800, "is_enabled_fn": lambda: SQUEEZE_BREAKOUT_ENABLED},
+        kwargs={"poll_seconds": 1800, "is_enabled_fn": lambda: SQUEEZE_BREAKOUT_ENABLED and trading_enabled},
         daemon=True,
     )
     squeeze_breakout_thread.start()
@@ -3006,7 +3008,7 @@ def run_bot():
     )
     mean_reversion_thread = threading.Thread(
         target=_mean_reversion_strategy.run,
-        kwargs={"poll_seconds": 1800, "is_enabled_fn": lambda: MEAN_REVERSION_ENABLED},
+        kwargs={"poll_seconds": 1800, "is_enabled_fn": lambda: MEAN_REVERSION_ENABLED and trading_enabled},
         daemon=True,
     )
     mean_reversion_thread.start()
@@ -3344,7 +3346,7 @@ def run_bot():
                             continue
 
                         if usdt_balance >= (TRADE_AMOUNT + RESERVE_USDT):   # ✅ RESERVE_USDT = 0.0 الآن، أي بدون احتياطي جانبي
-                            # 🔐 حجز العملة قبل الشراء — لو استراتيجية موازية (Trend+Stoch أو
+                            # 🔐 حجز العملة قبل الشراء — لو استراتيجية موازية (صياد الزخم أو
                             # Squeeze Breakout) حاجزاها حالياً، نتراجع ونكمل على عملة تانية بدل ما نتضارب.
                             if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
                                 watch_list.discard(symbol)
