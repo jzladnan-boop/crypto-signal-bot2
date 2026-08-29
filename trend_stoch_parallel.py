@@ -33,7 +33,7 @@ open_trades / current_strategy / coin_memory (تاريخ العملة يلي ب�
 
 3) صفقة وحدة بس بأي لحظة، بمبلغ ثابت 15 USDT.
 
-الاستخدام: نفس نمط range_trading_btc.py — TrendStochParallel(client, notify_fn=...).run(...)
+الاستخدام: TrendStochParallel(client, notify_fn=...).run(...)
 """
 
 import time
@@ -95,7 +95,7 @@ DEFAULT_CONFIG = {
 
 
 # ──────────────────────────────────────────────
-# 🔧 تنفيذ شراء/بيع مستقل (نفس نمط range_trading_btc.py — بدون استيراد من bot.py)
+# 🔧 تنفيذ شراء/بيع مستقل (بدون استيراد من bot.py)
 # ──────────────────────────────────────────────
 def _get_step_size(client, symbol):
     try:
@@ -121,7 +121,7 @@ def _get_quantity(client, symbol, usdt_amount):
 
 
 def _buy_market(client, symbol, usdt_amount):
-    """يرجع (result_dict, error_message) — نفس نمط range_trading_btc.py."""
+    """يرجع (result_dict, error_message)."""
     try:
         qty, price = _get_quantity(client, symbol, usdt_amount)
         if qty <= 0:
@@ -151,7 +151,7 @@ def _buy_market(client, symbol, usdt_amount):
 
 
 def _sell_market(client, symbol, qty):
-    """يرجع (price, executed_qty, error_message) — نفس نمط range_trading_btc.py."""
+    """يرجع (price, executed_qty, error_message)."""
     try:
         asset = symbol.replace("USDT", "")
         balance = client.get_asset_balance(asset=asset)
@@ -379,7 +379,7 @@ class TrendStochParallel:
         portfolio = get_portfolio_manager()
         best_signal = None
         for symbol in symbols:
-            if symbol == "BTCUSDT":   # مستبعدة أصلاً — مغطاة بستراتيجية Range Trading المنفصلة
+            if symbol == "BTCUSDT":   # مستبعدة من هالاستراتيجية دائماً (BTC ما إلها استراتيجية موازية مخصصة حالياً)
                 continue
             if portfolio.is_claimed_by_other(symbol, _PORTFOLIO_OWNER):
                 continue   # عملة محجوزة لاستراتيجية تانية حالياً — نتجاوزها
