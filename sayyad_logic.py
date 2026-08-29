@@ -11,12 +11,24 @@
 بمشروع صياد.
 """
 
+import threading
+import time
+
 MOMENTUM_WINDOW_CANDLES = 8        # 8 شمعة × 30 دقيقة = 4 ساعات (نفس صياد بالضبط)
 EXTREME_MOVE_THRESHOLD_PCT = 20    # حركة أكبر من كذا % (4س أو 24س) = رفض احترازي
 LARGE_TRADE_USDT_THRESHOLD = 10_000
 MIN_SCORE_TO_ACCEPT = 60
 RSI_OVERBOUGHT_THRESHOLD = 70      # RSI للعملة فوق هالرقم = تشبّع شرائي، رفض احترازي
 MARKET_BREADTH_DANGER_THRESHOLD = 75  # % من العملات نازلة (24س) = سوق ضعيف عام، نوقف كل دخول هالدورة
+MARKET_BREADTH_CACHE_SECONDS = 60     # ⬅️ إصلاح: تخزين مؤقت مشترك — البوت الأساسي + 3 استراتيجيات
+                                        # موازية كل وحدة كانت تعمل client.get_ticker() (ثقيل، كل تيكرات
+                                        # السوق دفعة وحدة) بشكل مستقل بفترات مختلفة (120/300/1800/1800 ثانية)
+                                        # رغم إنه نفس البيانات بالضبط — هلق أول استراتيجية تطلبها بأي 60
+                                        # ثانية "تجيبها لحالها"، والباقي بياخدوا نفس النسخة المخزنة بدل
+                                        # ما يكرروا نفس الطلب الثقيل 4 مرات
+
+_breadth_cache_lock = threading.Lock()
+_breadth_cache = {"value": None, "time": 0.0}
 
 
 def compute_momentum(klines, momentum_window=MOMENTUM_WINDOW_CANDLES):
@@ -128,7 +140,18 @@ def compute_market_breadth(client, symbols, threshold_pct=MARKET_BREADTH_DANGER_
     حتى يكون القياس متّسق مع باقي الاستراتيجيات. لو النسبة النازلة تجاوزت
     الحد، نعتبر السوق "ضعيف عام" ونوقف كل دخول هالدورة، حتى لو عملة معينة
     عندها إشارة قوية فردياً.
+
+    🔒 مخزّن مؤقتاً (MARKET_BREADTH_CACHE_SECONDS) ومشترك بين كل الاستراتيجيات
+    (thread-safe عبر _breadth_cache_lock) — يمنع 4 طلبات ثقيلة متكررة لنفس
+    البيانات بالضبط كل دورة فحص.
     """
+    now = time.time()
+    with _breadth_cache_lock:
+        cached_value = _breadth_cache["value"]
+        cached_age = now - _breadth_cache["time"]
+        if cached_value is not None and cached_age < MARKET_BREADTH_CACHE_SECONDS:
+            return cached_value
+
     try:
         tickers = client.get_ticker()  # كل الرموز دفعة وحدة — طلب واحد فقط
         change_map = {t["symbol"]: float(t["priceChangePercent"]) for t in tickers}
@@ -139,13 +162,19 @@ def compute_market_breadth(client, symbols, threshold_pct=MARKET_BREADTH_DANGER_
         down_count = sum(1 for c in watched_changes if c <= 0)
         pct_down = round(down_count / len(watched_changes) * 100)
 
-        return {
+        result = {
             "pct_down_24h": pct_down,
             "total_checked": len(watched_changes),
             "is_bearish": pct_down >= threshold_pct,
         }
     except Exception:
-        return None
+        with _breadth_cache_lock:
+            return _breadth_cache["value"]   # نرجع آخر قيمة مخزنة (حتى لو قديمة شوي) أفضل من ولا شي
+
+    with _breadth_cache_lock:
+        _breadth_cache["value"] = result
+        _breadth_cache["time"] = now
+    return result
 
 
 def _normalize(value, low, high):
