@@ -1,37 +1,42 @@
 """
-📈 Trend + StochRSI — استراتيجية موازية ومستقلة (نفس منطق الدخول والحماية الحقيقي)
-======================================================================================
+🎯 صياد الزخم — استراتيجية موازية ومستقلة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
+=====================================================================================
+⚠️ ملاحظة تسمية: اسم الملف والكلاس (TrendStochParallel) ضلوا "trend_stoch" لأسباب
+توافقية بس (أوامر تيليغرام /set_trend_parallel، مفتاح coin_memory
+"trend_stoch_parallel"، ملفات الحالة/التاريخ المحفوظة) — المنطق الفعلي هلق
+لا علاقة له إطلاقاً بـ StochRSI أو الترند، صار بالكامل منطق "صياد"
+(sayyad_logic.py: زخم + انفجار حجم + ضغط دفتر أوامر + صفقات حيتان + RSI تشبع).
+اسم العرض للمستخدم بالتطبيق/تيليغرام هو "صياد الزخم الموازية".
+
 استراتيجية منفصلة تماماً عن حلقة الفحص الرئيسية بـ crypto_signal_bot.py — بس بتستخدم
-بالضبط نفس منطق الدخول (Trend + StochRSI + فوليوم) ونفس نظام الحماية
-(ATR Stop Loss + Trailing) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون
-سلوك الحماية مطابق ومجرب.
+نفس نظام الحماية (ATR Stop Loss + Trailing + كل تعديلات الربح المضمون وسقف
+مسافة التراجع) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون سلوك الحماية مطابق ومجرب.
 
 ⚠️ استقلالية "المشتركات المتغيّرة" (Shared Mutable State): هالملف ما بيلمس أي من
 open_trades / current_strategy / coin_memory (تاريخ العملة يلي بيتحكم بـ Strict Mode)
 أو نسخة market_regime المستخدمة بالتبديل التلقائي — عنده صفقته الخاصة وملف حالته
-الخاص. بس بستورد دوال رياضية بحتة بلا حالة (indicators.py) وحاسبة الـ ATR/SL بلا حالة
-(ATRGuard من coin_memory.py، نسخة جديدة لحاله) — هذول أدوات حساب بحتة، استيرادها آمن
-100% ولا يأثر على أي استراتيجية تانية.
+الخاص. بس بستورد دوال رياضية بحتة بلا حالة (sayyad_logic.py, shared_trading_logic.py)
+وحاسبة الـ ATR/SL بلا حالة (ATRGuard من coin_memory.py، نسخة جديدة لحاله) — هذول
+أدوات حساب بحتة، استيرادها آمن 100% ولا يأثر على أي استراتيجية تانية.
 
 المنطق:
 --------
-1) الدخول (نفس check_trend_stoch بالضبط):
-   - StochRSI: K وD كانوا بمنطقة تشبع بيعي (تحت 20)، وK عبر D صعوداً وطلع فوق 20
-   - السعر فوق MA20
-   - الفوليوم الحالي أعلى من متوسطه (فلتر تأكيد)
-   # ⬅️ بطلب المستخدم: شرط "Beta العملة مقابل BTC" أُلغي بالكامل — الاستراتيجية
-   # هلق تفحص كل عملة بمعزل تام عن BTC، بدون أي مقارنة بحركته
-   لو أكتر من عملة حققت الشروط بنفس دورة الفحص، نختار الأعلى "درجة زخم" (Momentum Score)
-   — نفس منطق ترتيب المرشحين بالبوت الأساسي.
+1) الدخول (منطق صياد بالكامل — فلترة على مرحلتين لتخفيف حمل الـ API):
+   - مرحلة خفيفة: زخم آخر 8 شمعات (30 دقيقة) لكل عملات السوق
+   - مرحلة ثقيلة (لأفضل max_deep_scan_candidates مرشح بس): درجة صياد =
+     وزن الزخم + انفجار الحجم + ضغط دفتر الأوامر + صفقات الحيتان الكبيرة
+   - فلاتر رفض احترازي: حركة سعرية متطرفة (24س)، RSI تشبع شرائي، اتساع
+     سوق هابط عام (compute_market_breadth)، وBTC بترند هابط واضح (BEAR)
+   لو أكتر من عملة حققت الشروط بنفس دورة الفحص، نختار الأعلى درجة صياد (momentum_score).
 
 2) الحماية (نفس نظام البوت بالضبط):
    - Stop Loss أولي: ATR × مضاعف، مربوط بحالة السوق (BULL/BEAR/SIDEWAYS) عبر
      نفس ATRGuard، بسقف صلب 3% ما ينكسر أبداً
-     ما تنزل تحتها أبداً طول عمر الصفقة
-   - Trailing: يتفعّل عند ربح 1%، وبعدها يلاحق أعلى سعر بمسافة ATR × 1.5 (أو نسبة
-     ثابتة احتياطية لو ATR غير متاح)
+   - Trailing: عتبة تفعيل مقيّدة بسقف أقصى (trail_trigger_max_pct)، مسافة
+     تراجع مقيّدة بسقف نسبي (trail_distance_max_pct)، وربح أدنى مضمون بعد
+     التفعيل (min_profit_lock_pct) — كل هذول محسوبين عبر shared_trading_logic.py
 
-3) صفقة وحدة بس بأي لحظة، بمبلغ ثابت 15 USDT.
+3) صفقة وحدة بس بأي لحظة، بمبلغ ثابت 20 USDT.
 
 الاستخدام: TrendStochParallel(client, notify_fn=...).run(...)
 """
@@ -50,6 +55,7 @@ from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 import sayyad_logic
+import shared_trading_logic as trading
 
 _PORTFOLIO_OWNER = "trend_parallel"
 
@@ -98,107 +104,13 @@ DEFAULT_CONFIG = {
 
 
 # ──────────────────────────────────────────────
-# 🔧 تنفيذ شراء/بيع مستقل (بدون استيراد من bot.py)
+# 🔧 تنفيذ شراء/بيع/ATR — مستوردة من shared_trading_logic.py (بدل التكرار
+# اليدوي بالثلاث ملفات الموازية — أي تعديل مستقبلي هلق بمكان واحد بس)
 # ──────────────────────────────────────────────
-def _get_step_size(client, symbol):
-    try:
-        info = client.get_symbol_info(symbol)
-        if not info:
-            return None
-        for f in info["filters"]:
-            if f["filterType"] == "LOT_SIZE":
-                return float(f["stepSize"])
-    except Exception:
-        pass
-    return None
-
-
-def _get_quantity(client, symbol, usdt_amount):
-    step_size = _get_step_size(client, symbol)
-    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-    qty = usdt_amount / price
-    if step_size:
-        precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
-        qty = round(qty - (qty % step_size), precision)
-    return qty, price
-
-
-def _buy_market(client, symbol, usdt_amount):
-    """يرجع (result_dict, error_message)."""
-    try:
-        qty, price = _get_quantity(client, symbol, usdt_amount)
-        if qty <= 0:
-            return None, f"الكمية المحسوبة صفر أو أقل (السعر: {price}, المبلغ: {usdt_amount})"
-        order = client.order_market_buy(symbol=symbol, quantity=qty)
-        fills = order.get("fills", [])
-        if fills:
-            total_qty = sum(float(f["qty"]) for f in fills)
-            total_spent = sum(float(f["price"]) * float(f["qty"]) for f in fills)
-            asset = symbol.replace("USDT", "")
-            commission_in_asset = sum(
-                float(f.get("commission", 0)) for f in fills
-                if f.get("commissionAsset") == asset
-            )
-            net_qty = total_qty - commission_in_asset
-            actual_price = total_spent / total_qty if total_qty > 0 else price
-            if net_qty <= 0:
-                net_qty = qty
-        else:
-            actual_price = price
-            net_qty = qty
-        return {"qty": net_qty, "entry_price": actual_price, "order_id": order["orderId"]}, None
-    except BinanceAPIException as e:
-        return None, f"Binance API error {e.code}: {e.message}"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-
-
-def _sell_market(client, symbol, qty):
-    """يرجع (price, executed_qty, error_message)."""
-    try:
-        asset = symbol.replace("USDT", "")
-        balance = client.get_asset_balance(asset=asset)
-        actual_qty = float(balance["free"])
-        step_size = _get_step_size(client, symbol)
-        # ⬅️ بطلب المستخدم: كانت min(qty, actual_qty) — تبيع بس كمية الصفقة المسجّلة
-        # وتسيب أي غبار (Dust) متراكم من تقريب LOT_SIZE بصفقات سابقة لنفس العملة.
-        # هلق تبيع كامل الرصيد المتاح فعلياً، فينكسح أي غبار قديم مع كل عملية بيع.
-        # ⚠️ هذا التغيير بهالملف المستقل بس — bot.py الأساسي ما انلمس.
-        sell_qty = actual_qty
-        if step_size:
-            precision = len(format(step_size, ".10f").rstrip("0").split(".")[-1]) if "." in format(step_size, ".10f").rstrip("0") else 0   # ⬅️ إصلاح باگ: str(0.00001) تطلع "1e-05" بدون نقطة، فيصفّر الكمية غلط
-            sell_qty = round(sell_qty - (sell_qty % step_size), precision)
-        if sell_qty <= 0:
-            return None, None, f"الكمية المتاحة للبيع صفر أو أقل (رصيد {asset}: {actual_qty}, مطلوب: {qty})"
-        order = client.order_market_sell(symbol=symbol, quantity=sell_qty)
-        fills = order.get("fills", [])
-        if fills:
-            executed_qty = sum(float(f["qty"]) for f in fills)
-            price = sum(float(f["price"]) * float(f["qty"]) for f in fills) / executed_qty
-        else:
-            executed_qty = sell_qty
-            price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        return price, executed_qty, None
-    except BinanceAPIException as e:
-        return None, None, f"Binance API error {e.code}: {e.message}"
-    except Exception as e:
-        return None, None, f"{type(e).__name__}: {e}"
-
-
-def _utc_now_iso():
-    """نفس آلية utc_now_iso() بـ crypto_signal_bot.py — إصلاح مشكلة عرض GMT بالتطبيق."""
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _calculate_atr(highs, lows, closes, period):
-    try:
-        atr_series = ta.volatility.AverageTrueRange(high=highs, low=lows, close=closes, window=period).average_true_range()
-        value = atr_series.iloc[-1]
-        if pd.isna(value) or value <= 0:
-            return None
-        return float(value)
-    except Exception:
-        return None
+_buy_market = trading.buy_market
+_sell_market = trading.sell_market
+_calculate_atr = trading.calculate_atr
+_utc_now_iso = trading.utc_now_iso
 
 
 class TrendStochParallel:
@@ -454,14 +366,14 @@ class TrendStochParallel:
         # 🔐 حجز أخير قبل الشراء الفعلي — لو استراتيجية تانية حجزت نفس العملة
         # بالفترة يلي بين scan_for_entry والتنفيذ، نتراجع فوراً بدل ما نشتري.
         if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
-            self._notify(f"⚠️ Trend+Stoch: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
+            self._notify(f"⚠️ صياد الزخم: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
             return
 
         if self.cfg["live_trading"]:
             result, error = _buy_market(self.client, symbol, amount)
             if result is None:
                 get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
-                self._notify(f"❌ <b>Trend+Stoch — فشل تنفيذ أمر الشراء لـ {symbol}</b>\n⚠️ السبب: {error}")
+                self._notify(f"❌ <b>صياد الزخم — فشل تنفيذ أمر الشراء لـ {symbol}</b>\n⚠️ السبب: {error}")
                 return
             entry_price, qty = result["entry_price"], result["qty"]
         else:
@@ -500,7 +412,7 @@ class TrendStochParallel:
 
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
-            f"🟢 <b>Trend+Stoch{mode_tag} — دخول {symbol.replace('USDT','')}</b>\n"
+            f"🟢 <b>صياد الزخم{mode_tag} — دخول {symbol.replace('USDT','')}</b>\n"
             f"💰 السعر: {entry_price:.6f} | حالة السوق: {market_regime}\n"
             f"🛡️ وقف الخسارة الأولي: {stop_loss:.6f}\n"
             f"💵 المبلغ: {amount} USDT"
@@ -537,29 +449,13 @@ class TrendStochParallel:
 
     def _compute_trail_stop(self, price):
         """
-        🔒 سقف مسافة التراجع (trail_distance_max_pct): مسافة الستوب عن القمة
-        ما تتجاوز هالنسبة من السعر، بغض النظر عن قيمة ATR الخام — عملة
-        متقلبة ما عاد تاخد مساحة واسعة تبتلع الربح.
-
-        🔒 Minimum Profit Lock: أول ما Trailing يتفعّل، الستوب ما ينزل أبداً
-        تحت (سعر الدخول + min_profit_lock_pct%) — أسوأ سيناريو هو الخروج
-        بربح مضمون بهالنسبة على الأقل، مش الرجوع لخسارة فعلية بعد ما كانت
-        الصفقة رابحة.
+        🔒 محسوبة عبر shared_trading_logic.compute_trail_stop() — نفس المنطق
+        (سقف مسافة التراجع trail_distance_max_pct + Minimum Profit Lock)
+        مشترك مع باقي الاستراتيجيات الموازية، بمكان واحد بدل التكرار.
         """
         atr_val = self.position.get("atr")
-        if atr_val:
-            atr_distance = self.cfg["trail_atr_multiplier"] * atr_val
-            max_distance = price * (self.cfg["trail_distance_max_pct"] / 100)
-            distance = min(atr_distance, max_distance)   # 🔒 الأصغر بين ATR والسقف النسبي
-            candidate = price - distance
-            if not (0 < candidate < price):
-                candidate = price * (1 - self.cfg["fallback_trail_pct"])
-        else:
-            candidate = price * (1 - self.cfg["fallback_trail_pct"])
-
-        min_locked_price = self.position["entry_price"] * (1 + self.cfg["min_profit_lock_pct"] / 100)
-        candidate = max(candidate, min_locked_price)   # 🔒 Minimum Profit Lock
-        return round(candidate, 8)
+        entry_price = self.position["entry_price"]
+        return trading.compute_trail_stop(price, atr_val, entry_price, self.cfg)
 
     # ──────────────────────────────────────────────
     # 🔍 إدارة الصفقة المفتوحة (Trailing + Stop Loss — نفس منطق البوت بالضبط)
@@ -575,15 +471,8 @@ class TrendStochParallel:
         fresh_atr = self._refresh_position_atr(symbol)
         atr_val = fresh_atr if fresh_atr else self.position.get("atr")
 
-        # ⬅️ نقطة تفعيل Trailing بمضاعف ATR بدل نسبة ثابتة، مقيّدة بسقف أقصى
-        # (trail_trigger_max_pct) — يمنع عملة متقلبة من طلب ربح ضخم لتفعيل
-        # الحماية رغم إن الـ Stop Loss النازل مقيّد بسقف أضيق بكثير.
-        if atr_val:
-            raw_trigger = self.position["entry_price"] + (self.cfg["trail_activate_atr_multiple"] * atr_val)
-            capped_trigger = self.position["entry_price"] * (1 + self.cfg["trail_trigger_max_pct"] / 100)
-            trail_trigger = min(raw_trigger, capped_trigger)
-        else:
-            trail_trigger = self.position["entry_price"] * (1 + self.cfg["trail_activate_pct"])
+        # ⬅️ نقطة تفعيل Trailing — محسوبة عبر shared_trading_logic.compute_trail_trigger()
+        trail_trigger = trading.compute_trail_trigger(self.position["entry_price"], atr_val, self.cfg)
 
         # 🎯 تفعيل Trailing
         if not self.position["trailing_active"]:
@@ -592,7 +481,7 @@ class TrendStochParallel:
                 self.position["highest_price"] = price
                 self.position["stop_loss"] = self._compute_trail_stop(price)
                 self._save_state()
-                self._notify(f"🎯 Trend+Stoch: تفعيل Trailing لـ {symbol.replace('USDT','')} | ستوب: {self.position['stop_loss']}")
+                self._notify(f"🎯 صياد الزخم: تفعيل Trailing لـ {symbol.replace('USDT','')} | ستوب: {self.position['stop_loss']}")
 
         # تحديث/فحص الخروج
         if self.position["trailing_active"]:
@@ -632,7 +521,7 @@ class TrendStochParallel:
         if self.cfg["live_trading"]:
             exit_price, executed_qty, error = _sell_market(self.client, symbol, qty)
             if exit_price is None:
-                self._notify(f"❌ <b>Trend+Stoch — فشل تنفيذ أمر البيع لـ {symbol}</b>\nالسبب المحاول: {reason}\n⚠️ الخطأ: {error}")
+                self._notify(f"❌ <b>صياد الزخم — فشل تنفيذ أمر البيع لـ {symbol}</b>\nالسبب المحاول: {reason}\n⚠️ الخطأ: {error}")
                 return
             final_qty = executed_qty
         else:
@@ -663,7 +552,7 @@ class TrendStochParallel:
         reason_ar = reason_map.get(reason, reason)
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
-            f"{icon} <b>Trend+Stoch{mode_tag} — خروج {symbol.replace('USDT','')} ({reason_ar})</b>\n"
+            f"{icon} <b>صياد الزخم{mode_tag} — خروج {symbol.replace('USDT','')} ({reason_ar})</b>\n"
             f"💰 دخول: {entry_price:.6f} → خروج: {exit_price:.6f}\n"
             f"📊 PnL: {pnl:+.4f} USDT ({pnl_pct:+.3f}%)"
         )
@@ -715,7 +604,7 @@ class TrendStochParallel:
         دايماً بغض النظر عن حالة التفعيل — الإيقاف بس بيمنع البحث عن صفقات جديدة.
         """
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
-        print(f"📈 بدء Trend+Stoch المستقلة — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: ساعة")
+        print(f"📈 بدء صياد الزخم المستقلة — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: 30 دقيقة")
 
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
