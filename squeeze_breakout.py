@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
     "trail_trigger_max_pct": 3.0,      # ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing
     "min_profit_lock_pct": 0.80,       # ⬅️ بطلب المستخدم: ربح مضمون بعد تفعيل Trailing، مش مجرد Breakeven
-    "trail_distance_max_pct": 1.0,     # ⬅️ بطلب المستخدم: سقف أقصى لمسافة تراجع Trailing عن القمة
+    "trail_distance_max_pct": 2.0,     # ⬅️ رُفع من 1.0 لـ2.0 (بطلب المستخدم) — سقف أقصى لمسافة تراجع Trailing عن القمة
     "stop_loss_fallback_pct": 0.02,
     "fallback_trail_pct": 0.01,
 

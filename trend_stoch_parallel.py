@@ -86,7 +86,7 @@ DEFAULT_CONFIG = {
                                         # الـ Stop Loss النازل مقيّد بسقف أضيق بكثير (atr_multiplier + الحد الصلب)
     "min_profit_lock_pct": 0.80,       # ⬅️ بطلب المستخدم: أول ما Trailing يتفعّل، الستوب ما ينزل تحت
                                         # (سعر الدخول + هالنسبة) — ربح مضمون على الأقل، مش مجرد Breakeven
-    "trail_distance_max_pct": 1.0,     # ⬅️ بطلب المستخدم: سقف أقصى لمسافة تراجع Trailing عن القمة، بغض
+    "trail_distance_max_pct": 2.0,     # ⬅️ رُفع من 1.0 لـ2.0 (بطلب المستخدم) — سقف أقصى لمسافة تراجع Trailing عن القمة، بغض
                                         # النظر عن ATR — يمنع عملة متقلبة من "أكل" ربح كبير بمسافة واسعة
     "stop_loss_fallback_pct": 0.02,    # احتياطي لو ما قدرنا نحسب ATR
     "fallback_trail_pct": 0.01,        # احتياطي Trailing لو ما قدرنا نحسب ATR
