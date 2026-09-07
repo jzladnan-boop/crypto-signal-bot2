@@ -206,6 +206,9 @@ class SqueezeBreakout:
     # ──────────────────────────────────────────────
     def check_symbol_entry(self, symbol):
         try:
+            if not sayyad_logic.has_sufficient_liquidity(self.client, symbol):
+                return None
+
             limit = self.cfg["bbw_history_lookback"] + self.cfg["bb_period"] + self.cfg["atr_period"] + 10
             klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=limit)
             if not klines or len(klines) < self.cfg["bbw_history_lookback"] + self.cfg["bb_period"]:

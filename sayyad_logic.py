@@ -17,9 +17,8 @@ import time
 MOMENTUM_WINDOW_CANDLES = 8        # 8 شمعة × 30 دقيقة = 4 ساعات (نفس صياد بالضبط)
 EXTREME_MOVE_THRESHOLD_PCT = 20    # حركة أكبر من كذا % (4س أو 24س) = رفض احترازي
 LARGE_TRADE_USDT_THRESHOLD = 10_000
-MIN_SCORE_TO_ACCEPT = 70   # ⬅️ رُفع من 60 لـ70 (بطلب المستخدم) — تحليل 11 صفقة فعلية (4-5 سبتمبر)
-                            # طلع نسبة فوز 45% بس متوسط الخسارة (2.21%) أكبر من متوسط الربح (1.93%)،
-                            # يعني حد 60 كان يسمح بدخول حدّي/ضعيف. رفعه لانتقائية أعلى وإشارات أقل بس أقوى.
+MIN_SCORE_TO_ACCEPT = 65   # ⬅️ نقطة وسط (بطلب المستخدم) بين 60 الأصلي و70 يلي جربناها —
+                            # 70 أوقفت الاستراتيجية بالكامل لأكتر من 6 ساعات (متشددة زيادة عن اللزوم)
 RSI_OVERBOUGHT_THRESHOLD = 70      # RSI للعملة فوق هالرقم = تشبّع شرائي، رفض احترازي
 MARKET_BREADTH_DANGER_THRESHOLD = 75  # % من العملات نازلة (24س) = سوق ضعيف عام، نوقف كل دخول هالدورة
 MARKET_BREADTH_CACHE_SECONDS = 60     # ⬅️ إصلاح: تخزين مؤقت مشترك — البوت الأساسي + 3 استراتيجيات
@@ -28,9 +27,63 @@ MARKET_BREADTH_CACHE_SECONDS = 60     # ⬅️ إصلاح: تخزين مؤقت �
                                         # رغم إنه نفس البيانات بالضبط — هلق أول استراتيجية تطلبها بأي 60
                                         # ثانية "تجيبها لحالها"، والباقي بياخدوا نفس النسخة المخزنة بدل
                                         # ما يكرروا نفس الطلب الثقيل 4 مرات
+MIN_LIQUIDITY_USDT_24H = 5_000_000    # ⬅️ جديد (بطلب المستخدم): حجم تداول يومي أدنى (USDT) — عملات
+                                        # تحت هالحد نتجاهلها بغض النظر عن قوة إشارتها، لأنها أكتر عرضة
+                                        # لتذبذب عشوائي (ضجيج مش اتجاه حقيقي) وانزلاق سعري وقت التنفيذ
 
-_breadth_cache_lock = threading.Lock()
-_breadth_cache = {"value": None, "time": 0.0}
+_ticker_cache_lock = threading.Lock()
+_ticker_cache = {"tickers": None, "time": 0.0}
+
+
+def _get_ticker_map(client):
+    """
+    يرجع dict {symbol: ticker_raw_dict} من طلب get_ticker() واحد بس —
+    نفس الكاش المشترك (60 ثانية) يلي بتستخدمه compute_market_breadth، بس
+    هون بنخزن التيكرات الخام كاملة (مش بس نسبة التغير) حتى نقدر نستخرج
+    منها كمان حجم التداول (quoteVolume) لفحص السيولة، بدون أي طلب API إضافي.
+    """
+    now = time.time()
+    with _ticker_cache_lock:
+        cached = _ticker_cache["tickers"]
+        if cached is not None and (now - _ticker_cache["time"]) < MARKET_BREADTH_CACHE_SECONDS:
+            return cached
+
+    try:
+        tickers = client.get_ticker()
+        ticker_map = {t["symbol"]: t for t in tickers}
+    except Exception:
+        with _ticker_cache_lock:
+            return _ticker_cache["tickers"]  # قديم أحسن من ولا شي
+
+    with _ticker_cache_lock:
+        _ticker_cache["tickers"] = ticker_map
+        _ticker_cache["time"] = now
+    return ticker_map
+
+
+def has_sufficient_liquidity(client, symbol, min_volume_usdt=MIN_LIQUIDITY_USDT_24H):
+    """
+    فلتر مستقل: حجم التداول خلال 24 ساعة (بالـUSDT) لازم يكون فوق الحد
+    الأدنى، وإلا نرفض العملة بغض النظر عن قوة إشارتها. عملات قليلة السيولة
+    أكتر عرضة لضجيج سعري عشوائي وانزلاق تنفيذ.
+
+    لو فشل جلب البيانات بالكامل (لا كاش قديم ولا طلب جديد نجح)، منرجع True
+    (fail-open) حتى ما نوقف كل الاستراتيجيات بسبب عطل مؤقت بجلب التيكرات.
+    """
+    ticker_map = _get_ticker_map(client)
+    if not ticker_map:
+        return True
+
+    ticker = ticker_map.get(symbol)
+    if ticker is None:
+        return False  # الرمز مش موجود بالسوق أصلاً — أأمن نرفضه
+
+    try:
+        volume_usdt = float(ticker.get("quoteVolume", 0))
+    except (TypeError, ValueError):
+        return True
+
+    return volume_usdt >= min_volume_usdt
 
 
 def compute_momentum(klines, momentum_window=MOMENTUM_WINDOW_CANDLES):
@@ -137,46 +190,28 @@ def is_overbought(rsi_value):
 def compute_market_breadth(client, symbols, threshold_pct=MARKET_BREADTH_DANGER_THRESHOLD):
     """
     يحسب نسبة العملات النازلة (24 ساعة رسمية) من أصل قائمة رموز محددة —
-    طلب API واحد بس (get_ticker بدون رمز = كل الأسواق دفعة وحدة). لازم
-    تمرير قائمة الرموز صراحة (متل قائمة SYMBOLS المشتركة تبع التطبيق)
-    حتى يكون القياس متّسق مع باقي الاستراتيجيات. لو النسبة النازلة تجاوزت
-    الحد، نعتبر السوق "ضعيف عام" ونوقف كل دخول هالدورة، حتى لو عملة معينة
-    عندها إشارة قوية فردياً.
-
-    🔒 مخزّن مؤقتاً (MARKET_BREADTH_CACHE_SECONDS) ومشترك بين كل الاستراتيجيات
-    (thread-safe عبر _breadth_cache_lock) — يمنع 4 طلبات ثقيلة متكررة لنفس
-    البيانات بالضبط كل دورة فحص.
+    بيستخدم نفس الكاش المشترك (_get_ticker_map) يلي فحص السيولة بيستخدمه
+    كمان، فما في طلب API مكرر. لو النسبة النازلة تجاوزت الحد، نعتبر السوق
+    "ضعيف عام" ونوقف كل دخول هالدورة، حتى لو عملة معينة عندها إشارة قوية فردياً.
     """
-    now = time.time()
-    with _breadth_cache_lock:
-        cached_value = _breadth_cache["value"]
-        cached_age = now - _breadth_cache["time"]
-        if cached_value is not None and cached_age < MARKET_BREADTH_CACHE_SECONDS:
-            return cached_value
+    ticker_map = _get_ticker_map(client)
+    if not ticker_map:
+        return None
 
-    try:
-        tickers = client.get_ticker()  # كل الرموز دفعة وحدة — طلب واحد فقط
-        change_map = {t["symbol"]: float(t["priceChangePercent"]) for t in tickers}
-        watched_changes = [change_map[s] for s in symbols if s in change_map]
-        if not watched_changes:
-            return None
+    watched_changes = [
+        float(ticker_map[s]["priceChangePercent"]) for s in symbols if s in ticker_map
+    ]
+    if not watched_changes:
+        return None
 
-        down_count = sum(1 for c in watched_changes if c <= 0)
-        pct_down = round(down_count / len(watched_changes) * 100)
+    down_count = sum(1 for c in watched_changes if c <= 0)
+    pct_down = round(down_count / len(watched_changes) * 100)
 
-        result = {
-            "pct_down_24h": pct_down,
-            "total_checked": len(watched_changes),
-            "is_bearish": pct_down >= threshold_pct,
-        }
-    except Exception:
-        with _breadth_cache_lock:
-            return _breadth_cache["value"]   # نرجع آخر قيمة مخزنة (حتى لو قديمة شوي) أفضل من ولا شي
-
-    with _breadth_cache_lock:
-        _breadth_cache["value"] = result
-        _breadth_cache["time"] = now
-    return result
+    return {
+        "pct_down_24h": pct_down,
+        "total_checked": len(watched_changes),
+        "is_bearish": pct_down >= threshold_pct,
+    }
 
 
 def _normalize(value, low, high):

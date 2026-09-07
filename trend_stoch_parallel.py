@@ -235,6 +235,9 @@ class TrendStochParallel:
         قبل ما نصرف استدعاءات ثقيلة إلا على أفضل مرشحين بس.
         """
         try:
+            if not sayyad_logic.has_sufficient_liquidity(self.client, symbol):
+                return None
+
             klines_raw = self.client.get_klines(
                 symbol=symbol, interval=self.cfg["interval"], limit=self.cfg["kline_lookback"] + 1
             )

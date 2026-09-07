@@ -3250,6 +3250,9 @@ def run_bot():
                         watch_list.discard(symbol)
                         continue
 
+                    if not sayyad_logic.has_sufficient_liquidity(client, symbol):
+                        continue
+
                     # ── استراتيجية RSI العادي ──────────────────
                     if strategy == "rsi":
                         ind = get_indicators(client, symbol)
