@@ -1,40 +1,37 @@
 """
-🎯 صياد الزخم — استراتيجية موازية ومستقلة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
+📈 Trend + StochRSI — استراتيجية موازية ومستقلة (رجعت لمنطقها الأصلي بطلب
+المستخدم، بعد فترة تجربة منطق "صياد" — راجع تاريخ Git لتفاصيل التجربة)
 =====================================================================================
-⚠️ ملاحظة تسمية: اسم الملف والكلاس (TrendStochParallel) ضلوا "trend_stoch" لأسباب
-توافقية بس (أوامر تيليغرام /set_trend_parallel، مفتاح coin_memory
-"trend_stoch_parallel"، ملفات الحالة/التاريخ المحفوظة) — المنطق الفعلي هلق
-لا علاقة له إطلاقاً بـ StochRSI أو الترند، صار بالكامل منطق "صياد"
-(sayyad_logic.py: زخم + انفجار حجم + ضغط دفتر أوامر + صفقات حيتان + RSI تشبع).
-اسم العرض للمستخدم بالتطبيق/تيليغرام هو "صياد الزخم الموازية".
-
 استراتيجية منفصلة تماماً عن حلقة الفحص الرئيسية بـ crypto_signal_bot.py — بس بتستخدم
-نفس نظام الحماية (ATR Stop Loss + Trailing + كل تعديلات الربح المضمون وسقف
-مسافة التراجع) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون سلوك الحماية مطابق ومجرب.
+بالضبط نفس منطق الدخول الأصلي (Trend + StochRSI + فوليوم) ونفس نظام الحماية
+(ATR Stop Loss + Trailing) يلي البوت الأساسي مستخدمه فعلياً، حتى يكون
+سلوك الحماية مطابق ومجرب.
 
 ⚠️ استقلالية "المشتركات المتغيّرة" (Shared Mutable State): هالملف ما بيلمس أي من
 open_trades / current_strategy / coin_memory (تاريخ العملة يلي بيتحكم بـ Strict Mode)
 أو نسخة market_regime المستخدمة بالتبديل التلقائي — عنده صفقته الخاصة وملف حالته
-الخاص. بس بستورد دوال رياضية بحتة بلا حالة (sayyad_logic.py, shared_trading_logic.py)
-وحاسبة الـ ATR/SL بلا حالة (ATRGuard من coin_memory.py، نسخة جديدة لحاله) — هذول
-أدوات حساب بحتة، استيرادها آمن 100% ولا يأثر على أي استراتيجية تانية.
+الخاص. بس بستورد دوال رياضية بحتة بلا حالة (indicators.py, sayyad_logic.py
+للفلاتر العامة، shared_trading_logic.py للتنفيذ) وحاسبة الـ ATR/SL بلا حالة
+(ATRGuard من coin_memory.py، نسخة جديدة لحالها) — هذول أدوات حساب بحتة،
+استيرادها آمن 100% ولا يأثر على أي استراتيجية تانية.
 
 المنطق:
 --------
-1) الدخول (منطق صياد بالكامل — فلترة على مرحلتين لتخفيف حمل الـ API):
-   - مرحلة خفيفة: زخم آخر 8 شمعات (30 دقيقة) لكل عملات السوق
-   - مرحلة ثقيلة (لأفضل max_deep_scan_candidates مرشح بس): درجة صياد =
-     وزن الزخم + انفجار الحجم + ضغط دفتر الأوامر + صفقات الحيتان الكبيرة
-   - فلاتر رفض احترازي: حركة سعرية متطرفة (24س)، RSI تشبع شرائي، اتساع
-     سوق هابط عام (compute_market_breadth)، وBTC بترند هابط واضح (BEAR)
-   لو أكتر من عملة حققت الشروط بنفس دورة الفحص، نختار الأعلى درجة صياد (momentum_score).
+1) الدخول (نفس check_trend_stoch الأصلي بالضبط):
+   - StochRSI: K وD كانوا بمنطقة تشبع بيعي (تحت 20)، وK عبر D صعوداً وطلع فوق 20
+   - السعر فوق MA20
+   - الفوليوم الحالي أعلى من متوسطه (فلتر تأكيد)
+   - فلاتر رفض احترازي عامة (مشتركة مع باقي الاستراتيجيات الثلاث عبر
+     sayyad_logic.py): سيولة يومية دنيا (5 مليون USDT)، اتساع سوق هابط عام،
+     وBTC بترند هابط واضح (BEAR)
+   لو أكتر من عملة حققت الشروط بنفس دورة الفحص، نختار الأعلى "درجة زخم" (Momentum Score).
 
 2) الحماية (نفس نظام البوت بالضبط):
    - Stop Loss أولي: ATR × مضاعف، مربوط بحالة السوق (BULL/BEAR/SIDEWAYS) عبر
      نفس ATRGuard، بسقف صلب 3% ما ينكسر أبداً
    - Trailing: عتبة تفعيل مقيّدة بسقف أقصى (trail_trigger_max_pct)، مسافة
-     تراجع مقيّدة بسقف نسبي (trail_distance_max_pct)، وربح أدنى مضمون بعد
-     التفعيل (min_profit_lock_pct) — كل هذول محسوبين عبر shared_trading_logic.py
+     تراجع مقيّدة بسقف نسبي (trail_distance_max_pct = 2%)، وربح أدنى مضمون
+     بعد التفعيل (min_profit_lock_pct)
 
 3) صفقة وحدة بس بأي لحظة، بمبلغ ثابت 20 USDT.
 
@@ -61,18 +58,16 @@ _PORTFOLIO_OWNER = "trend_parallel"
 
 
 DEFAULT_CONFIG = {
-    "interval": Client.KLINE_INTERVAL_30MINUTE,   # منطق صياد: شمعة 30 دقيقة
-    "kline_lookback": 48,                          # 48 شمعة × 30 دقيقة = 24 ساعة (نظرة صياد)
+    "interval": Client.KLINE_INTERVAL_1HOUR,   # رجع لفريم الساعة الأصلي
     "symbols": None,   # None = يجيب قائمة عملات USDT Spot النشطة تلقائياً (نفس نطاق البوت)
     "exclude_leveraged": True,   # يستبعد UP/DOWN/BULL/BEAR (توكنز رافعة مالية)
 
-    # ── شروط الدخول (نفس check_trend_stoch بالضبط) ──
+    # ── شروط الدخول (نفس check_trend_stoch الأصلي بالضبط) ──
     "ma_period": 20,
     "stoch_window": 14, "stoch_smooth1": 3, "stoch_smooth2": 3,
     "stoch_entry_level": 20,
     "volume_ma_length": 20,
     "volume_multiplier": 1.0,
-    # ⬅️ بطلب المستخدم: فلتر Beta (مقارنة الزخم بـ BTC) أُلغي بالكامل من شروط الدخول
     "atr_enabled": True,   # ⬅️ بطلب المستخدم: زر تشغيل/إيقاف ATR — ينعكس من إعدادات البوت الأساسي عبر config_fn
     "atr_period": 14,
 
@@ -81,13 +76,9 @@ DEFAULT_CONFIG = {
     "trail_atr_multiplier": 1.5,       # مضاعف ATR لمسافة الـ Trailing
     "trail_activate_atr_multiple": 1.0,     # ⬅️ بدل نسبة ثابتة: تفعيل Trailing عند ربح = 1.0×ATR الحالي
     "trail_activate_pct": 0.01,        # احتياطي فقط — يُستخدم لو تعذر حساب ATR
-    "trail_trigger_max_pct": 3.0,      # ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing — يمنع
-                                        # عملة متقلبة (ATR خام كبير) من طلب ربح ضخم لتفعيل الحماية، رغم إن
-                                        # الـ Stop Loss النازل مقيّد بسقف أضيق بكثير (atr_multiplier + الحد الصلب)
-    "min_profit_lock_pct": 0.80,       # ⬅️ بطلب المستخدم: أول ما Trailing يتفعّل، الستوب ما ينزل تحت
-                                        # (سعر الدخول + هالنسبة) — ربح مضمون على الأقل، مش مجرد Breakeven
-    "trail_distance_max_pct": 2.0,     # ⬅️ رُفع من 1.0 لـ2.0 (بطلب المستخدم) — سقف أقصى لمسافة تراجع Trailing عن القمة، بغض
-                                        # النظر عن ATR — يمنع عملة متقلبة من "أكل" ربح كبير بمسافة واسعة
+    "trail_trigger_max_pct": 3.0,      # سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing
+    "min_profit_lock_pct": 0.80,       # أول ما Trailing يتفعّل، الستوب ما ينزل تحت (سعر الدخول + هالنسبة)
+    "trail_distance_max_pct": 2.0,     # سقف أقصى لمسافة تراجع Trailing عن القمة
     "stop_loss_fallback_pct": 0.02,    # احتياطي لو ما قدرنا نحسب ATR
     "fallback_trail_pct": 0.01,        # احتياطي Trailing لو ما قدرنا نحسب ATR
 
@@ -96,10 +87,7 @@ DEFAULT_CONFIG = {
     "state_file": "trend_stoch_state.json",
     "history_file": "trend_stoch_history.json",
     "coin_memory_db_path": "coin_memory.db",   # ⬅️ نفس قاعدة الذاكرة الموحّدة يلي البوت الأساسي يستخدمها
-    "scan_pause_seconds": 0.4,         # ⬅️ بطلب المستخدم: كانت 0.15 — بطّأنا الفحص (144 عملة كل ساعة) لتخفيف الضغط على مفتاح API المشترك مع البوت الأساسي
-    "max_deep_scan_candidates": 8,      # ⬅️ إصلاح: بعد فلترة الزخم الخفيفة على كل السوق، بس أفضل هالعدد
-                                         # من المرشحين بياخدوا الفحص الثقيل (دفتر أوامر + حيتان) — يمنع
-                                         # مئات الاستدعاءات الثقيلة كل دورة فحص (كل 5 دقايق هلق بدل ساعة)
+    "scan_pause_seconds": 0.4,         # تخفيف الضغط على مفتاح API المشترك مع البوت الأساسي
 }
 
 
@@ -227,75 +215,54 @@ class TrendStochParallel:
     # ──────────────────────────────────────────────
     # 🟢 فحص إشارة الدخول لعملة وحدة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
     # ──────────────────────────────────────────────
-    def check_symbol_momentum(self, symbol):
-        """
-        🟢 المرحلة الأولى (خفيفة): استدعاء API وحيد (klines) بس — تحسب
-        الزخم الأولي وترجع (klines, momentum) خام بدون أي استدعاء ثقيل
-        (دفتر أوامر / صفقات حيتان). تُستخدم لفلترة كل عملات السوق بسرعة
-        قبل ما نصرف استدعاءات ثقيلة إلا على أفضل مرشحين بس.
-        """
+    # ──────────────────────────────────────────────
+    # 🟢 فحص إشارة الدخول لعملة وحدة (نفس check_trend_stoch الأصلي بالضبط — StochRSI)
+    # ──────────────────────────────────────────────
+    def check_symbol_entry(self, symbol):
         try:
             if not sayyad_logic.has_sufficient_liquidity(self.client, symbol):
                 return None
 
-            klines_raw = self.client.get_klines(
-                symbol=symbol, interval=self.cfg["interval"], limit=self.cfg["kline_lookback"] + 1
+            klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=100)
+            if not klines or len(klines) < 30:
+                return None
+            closes  = pd.Series([float(k[4]) for k in klines])
+            highs   = pd.Series([float(k[2]) for k in klines])
+            lows    = pd.Series([float(k[3]) for k in klines])
+            volumes = pd.Series([float(k[5]) for k in klines])
+
+            stoch = ta.momentum.StochRSIIndicator(
+                close=closes, window=self.cfg["stoch_window"],
+                smooth1=self.cfg["stoch_smooth1"], smooth2=self.cfg["stoch_smooth2"],
             )
-            if len(klines_raw) < sayyad_logic.MOMENTUM_WINDOW_CANDLES + 2:
-                return None
-            klines = klines_raw[:-1]  # نتجاهل الشمعة الجارية بالحسابات
+            k_line = stoch.stochrsi_k() * 100
+            d_line = stoch.stochrsi_d() * 100
 
-            momentum = sayyad_logic.compute_momentum(klines)
-            if momentum is None or momentum["price_change_pct"] <= 0:
-                return None
-
-            return {"symbol": symbol, "klines": klines, "momentum": momentum}
-        except BinanceAPIException:
-            return None
-        except Exception:
-            return None
-
-    # ──────────────────────────────────────────────
-    # 🟢 فحص إشارة الدخول لعملة وحدة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
-    # ──────────────────────────────────────────────
-    def check_symbol_entry(self, symbol, klines=None, momentum=None):
-        """
-        🔴 المرحلة الثانية (ثقيلة): دفتر الأوامر + صفقات الحيتان — تُستدعى
-        بس لأفضل مرشحين (max_deep_scan_candidates) بعد فلترة الزخم الأولية،
-        مش لكل عملة عندها زخم إيجابي. لو klines/momentum غير ممررة (استخدام
-        مباشر لعملة وحدة)، بتحسبهم من الصفر بنفسها.
-        """
-        try:
-            if klines is None or momentum is None:
-                pre = self.check_symbol_momentum(symbol)
-                if pre is None:
-                    return None
-                klines, momentum = pre["klines"], pre["momentum"]
-
-            ob_imbalance = sayyad_logic.compute_order_book_imbalance(self.client, symbol)
-            whale_data = sayyad_logic.detect_whale_trades(self.client, symbol)
-            score, breakdown = sayyad_logic.compute_score(momentum, ob_imbalance, whale_data)
-
-            if score < sayyad_logic.MIN_SCORE_TO_ACCEPT:
-                return None
-            if sayyad_logic.is_extreme_move(breakdown):
-                return None
-
-            closes_list = [float(k[4]) for k in klines]
-            rsi_value = sayyad_logic.compute_rsi(closes_list, period=14)
-            if sayyad_logic.is_overbought(rsi_value):
-                return None
-
-            closes = pd.Series(closes_list)
-            highs = pd.Series([float(k[2]) for k in klines])
-            lows = pd.Series([float(k[3]) for k in klines])
+            k_curr, k_prev = round(k_line.iloc[-1], 2), round(k_line.iloc[-2], 2)
+            d_curr, d_prev = round(d_line.iloc[-1], 2), round(d_line.iloc[-2], 2)
             price = float(closes.iloc[-1])
+            ma20  = round(closes.rolling(window=self.cfg["ma_period"]).mean().iloc[-1], 8)
+            level = self.cfg["stoch_entry_level"]
+
+            base_condition = (
+                k_prev < level and d_prev < level and
+                k_curr >= level and
+                k_prev < d_prev and k_curr > d_curr and
+                price > ma20
+            )
+            if not base_condition:
+                return None
+
+            vol_ma = volumes.rolling(window=self.cfg["volume_ma_length"]).mean().iloc[-1]
+            if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * self.cfg["volume_multiplier"]):
+                return None
+
             atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"]) if self.cfg.get("atr_enabled", True) else None
 
             return {
-                "symbol": symbol, "price": price, "atr": atr_value,
-                "momentum_score": score,
-                "sayyad_breakdown": breakdown,
+                "symbol": symbol, "price": price, "ma20": ma20,
+                "k_curr": k_curr, "d_curr": d_curr, "atr": atr_value,
+                "momentum_score": calculate_momentum_score(closes, volumes),
             }
         except BinanceAPIException:
             return None
@@ -303,60 +270,34 @@ class TrendStochParallel:
             return None
 
     def scan_for_entry(self):
-        """يفحص عملات قائمة SYMBOLS المشتركة (نفس قائمة كل الاستراتيجيات)، ويرجع أفضل إشارة (أعلى momentum_score، وغير محجوزة لاستراتيجية تانية) أو None."""
-        # تصحيح: نستخدم self._get_symbols() الأصلية (نفس قائمة SYMBOLS
-        # المشتركة يلي Squeeze Breakout وMean Reversion بيستخدموها) بدل
-        # قائمة صياد المنفصلة — حتى الاستراتيجيات الثلاث تضل متّسقة على
-        # نفس مصدر واحد قابل للتعديل من إعدادات التطبيق
+        """يفحص عملات قائمة SYMBOLS المشتركة، ويرجع أفضل إشارة (أعلى momentum_score، وغير محجوزة لاستراتيجية تانية) أو None."""
         symbols = self._get_symbols()
         if not symbols:
             return None
 
         # فحص اتساع السوق أول شي — طلب واحد بس لكل دورة، على نفس قائمة
         # SYMBOLS المشتركة. لو أغلب السوق نازل (24 ساعة)، نوقف كل محاولة
-        # دخول هالدورة بغض النظر عن قوة أي إشارة فردية — تجنّب "السباحة
-        # عكس التيار" (زي صفقة ENSO يلي خسرت بيوم كان السوق أحمر بشكل عام).
+        # دخول هالدورة بغض النظر عن قوة أي إشارة فردية.
         breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
         if breadth and breadth["is_bearish"]:
             return None
 
         # فحص إضافي: BTC نفسه بترند هابط واضح (BEAR) — وقف احترازي مستقل
-        # عن اتساع السوق (ممكن BTC يكون هابط بوضوح رغم إن الألتكوينز لسا
-        # ما انعكس أثرها بشكل واسع بعد).
+        # عن اتساع السوق.
         if self.regime_detector.get_regime_label() == "BEAR":
             return None
 
         portfolio = get_portfolio_manager()
-
-        # ⬅️ إصلاح (حمل API): المرحلة الأولى — فحص خفيف (klines بس) لكل
-        # عملات السوق. المرحلة الثانية الثقيلة (دفتر أوامر + حيتان) ما
-        # بتصير إلا لأفضل عدد محدود من المرشحين (max_deep_scan_candidates)،
-        # مش لكل عملة عندها زخم إيجابي — كان هذا يولّد مئات الاستدعاءات
-        # الثقيلة كل 5 دقايق على مفتاح API مشترك مع 3 استراتيجيات تانية.
-        momentum_candidates = []
+        best_signal = None
         for symbol in symbols:
-            if symbol == "BTCUSDT":   # مستبعدة من هالاستراتيجية دائماً (BTC ما إلها استراتيجية موازية مخصصة حالياً)
+            if symbol == "BTCUSDT":   # مستبعدة أصلاً — مغطاة بستراتيجية Range Trading المنفصلة
                 continue
             if portfolio.is_claimed_by_other(symbol, _PORTFOLIO_OWNER):
                 continue   # عملة محجوزة لاستراتيجية تانية حالياً — نتجاوزها
-            pre = self.check_symbol_momentum(symbol)
-            if pre is not None:
-                momentum_candidates.append(pre)
-            time.sleep(self.cfg["scan_pause_seconds"])
-
-        if not momentum_candidates:
-            return None
-
-        # نرتب تنازلياً بقوة الزخم (% التغيّر) ونكتفي بأفضل عدد محدود
-        # للمرحلة الثقيلة — الفلترة السريعة الأولى كافية لاستبعاد الضعيف
-        momentum_candidates.sort(key=lambda c: c["momentum"]["price_change_pct"], reverse=True)
-        top_candidates = momentum_candidates[: self.cfg["max_deep_scan_candidates"]]
-
-        best_signal = None
-        for cand in top_candidates:
-            signal = self.check_symbol_entry(cand["symbol"], klines=cand["klines"], momentum=cand["momentum"])
+            signal = self.check_symbol_entry(symbol)
             if signal and (best_signal is None or signal["momentum_score"] > best_signal["momentum_score"]):
                 best_signal = signal
+            time.sleep(self.cfg["scan_pause_seconds"])
         return best_signal
 
     # ──────────────────────────────────────────────
@@ -369,14 +310,14 @@ class TrendStochParallel:
         # 🔐 حجز أخير قبل الشراء الفعلي — لو استراتيجية تانية حجزت نفس العملة
         # بالفترة يلي بين scan_for_entry والتنفيذ، نتراجع فوراً بدل ما نشتري.
         if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
-            self._notify(f"⚠️ صياد الزخم: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
+            self._notify(f"⚠️ Trend+Stoch: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
             return
 
         if self.cfg["live_trading"]:
             result, error = _buy_market(self.client, symbol, amount)
             if result is None:
                 get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
-                self._notify(f"❌ <b>صياد الزخم — فشل تنفيذ أمر الشراء لـ {symbol}</b>\n⚠️ السبب: {error}")
+                self._notify(f"❌ <b>Trend+Stoch — فشل تنفيذ أمر الشراء لـ {symbol}</b>\n⚠️ السبب: {error}")
                 return
             entry_price, qty = result["entry_price"], result["qty"]
         else:
@@ -415,7 +356,7 @@ class TrendStochParallel:
 
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
-            f"🟢 <b>صياد الزخم{mode_tag} — دخول {symbol.replace('USDT','')}</b>\n"
+            f"🟢 <b>Trend+Stoch{mode_tag} — دخول {symbol.replace('USDT','')}</b>\n"
             f"💰 السعر: {entry_price:.6f} | حالة السوق: {market_regime}\n"
             f"🛡️ وقف الخسارة الأولي: {stop_loss:.6f}\n"
             f"💵 المبلغ: {amount} USDT"
@@ -484,7 +425,7 @@ class TrendStochParallel:
                 self.position["highest_price"] = price
                 self.position["stop_loss"] = self._compute_trail_stop(price)
                 self._save_state()
-                self._notify(f"🎯 صياد الزخم: تفعيل Trailing لـ {symbol.replace('USDT','')} | ستوب: {self.position['stop_loss']}")
+                self._notify(f"🎯 Trend+Stoch: تفعيل Trailing لـ {symbol.replace('USDT','')} | ستوب: {self.position['stop_loss']}")
 
         # تحديث/فحص الخروج
         if self.position["trailing_active"]:
@@ -524,7 +465,7 @@ class TrendStochParallel:
         if self.cfg["live_trading"]:
             exit_price, executed_qty, error = _sell_market(self.client, symbol, qty)
             if exit_price is None:
-                self._notify(f"❌ <b>صياد الزخم — فشل تنفيذ أمر البيع لـ {symbol}</b>\nالسبب المحاول: {reason}\n⚠️ الخطأ: {error}")
+                self._notify(f"❌ <b>Trend+Stoch — فشل تنفيذ أمر البيع لـ {symbol}</b>\nالسبب المحاول: {reason}\n⚠️ الخطأ: {error}")
                 return
             final_qty = executed_qty
         else:
@@ -555,7 +496,7 @@ class TrendStochParallel:
         reason_ar = reason_map.get(reason, reason)
         mode_tag = "" if self.cfg["live_trading"] else " (Paper)"
         self._notify(
-            f"{icon} <b>صياد الزخم{mode_tag} — خروج {symbol.replace('USDT','')} ({reason_ar})</b>\n"
+            f"{icon} <b>Trend+Stoch{mode_tag} — خروج {symbol.replace('USDT','')} ({reason_ar})</b>\n"
             f"💰 دخول: {entry_price:.6f} → خروج: {exit_price:.6f}\n"
             f"📊 PnL: {pnl:+.4f} USDT ({pnl_pct:+.3f}%)"
         )
@@ -607,7 +548,7 @@ class TrendStochParallel:
         دايماً بغض النظر عن حالة التفعيل — الإيقاف بس بيمنع البحث عن صفقات جديدة.
         """
         mode = "🔴 LIVE (صفقات حقيقية)" if self.cfg["live_trading"] else "🧪 Paper"
-        print(f"📈 بدء صياد الزخم المستقلة — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: 30 دقيقة")
+        print(f"📈 بدء Trend+Stoch المستقلة — الوضع: {mode} — المبلغ: {self.cfg['usdt_per_trade']} USDT/صفقة — فريم: ساعة")
 
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
