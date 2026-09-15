@@ -231,9 +231,6 @@ class MeanReversionParallel:
     # ──────────────────────────────────────────────
     def check_symbol_entry(self, symbol, btc_regime=None):
         try:
-            if not sayyad_logic.has_sufficient_liquidity(self.client, symbol):
-                return None
-
             cfg = self.cfg
             limit = max(cfg["trend_ma_period"], cfg["bb_period"]) + cfg["sell_volume_prior_window"] + cfg["atr_period"] + 15
             klines = self.client.get_klines(symbol=symbol, interval=cfg["interval"], limit=limit)

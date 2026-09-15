@@ -149,6 +149,9 @@ RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي 
 MAX_TRADES         = 2   # 🎯 أقصى عدد صفقات "نشطة" (لسا ما فعّلت Trailing) بالتزامن — لا يوجد سقف على العدد الكلي للصفقات المفتوحة
 HEARTBEAT_INTERVAL = 3600
 MA_PERIOD          = 20
+ADX_PERIOD              = 14
+ADX_THRESHOLD_STOCH_RSI = 25   # ⬅️ جديد (بطلب المستخدم، من استراتيجية hlhb المرجعية): ADX لازم يكون فوق
+                                # هالرقم وقت دخول Stochastic RSI — يعني في اتجاه حقيقي، مش سوق عرضي (Choppy)
 
 SCAN_INTERVAL      = 120
 WATCH_INTERVAL      = 10
@@ -1817,6 +1820,12 @@ def check_stoch_rsi(client, symbol):
         )
 
         if signal:
+            # فلتر ADX (بطلب المستخدم) — لازم يكون في اتجاه حقيقي بالسوق،
+            # وإلا عبور StochRSI ممكن يكون إشارة كاذبة بسوق عرضي بدون اتجاه
+            adx_value = ta.trend.ADXIndicator(high=highs, low=lows, close=closes, window=ADX_PERIOD).adx().iloc[-1]
+            if pd.isna(adx_value) or adx_value < ADX_THRESHOLD_STOCH_RSI:
+                return None
+
             bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
             return {
                 "k_curr": k_curr,
@@ -3249,9 +3258,6 @@ def run_bot():
                         break
                     if symbol in open_trades:
                         watch_list.discard(symbol)
-                        continue
-
-                    if not sayyad_logic.has_sufficient_liquidity(client, symbol):
                         continue
 
                     # ── استراتيجية RSI العادي ──────────────────

@@ -66,6 +66,10 @@ DEFAULT_CONFIG = {
     "ma_period": 20,
     "stoch_window": 14, "stoch_smooth1": 3, "stoch_smooth2": 3,
     "stoch_entry_level": 20,
+    "adx_period": 14,
+    "adx_threshold": 25,   # ⬅️ جديد (بطلب المستخدم، من استراتيجية hlhb المرجعية): ADX لازم يكون فوق
+                            # هالرقم وقت الدخول — يعني في اتجاه حقيقي بالسوق، مش سوق عرضي (Choppy).
+                            # StochRSI لحاله معروف بإشارات كاذبة كتير بالأسواق العرضية.
     "volume_ma_length": 20,
     "volume_multiplier": 1.0,
     "atr_enabled": True,   # ⬅️ بطلب المستخدم: زر تشغيل/إيقاف ATR — ينعكس من إعدادات البوت الأساسي عبر config_fn
@@ -220,9 +224,6 @@ class TrendStochParallel:
     # ──────────────────────────────────────────────
     def check_symbol_entry(self, symbol):
         try:
-            if not sayyad_logic.has_sufficient_liquidity(self.client, symbol):
-                return None
-
             klines = self.client.get_klines(symbol=symbol, interval=self.cfg["interval"], limit=100)
             if not klines or len(klines) < 30:
                 return None
@@ -251,6 +252,14 @@ class TrendStochParallel:
                 price > ma20
             )
             if not base_condition:
+                return None
+
+            # فلتر ADX (بطلب المستخدم، من استراتيجية hlhb المرجعية) — لازم يكون
+            # في اتجاه حقيقي بالسوق (ADX فوق الحد)، وإلا عبور StochRSI ممكن
+            # يكون إشارة كاذبة بسوق عرضي (Choppy) بدون اتجاه واضح خلفه.
+            adx_indicator = ta.trend.ADXIndicator(high=highs, low=lows, close=closes, window=self.cfg["adx_period"])
+            adx_value = adx_indicator.adx().iloc[-1]
+            if pd.isna(adx_value) or adx_value < self.cfg["adx_threshold"]:
                 return None
 
             vol_ma = volumes.rolling(window=self.cfg["volume_ma_length"]).mean().iloc[-1]
