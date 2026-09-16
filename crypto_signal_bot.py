@@ -65,7 +65,8 @@ def _get_live_risk_config():
             "min_profit_lock_pct": MIN_PROFIT_LOCK_PCT,
             "trail_distance_max_pct": TRAIL_DISTANCE_MAX_PCT,
         }
-from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score
+from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx
+import ai_agent
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
 # ──────────────────────────────────────────────
@@ -1768,8 +1769,12 @@ def get_indicators(client, symbol):
             "ma20"    : round(ma20, 8),
             "atr"     : calculate_atr(highs, lows, closes),
             "vwap"    : vwap_value,
+            "bb_upper": bb_upper,
             "bb_lower": bb_lower,
             "momentum_score": calculate_momentum_score(closes, volumes),
+            "volume"  : float(volumes.iloc[-1]),
+            "mfi"     : calculate_mfi(highs, lows, closes, volumes),
+            "adx"     : calculate_adx(highs, lows, closes),
         }
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
@@ -1836,8 +1841,12 @@ def check_stoch_rsi(client, symbol):
                 "ma20"  : ma20,
                 "atr"   : calculate_atr(highs, lows, closes),
                 "vwap"    : calculate_vwap(highs, lows, closes, volumes),
+                "bb_upper": bb_upper,
                 "bb_lower": bb_lower,
                 "momentum_score": calculate_momentum_score(closes, volumes),
+                "volume": float(volumes.iloc[-1]),
+                "mfi"   : calculate_mfi(highs, lows, closes, volumes),
+                "adx"   : round(float(adx_value), 2),
             }
         return None
     except BinanceAPIException as e:
@@ -3250,7 +3259,7 @@ def run_bot():
 
                 # ══ المرحلة 1: تقييم كل المرشحين وتجميع من نجح منهم بإشارة شراء ══
                 # (بدل شراء أول مرشح نلاقيه، نجمعهم كلهم أول، ونرتبهم بعدين حسب قوة الزخم)
-                candidates = []   # كل عنصر: (momentum_score, symbol, price, atr_value, signal_info)
+                candidates = []   # كل عنصر: (momentum_score, symbol, price, atr_value, signal_info, indicators_dict)
 
                 for symbol in list(watch_list):
                     if is_api_blocked():
@@ -3272,7 +3281,7 @@ def run_bot():
                             buy_signal = False
                         if buy_signal:
                             signal_info = f"📊 RSI: {ind['rsi_prev']} → {ind['rsi']}"
-                            candidates.append((ind.get("momentum_score", 0.0), symbol, ind["price"], ind.get("atr"), signal_info))
+                            candidates.append((ind.get("momentum_score", 0.0), symbol, ind["price"], ind.get("atr"), signal_info, ind))
 
                     # ── استراتيجية Stochastic RSI ──────────────
                     elif strategy == "stoch_rsi":
@@ -3286,7 +3295,7 @@ def run_bot():
                             buy_signal = False
                         if buy_signal:
                             signal_info = f"📊 Stoch K: {stoch['k_prev']} → {stoch['k_curr']} | D: {stoch['d_prev']} → {stoch['d_curr']}"
-                            candidates.append((stoch.get("momentum_score", 0.0), symbol, stoch["price"], stoch.get("atr"), signal_info))
+                            candidates.append((stoch.get("momentum_score", 0.0), symbol, stoch["price"], stoch.get("atr"), signal_info, stoch))
 
                     else:
                         time.sleep(0.2)
@@ -3311,7 +3320,7 @@ def run_bot():
 
                 # ══ المرحلة 2: ترتيب المرشحين — ذاكرة العملات أولاً (تاريخ نظيف يتقدّم)، والزخم كمُرجِّح ثانوي ══
                 if candidates:
-                    cand_map = {c[1]: c for c in candidates}   # symbol -> (momentum, symbol, price, atr_value, signal_info)
+                    cand_map = {c[1]: c for c in candidates}   # symbol -> (momentum, symbol, price, atr_value, signal_info, indicators_dict)
 
                     # 🌡️ حالة السوق الحالية (BULL/BEAR/SIDEWAYS) — نحسبها أولاً، مرة واحدة لكل دورة،
                     # ونمرّرها لمحرك الترتيب عشان يُفعّل فعليًا مكافأة/عقوبة تصنيف الارتباط مع BTC:
@@ -3340,7 +3349,7 @@ def run_bot():
 
                     for ranked_symbol in ranked:
                         symbol = ranked_symbol.symbol
-                        momentum_score, _, price, atr_value, signal_info = cand_map[symbol]
+                        momentum_score, _, price, atr_value, signal_info, signal_indicators = cand_map[symbol]
                         is_strict = ranked_symbol.strict_mode
 
                         if is_api_blocked():
@@ -3363,6 +3372,26 @@ def run_bot():
                             if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
                                 watch_list.discard(symbol)
                                 continue
+
+                            # 🤖 وكيل Gemini — استشارة أخيرة قبل تنفيذ الشراء فعلياً.
+                            # يعتمد على المؤشرات نفسها اللي ولّدت الإشارة (Volume, MFI, ADX,
+                            # Bollinger, VWAP, Momentum). لو رفض أو تعذر الوصول له (Fail-Closed)
+                            # → نحرر الحجز ونجرب المرشح التالي بدل ما نوقف الدورة كلها.
+                            agent_verdict = ai_agent.evaluate_signal(symbol, signal_indicators)
+                            coin_name_agent = symbol.replace("USDT", "")
+                            if agent_verdict["source"] == "gemini":
+                                if agent_verdict["approved"]:
+                                    send_telegram(f"✅ وكيل Gemini وافق على صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
+                                else:
+                                    send_telegram(f"⛔ وكيل Gemini رفض صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
+                            elif agent_verdict["source"] == "error":
+                                send_telegram(f"⚠️ تم تجاوز صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
+
+                            if not agent_verdict["approved"]:
+                                get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
+                                watch_list.discard(symbol)
+                                continue
+
                             res = buy_market(client, symbol, TRADE_AMOUNT)
                             if res is None:
                                 get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
