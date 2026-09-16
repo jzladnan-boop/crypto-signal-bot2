@@ -51,6 +51,46 @@ def calculate_bollinger_bands(closes: pd.Series, period: int = 20, std_dev: floa
         return None, None, None
 
 
+def calculate_mfi(highs: pd.Series, lows: pd.Series, closes: pd.Series, volumes: pd.Series, period: int = 14):
+    """
+    يحسب Money Flow Index (MFI) — مؤشر زخم يدمج السعر مع الفوليوم (شبيه بـ RSI
+    بس واخذ بعين الاعتبار حجم التداول). نطاقه 0-100:
+    - أعلى من 80  → تشبع شرائي (خطر ارتداد هبوطي قريب)
+    - أقل من 20   → تشبع بيعي
+    يرجع القيمة الحالية (float) أو None لو تعذر الحساب.
+    """
+    try:
+        import ta
+        mfi_series = ta.volume.MFIIndicator(
+            high=highs, low=lows, close=closes, volume=volumes, window=period
+        ).money_flow_index()
+        value = mfi_series.iloc[-1]
+        if pd.isna(value):
+            return None
+        return round(float(value), 2)
+    except Exception:
+        return None
+
+
+def calculate_adx(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14):
+    """
+    يحسب ADX (Average Directional Index) — قوة الاتجاه الحالي بغض النظر عن
+    اتجاهه (صاعد أو هابط). عادةً:
+    - أقل من 15-20 → سوق عرضي بدون اتجاه واضح (إشارات الشراء أكثر عرضة للكذب)
+    - أعلى من 25   → اتجاه حقيقي وواضح
+    يرجع القيمة الحالية (float) أو None لو تعذر الحساب.
+    """
+    try:
+        import ta
+        adx_series = ta.trend.ADXIndicator(high=highs, low=lows, close=closes, window=period).adx()
+        value = adx_series.iloc[-1]
+        if pd.isna(value):
+            return None
+        return round(float(value), 2)
+    except Exception:
+        return None
+
+
 def calculate_beta(coin_closes: pd.Series, btc_closes: pd.Series):
     """
     يحسب Beta: معامل تقلب العملة النسبي مقابل BTC (نفس مفهوم Beta بالأسهم).
