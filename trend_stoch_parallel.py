@@ -47,7 +47,8 @@ import ta
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-from indicators import calculate_bollinger_bands, calculate_vwap, calculate_momentum_score
+from indicators import calculate_bollinger_bands, calculate_vwap, calculate_momentum_score, calculate_mfi
+import ai_agent
 from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
@@ -272,6 +273,9 @@ class TrendStochParallel:
                 "symbol": symbol, "price": price, "ma20": ma20,
                 "k_curr": k_curr, "d_curr": d_curr, "atr": atr_value,
                 "momentum_score": calculate_momentum_score(closes, volumes),
+                "volume": float(volumes.iloc[-1]),
+                "mfi": calculate_mfi(highs, lows, closes, volumes),
+                "adx": round(float(adx_value), 2),
             }
         except BinanceAPIException:
             return None
@@ -284,17 +288,8 @@ class TrendStochParallel:
         if not symbols:
             return None
 
-        # فحص اتساع السوق أول شي — طلب واحد بس لكل دورة، على نفس قائمة
-        # SYMBOLS المشتركة. لو أغلب السوق نازل (24 ساعة)، نوقف كل محاولة
-        # دخول هالدورة بغض النظر عن قوة أي إشارة فردية.
-        breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
-        if breadth and breadth["is_bearish"]:
-            return None
-
-        # فحص إضافي: BTC نفسه بترند هابط واضح (BEAR) — وقف احترازي مستقل
-        # عن اتساع السوق.
-        if self.regime_detector.get_regime_label() == "BEAR":
-            return None
+        # (الوقف الاحترازي وقت هبوط BTC/اتساع السوق الضعيف تم إلغاؤه بطلب
+        # المستخدم — القرار هلق بيد وكيل Gemini لكل صفقة على حدة.)
 
         portfolio = get_portfolio_manager()
         best_signal = None
@@ -320,6 +315,17 @@ class TrendStochParallel:
         # بالفترة يلي بين scan_for_entry والتنفيذ، نتراجع فوراً بدل ما نشتري.
         if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
             self._notify(f"⚠️ Trend+Stoch: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
+            return
+
+        agent_verdict = ai_agent.evaluate_signal(symbol, signal)
+        coin_name_agent = symbol.replace("USDT", "")
+        if agent_verdict["source"] == "gemini":
+            icon = "✅" if agent_verdict["approved"] else "⛔"
+            self._notify(f"{icon} وكيل Gemini (Trend+Stoch) بخصوص {coin_name_agent}: {agent_verdict['reason_ar']}")
+        elif agent_verdict["source"] == "error":
+            self._notify(f"⚠️ Trend+Stoch — تجاوز {coin_name_agent}: {agent_verdict['reason_ar']}")
+        if not agent_verdict["approved"]:
+            get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
             return
 
         if self.cfg["live_trading"]:

@@ -41,6 +41,8 @@ from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 import sayyad_logic
 import shared_trading_logic as trading
+from indicators import calculate_mfi, calculate_adx
+import ai_agent
 
 _PORTFOLIO_OWNER = "squeeze_breakout"
 
@@ -278,6 +280,8 @@ class SqueezeBreakout:
                 "bbw_percentile_cutoff": round(float(squeeze_cutoff), 5),
                 "volume_ratio": round(volume_ratio, 2),
                 "atr": atr_value,
+                "mfi": calculate_mfi(highs, lows, closes, volumes),
+                "adx": calculate_adx(highs, lows, closes),
                 "signal_info": (
                     f"🐍 <b>Squeeze Breakout — {symbol.replace('USDT','')}</b>\n"
                     f"💰 السعر: {candle_close:.6f} | ارتفاع من نقطة الانكماش: {rise_pct:.2f}%\n"
@@ -294,13 +298,8 @@ class SqueezeBreakout:
         if not symbols:
             return None
 
-        # 🛑 وقف تداول احترازي — BTC هابط (BEAR) أو اتساع السوق ضعيف عام
-        # (75%+ من العملات نازلة خلال 24 ساعة). نوقف كل دخول هالدورة.
-        if self.regime_detector.get_regime_label() == "BEAR":
-            return None
-        breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
-        if breadth and breadth["is_bearish"]:
-            return None
+        # (الوقف الاحترازي وقت هبوط BTC/اتساع السوق الضعيف تم إلغاؤه بطلب
+        # المستخدم — القرار هلق بيد وكيل Gemini لكل صفقة على حدة.)
 
         portfolio = get_portfolio_manager()
         for symbol in symbols:
@@ -321,6 +320,17 @@ class SqueezeBreakout:
 
         if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
             self._notify(f"⚠️ Squeeze Breakout: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
+            return
+
+        agent_verdict = ai_agent.evaluate_signal(symbol, signal)
+        coin_name_agent = symbol.replace("USDT", "")
+        if agent_verdict["source"] == "gemini":
+            icon = "✅" if agent_verdict["approved"] else "⛔"
+            self._notify(f"{icon} وكيل Gemini (Squeeze Breakout) بخصوص {coin_name_agent}: {agent_verdict['reason_ar']}")
+        elif agent_verdict["source"] == "error":
+            self._notify(f"⚠️ Squeeze Breakout — تجاوز {coin_name_agent}: {agent_verdict['reason_ar']}")
+        if not agent_verdict["approved"]:
+            get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
             return
 
         if self.cfg["live_trading"]:

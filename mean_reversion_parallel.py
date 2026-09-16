@@ -51,6 +51,8 @@ from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 import sayyad_logic
 import shared_trading_logic as trading
+from indicators import calculate_mfi, calculate_adx
+import ai_agent
 
 _PORTFOLIO_OWNER = "mean_reversion_parallel"
 
@@ -304,6 +306,8 @@ class MeanReversionParallel:
                 "sell_volume_recent_avg": round(float(recent_vol_avg), 2),
                 "sell_volume_prior_avg": round(float(prior_vol_avg), 2),
                 "atr": atr_value,
+                "mfi": calculate_mfi(highs, lows, closes, volumes),
+                "adx": calculate_adx(highs, lows, closes),
                 "signal_info": (
                     f"🔻 <b>Mean Reversion — {symbol.replace('USDT','')}</b>\n"
                     f"💰 السعر: {candle_close:.6f} | RSI: {rsi_value:.1f} | تحت بولينجر السفلي: {bb_lower:.6f}\n"
@@ -321,14 +325,10 @@ class MeanReversionParallel:
         if not symbols:
             return None
 
-        # 🛑 وقف احترازي — بس عند انهيار سوق شامل ومتطرف (75%+ من العملات
-        # نازلة خلال 24 ساعة). ملاحظة: ما نوقف عند BTC BEAR عادي، لأنه هاي
-        # الاستراتيجية أصلاً مصممة تصطاد ارتدادات وقت الهبوط (btc_regime
-        # بالأسفل بيُستخدم كفلتر تفضيل، مش كمنع) — إيقافها بمجرد BEAR
-        # بيلغي وظيفتها الأساسية.
-        breadth = sayyad_logic.compute_market_breadth(self.client, symbols)
-        if breadth and breadth["is_bearish"]:
-            return None
+        # (الوقف الاحترازي عند انهيار السوق الشامل تم إلغاؤه بطلب المستخدم —
+        # القرار هلق بيد وكيل Gemini لكل صفقة على حدة. ملاحظة: فلتر
+        # INVERSE_STRENGTH بالأسفل بقي كما هو — هذا فلتر جودة إشارة لكل عملة،
+        # مش وقف جماعي شامل.)
 
         # 🌡️ نحسب حالة BTC العامة مرة وحدة لكل دورة فحص (مش لكل عملة) — تقليل حمل API
         try:
@@ -355,6 +355,17 @@ class MeanReversionParallel:
 
         if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
             self._notify(f"⚠️ Mean Reversion: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
+            return
+
+        agent_verdict = ai_agent.evaluate_signal(symbol, signal)
+        coin_name_agent = symbol.replace("USDT", "")
+        if agent_verdict["source"] == "gemini":
+            icon = "✅" if agent_verdict["approved"] else "⛔"
+            self._notify(f"{icon} وكيل Gemini (Mean Reversion) بخصوص {coin_name_agent}: {agent_verdict['reason_ar']}")
+        elif agent_verdict["source"] == "error":
+            self._notify(f"⚠️ Mean Reversion — تجاوز {coin_name_agent}: {agent_verdict['reason_ar']}")
+        if not agent_verdict["approved"]:
+            get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
             return
 
         if self.cfg["live_trading"]:
