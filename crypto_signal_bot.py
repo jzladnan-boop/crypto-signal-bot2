@@ -883,6 +883,25 @@ def telegram_command_listener(client):
                             log.error(f"❌ /add {coin}: {e}")
                             send_admin(f"❌ فشل إضافة {coin}.")
 
+                    # ── /ask ──────────────────────────────────
+                    elif text.startswith("/ask "):
+                        coin   = text.replace("/ask ", "").strip().upper()
+                        symbol = f"{coin}USDT"
+                        try:
+                            ind = get_indicators(client, symbol)
+                            if ind is None:
+                                send_admin(f"❌ تعذر جلب بيانات {coin} — تأكد إنها موجودة على بينانس وبصيغة صحيحة (مثلاً: /ask BTC).")
+                            else:
+                                verdict = ai_agent.evaluate_signal(symbol, ind)
+                                if verdict["source"] == "gemini":
+                                    icon = "✅" if verdict["approved"] else "⛔"
+                                    send_admin(f"{icon} رأي الوكيل بـ {coin} هلق: {verdict['reason_ar']}")
+                                else:
+                                    send_admin(f"⚠️ {verdict['reason_ar']}")
+                        except Exception as e:
+                            log.error(f"❌ /ask {coin}: {e}")
+                            send_admin(f"❌ صار خطأ أثناء استشارة الوكيل بخصوص {coin}.")
+
                     # ── /remove ───────────────────────────────
                     elif text.startswith("/remove "):
                         coin   = text.replace("/remove ", "").strip().upper()
@@ -1551,6 +1570,8 @@ def telegram_command_listener(client):
                             "/add ETH — إضافة عملة للمراقبة\n"
                             "/remove ETH — حذف عملة من القائمة\n"
                             "/list — عرض كل العملات المراقبة\n\n"
+                            "<b>🤖 وكيل Gemini:</b>\n"
+                            "/ask BTC — استشارة الوكيل فوراً بخصوص عملة (بدون شراء)\n\n"
                             "<b>التحكم بالتداول:</b>\n"
                             "/stop — إيقاف التداول\n"
                             "/start — استئناف التداول (يلغي أي توقف تلقائي)\n"
@@ -3303,20 +3324,9 @@ def run_bot():
 
                     time.sleep(0.2)
 
-                # 🛑 وقف تداول احترازي — BTC هابط (BEAR) أو اتساع السوق ضعيف عام
-                # (75%+ من قائمة العملات نازلة خلال 24 ساعة). لو أي وحدة تحققت،
-                # نوقف كل دخول جديد هالدورة بغض النظر عن قوة أي مرشح فردي —
-                # لا يؤثر على إدارة الصفقات المفتوحة أصلاً (مستقلة عن هالمقطع).
-                regime_label_gate = _regime_detector.get_regime_label() if _regime_detector else "SIDEWAYS"
-                breadth_gate = sayyad_logic.compute_market_breadth(client, SYMBOLS) if SYMBOLS else None
-                market_is_bearish = (regime_label_gate == "BEAR") or bool(breadth_gate and breadth_gate["is_bearish"])
-                if market_is_bearish and candidates:
-                    log.info(
-                        "🛑 وقف احترازي: تجاوز %d مرشح هالدورة — BTC:%s | اتساع السوق:%s",
-                        len(candidates), regime_label_gate,
-                        f"{breadth_gate['pct_down_24h']}% نازلة" if breadth_gate else "غير متاح",
-                    )
-                    candidates = []   # لا دخول جديد هالدورة
+                # (الوقف الاحترازي وقت هبوط BTC/اتساع السوق الضعيف تم إلغاؤه بطلب المستخدم —
+                # القرار هلق صار بالكامل بيد وكيل Gemini لكل صفقة على حدة بدل وقف جماعي شامل.)
+
 
                 # ══ المرحلة 2: ترتيب المرشحين — ذاكرة العملات أولاً (تاريخ نظيف يتقدّم)، والزخم كمُرجِّح ثانوي ══
                 if candidates:
