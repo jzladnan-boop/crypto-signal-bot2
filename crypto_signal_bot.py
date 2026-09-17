@@ -2883,6 +2883,46 @@ def api_manual_buy():
 
 
 
+@app.route("/api/ask_agent", methods=["POST"])
+@login_required
+def api_ask_agent():
+    """
+    استشارة فورية لوكيل Gemini من التطبيق — نفس فكرة أمر /ask بتيليجرام،
+    بس من الشاشة الرابعة بالتطبيق مباشرة. ما بيشتري ولا بيبيع أي شي،
+    بس رأي استشاري.
+    """
+    if not _binance_client:
+        return jsonify({"error": "البوت غير متصل ببينانس"}), 503
+
+    data = request.get_json(silent=True) or {}
+    coin = str(data.get("symbol", "")).strip().upper()
+    if not coin:
+        return jsonify({"error": "symbol مفقود"}), 400
+    symbol = coin if coin.endswith("USDT") else f"{coin}USDT"
+
+    try:
+        ind = get_indicators(_binance_client, symbol)
+    except Exception as e:
+        return jsonify({"error": f"تعذر جلب بيانات {coin}: {e}"}), 500
+
+    if ind is None:
+        return jsonify({"error": f"تعذر جلب بيانات {coin} — تأكد إنها موجودة على بينانس"}), 404
+
+    verdict = ai_agent.evaluate_signal(symbol, ind)
+    return jsonify({
+        "ok": True,
+        "symbol": symbol,
+        "approved": verdict["approved"],
+        "reason_ar": verdict["reason_ar"],
+        "source": verdict["source"],
+        "indicators": {
+            "price": ind.get("price"), "rsi": ind.get("rsi"), "mfi": ind.get("mfi"),
+            "adx": ind.get("adx"), "volume": ind.get("volume"),
+            "momentum_score": ind.get("momentum_score"),
+        },
+    })
+
+
 # ── قائمة الصفقات القابلة للإغلاق ───────────────────
 @app.route("/api/closeable_trades")
 @login_required
