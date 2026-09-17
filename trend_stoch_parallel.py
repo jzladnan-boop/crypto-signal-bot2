@@ -73,6 +73,15 @@ DEFAULT_CONFIG = {
                             # StochRSI لحاله معروف بإشارات كاذبة كتير بالأسواق العرضية.
     "volume_ma_length": 20,
     "volume_multiplier": 1.0,
+
+    # ── فلاتر إضافية ضد الدخول المتأخر والإشارات الكاذبة (بطلب المستخدم، بعد
+    #    مراجعة سجل الصفقات — كل صفقات Trend+Stoch الظاهرة طلعت بـ stop_loss
+    #    بدون ما توصل trailing_stop، يعني الدخول كان متأخر أو على إشارة كاذبة) ──
+    "htf_interval": Client.KLINE_INTERVAL_4HOUR,   # فريم أعلى لفلتر الترند العام
+    "htf_ema_period": 50,       # EMA50 على الفريم الأعلى — السعر لازم يكون فوقها
+    "htf_cache_seconds": 900,   # كاش نتيجة فلتر الفريم الأعلى 15 دقيقة (ما بتتغير بسرعة، توفير API)
+    "stoch_k_rising_lookback": 2,   # K لازم تكون صاعدة آخر شمعتين قبل القطع، مش قطع لحظي مفاجئ
+    "max_price_above_ma20_pct": 2.0,   # ⬅️ سقف: السعر ما يكون أبعد من هالنسبة % فوق MA20 (يمنع مطاردة حركة خلصت)
     "atr_enabled": True,   # ⬅️ بطلب المستخدم: زر تشغيل/إيقاف ATR — ينعكس من إعدادات البوت الأساسي عبر config_fn
     "atr_period": 14,
 
@@ -136,6 +145,8 @@ class TrendStochParallel:
 
         self._symbols_cache = None
         self._symbols_cache_time = 0
+
+        self._htf_cache = {}   # {symbol: (is_uptrend, timestamp)} — كاش فلتر الفريم الأعلى
 
     def _notify(self, text):
         if self.notify_fn:
@@ -218,10 +229,37 @@ class TrendStochParallel:
             return self._symbols_cache or []
 
     # ──────────────────────────────────────────────
-    # 🟢 فحص إشارة الدخول لعملة وحدة (منطق صياد: زخم + حجم + دفتر أوامر + حيتان)
+    # 📈 فلتر الترند على الفريم الأعلى (4 ساعات) — السعر لازم يكون فوق EMA50
+    # حتى نقبل إشارة StochRSI عالساعة. الهدف: ما نشتري "ارتداد" بعملة أصلاً
+    # بترند هابط/عرضي عالصورة الأكبر — هاد سبب رئيسي للإشارات الكاذبة بالتشوب.
+    # نتيجة الفحص متخزنة (كاش) لمدة htf_cache_seconds لأنها ما بتتغير بسرعة.
     # ──────────────────────────────────────────────
+    def _is_htf_uptrend(self, symbol):
+        cached = self._htf_cache.get(symbol)
+        now = time.time()
+        if cached and (now - cached[1]) < self.cfg["htf_cache_seconds"]:
+            return cached[0]
+
+        try:
+            klines = self.client.get_klines(
+                symbol=symbol, interval=self.cfg["htf_interval"],
+                limit=self.cfg["htf_ema_period"] + 20,
+            )
+            if not klines or len(klines) < self.cfg["htf_ema_period"] + 1:
+                result = False   # بيانات غير كافية → لا نخاطر، نرفض الإشارة
+            else:
+                closes = pd.Series([float(k[4]) for k in klines])
+                ema = closes.ewm(span=self.cfg["htf_ema_period"], adjust=False).mean().iloc[-1]
+                result = float(closes.iloc[-1]) > float(ema)
+        except Exception:
+            result = False   # فشل الجلب → لا نخاطر، نرفض الإشارة
+
+        self._htf_cache[symbol] = (result, now)
+        return result
+
     # ──────────────────────────────────────────────
-    # 🟢 فحص إشارة الدخول لعملة وحدة (نفس check_trend_stoch الأصلي بالضبط — StochRSI)
+    # 🟢 فحص إشارة الدخول لعملة وحدة (نفس check_trend_stoch الأصلي، مع فلاتر
+    # إضافية ضد الدخول المتأخر والإشارات الكاذبة — راجع DEFAULT_CONFIG بالأعلى)
     # ──────────────────────────────────────────────
     def check_symbol_entry(self, symbol):
         try:
@@ -255,6 +293,22 @@ class TrendStochParallel:
             if not base_condition:
                 return None
 
+            # ⬅️ فلتر استمرارية الزخم: K لازم تكون صاعدة آخر شمعتين قبل القطع
+            # (مش بس قطعة لحظية مفاجئة ممكن تنعكس فوراً) — يقلل الدخول على
+            # إشارات كاذبة سريعة الانعكاس بالأسواق العرضية.
+            lookback = self.cfg["stoch_k_rising_lookback"]
+            if len(k_line) <= lookback:
+                return None
+            k_recent = k_line.iloc[-(lookback + 1):]
+            if not all(k_recent.iloc[i] < k_recent.iloc[i + 1] for i in range(len(k_recent) - 1)):
+                return None
+
+            # ⬅️ سقف على المسافة فوق MA20: لو السعر ابتعد كتير عن MA20، الحركة
+            # غالباً خلصت وعم "نطارد" بدل ما ندخل بدري — نرفض هالإشارة.
+            price_above_ma20_pct = ((price - ma20) / ma20) * 100
+            if price_above_ma20_pct > self.cfg["max_price_above_ma20_pct"]:
+                return None
+
             # فلتر ADX (بطلب المستخدم، من استراتيجية hlhb المرجعية) — لازم يكون
             # في اتجاه حقيقي بالسوق (ADX فوق الحد)، وإلا عبور StochRSI ممكن
             # يكون إشارة كاذبة بسوق عرضي (Choppy) بدون اتجاه واضح خلفه.
@@ -265,6 +319,11 @@ class TrendStochParallel:
 
             vol_ma = volumes.rolling(window=self.cfg["volume_ma_length"]).mean().iloc[-1]
             if pd.isna(vol_ma) or volumes.iloc[-1] <= (vol_ma * self.cfg["volume_multiplier"]):
+                return None
+
+            # ⬅️ فلتر الفريم الأعلى (4 ساعات): نقبل الإشارة بس لو الترند العام
+            # صاعد كمان — يمنع "شراء ارتداد" بعملة أصلاً بترند هابط/عرضي أكبر.
+            if not self._is_htf_uptrend(symbol):
                 return None
 
             atr_value = _calculate_atr(highs, lows, closes, self.cfg["atr_period"]) if self.cfg.get("atr_enabled", True) else None
