@@ -2002,7 +2002,8 @@ def find_best_trade(client, top_n: int = 3):
         }
 
     scored = []
-    for symbol in candidates_symbols:
+    debug_note = ""
+    for i, symbol in enumerate(candidates_symbols):
         if is_api_blocked():
             log.warning("🚦 find_best_trade: توقفت منتصف الفحص — حظر مؤقت اكتشف")
             break
@@ -2013,12 +2014,20 @@ def find_best_trade(client, top_n: int = 3):
             ind = None
         if ind:
             scored.append((ind.get("momentum_score", 0.0), symbol, ind))
+        elif not debug_note:
+            # 🩺 تشخيص مباشر: أول عملة فشلت، منجرب نفس الطلب هون مباشرة
+            # ونلقط رسالة الخطأ الحقيقية — بدل ما تضيع بس باللوجز.
+            try:
+                client.get_klines(symbol=symbol, interval=current_interval, limit=5)
+                debug_note = f"({symbol}: get_indicators رجع فاضي بدون أي استثناء ظاهر — شك بمنطق داخلي)"
+            except Exception as e:
+                debug_note = f"({symbol}: {type(e).__name__}: {e})"
         time.sleep(0.35)
 
     if not scored:
         return {
             "found": False, "symbol": None,
-            "reason_ar": "تعذر جلب بيانات لأي عملة من قائمة المراقبة — على الأغلب حظر مؤقت من بينانس، جرب بعد كم دقيقة.",
+            "reason_ar": f"تعذر جلب بيانات لأي عملة من قائمة المراقبة. سبب حقيقي: {debug_note or 'غير معروف'}",
             "indicators": None, "checked": candidates_symbols,
         }
 
