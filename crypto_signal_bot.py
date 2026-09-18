@@ -2020,8 +2020,12 @@ def find_best_trade(client, top_n: int = 3):
         if is_api_blocked():
             log.warning("🚦 find_best_trade: توقفت منتصف الفحص — حظر مؤقت اكتشف")
             break
+        # ملاحظة: نستخدم get_indicators دايماً هون (مش check_stoch_rsi) — لأنه
+        # check_stoch_rsi مصمم يرجع بيانات بس لحظة تقاطع فعلي (نادر)، بينما
+        # هون الهدف استكشافي عام: نجيب مؤشرات كل عملة بغض النظر عن التوقيت
+        # الدقيق، والوكيل (Gemini) هو يلي بيحكم إذا وضعها كويس أو لأ.
         try:
-            ind = check_stoch_rsi(client, symbol) if strategy == "stoch_rsi" else get_indicators(client, symbol)
+            ind = get_indicators(client, symbol)
         except Exception as e:
             log.error(f"❌ find_best_trade — {symbol}: {e}")
             _set_last_indicator_error(symbol, e)
