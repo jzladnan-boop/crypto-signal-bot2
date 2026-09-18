@@ -1994,20 +1994,31 @@ def find_best_trade(client, top_n: int = 3):
             "indicators": None, "checked": [],
         }
 
+    if is_api_blocked():
+        return {
+            "found": False, "symbol": None,
+            "reason_ar": "البوت بفترة إيقاف مؤقت بسبب حظر مؤقت من بينانس (-1003) — جرب بعد كم دقيقة.",
+            "indicators": None, "checked": [],
+        }
+
     scored = []
     for symbol in candidates_symbols:
+        if is_api_blocked():
+            log.warning("🚦 find_best_trade: توقفت منتصف الفحص — حظر مؤقت اكتشف")
+            break
         try:
             ind = check_stoch_rsi(client, symbol) if strategy == "stoch_rsi" else get_indicators(client, symbol)
         except Exception as e:
             log.error(f"❌ find_best_trade — {symbol}: {e}")
-            continue
+            ind = None
         if ind:
             scored.append((ind.get("momentum_score", 0.0), symbol, ind))
+        time.sleep(0.35)
 
     if not scored:
         return {
             "found": False, "symbol": None,
-            "reason_ar": "تعذر جلب بيانات كافية للعملات المراقبة حالياً — جرب بعد شوي.",
+            "reason_ar": "تعذر جلب بيانات لأي عملة من قائمة المراقبة — على الأغلب حظر مؤقت من بينانس، جرب بعد كم دقيقة.",
             "indicators": None, "checked": candidates_symbols,
         }
 
