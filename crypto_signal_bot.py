@@ -1786,6 +1786,14 @@ def refresh_trade_atr(client, symbol, trade):
     except Exception:
         return None
 
+# 🩺 آخر خطأ حقيقي صار جوا get_indicators/check_stoch_rsi — لأغراض التشخيص
+# من find_best_trade، بدون ما نحتاج ندور بـ Railway Logs.
+_last_indicator_error = ""
+
+def _set_last_indicator_error(symbol, exc):
+    global _last_indicator_error
+    _last_indicator_error = f"{symbol}: {type(exc).__name__}: {exc}"
+
 def get_indicators(client, symbol):
     try:
         klines  = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
@@ -1817,9 +1825,11 @@ def get_indicators(client, symbol):
             register_api_block(f"get_indicators({symbol})")
         else:
             log.error(f"❌ مؤشرات {symbol}: {e}")
+        _set_last_indicator_error(symbol, e)
         return None
     except Exception as e:
         log.error(f"❌ مؤشرات {symbol}: {e}")
+        _set_last_indicator_error(symbol, e)
         return None
 
 # ──────────────────────────────────────────────
@@ -1890,9 +1900,11 @@ def check_stoch_rsi(client, symbol):
             register_api_block(f"check_stoch_rsi({symbol})")
         else:
             log.error(f"❌ Stoch RSI {symbol}: {e}")
+        _set_last_indicator_error(symbol, e)
         return None
     except Exception as e:
         log.error(f"❌ Stoch RSI {symbol}: {e}")
+        _set_last_indicator_error(symbol, e)
         return None
 
 # ──────────────────────────────────────────────
@@ -2002,8 +2014,9 @@ def find_best_trade(client, top_n: int = 3):
         }
 
     scored = []
-    debug_note = ""
-    for i, symbol in enumerate(candidates_symbols):
+    global _last_indicator_error
+    _last_indicator_error = ""
+    for symbol in candidates_symbols:
         if is_api_blocked():
             log.warning("🚦 find_best_trade: توقفت منتصف الفحص — حظر مؤقت اكتشف")
             break
@@ -2011,23 +2024,16 @@ def find_best_trade(client, top_n: int = 3):
             ind = check_stoch_rsi(client, symbol) if strategy == "stoch_rsi" else get_indicators(client, symbol)
         except Exception as e:
             log.error(f"❌ find_best_trade — {symbol}: {e}")
+            _set_last_indicator_error(symbol, e)
             ind = None
         if ind:
             scored.append((ind.get("momentum_score", 0.0), symbol, ind))
-        elif not debug_note:
-            # 🩺 تشخيص مباشر: أول عملة فشلت، منجرب نفس الطلب هون مباشرة
-            # ونلقط رسالة الخطأ الحقيقية — بدل ما تضيع بس باللوجز.
-            try:
-                client.get_klines(symbol=symbol, interval=current_interval, limit=5)
-                debug_note = f"({symbol}: get_indicators رجع فاضي بدون أي استثناء ظاهر — شك بمنطق داخلي)"
-            except Exception as e:
-                debug_note = f"({symbol}: {type(e).__name__}: {e})"
         time.sleep(0.35)
 
     if not scored:
         return {
             "found": False, "symbol": None,
-            "reason_ar": f"تعذر جلب بيانات لأي عملة من قائمة المراقبة. سبب حقيقي: {debug_note or 'غير معروف'}",
+            "reason_ar": f"تعذر جلب بيانات لأي عملة من قائمة المراقبة. سبب حقيقي: {_last_indicator_error or 'غير معروف (راجع Logs)'}",
             "indicators": None, "checked": candidates_symbols,
         }
 
