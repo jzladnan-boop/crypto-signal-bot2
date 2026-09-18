@@ -902,6 +902,20 @@ def telegram_command_listener(client):
                             log.error(f"❌ /ask {coin}: {e}")
                             send_admin(f"❌ صار خطأ أثناء استشارة الوكيل بخصوص {coin}.")
 
+                    # ── /findtrade ────────────────────────────
+                    elif text == "/findtrade":
+                        send_admin("🔍 عم أفحص قائمة المراقبة وأستشير الوكيل...")
+                        try:
+                            result = find_best_trade(client)
+                            if result["found"]:
+                                coin = result["symbol"].replace("USDT", "")
+                                send_admin(f"✅ أفضل فرصة هلق: {coin}\n{result['reason_ar']}")
+                            else:
+                                send_admin(f"🔎 {result['reason_ar']}")
+                        except Exception as e:
+                            log.error(f"❌ /findtrade: {e}")
+                            send_admin("❌ صار خطأ أثناء البحث عن صفقة.")
+
                     # ── /remove ───────────────────────────────
                     elif text.startswith("/remove "):
                         coin   = text.replace("/remove ", "").strip().upper()
@@ -1571,7 +1585,8 @@ def telegram_command_listener(client):
                             "/remove ETH — حذف عملة من القائمة\n"
                             "/list — عرض كل العملات المراقبة\n\n"
                             "<b>🤖 وكيل Gemini:</b>\n"
-                            "/ask BTC — استشارة الوكيل فوراً بخصوص عملة (بدون شراء)\n\n"
+                            "/ask BTC — استشارة الوكيل فوراً بخصوص عملة (بدون شراء)\n"
+                            "/findtrade — يفحص قائمة المراقبة ويلاقيلك أفضل فرصة هلق\n\n"
                             "<b>التحكم بالتداول:</b>\n"
                             "/stop — إيقاف التداول\n"
                             "/start — استئناف التداول (يلغي أي توقف تلقائي)\n"
@@ -1953,6 +1968,68 @@ def update_symbol_correlations(client, symbols):
                 log.error(f"❌ تحديث ارتباط {symbol}: {e}")
     except Exception as e:
         log.error(f"❌ تحديث ارتباط العملات (عام): {e}")
+
+
+# ──────────────────────────────────────────────
+# 🔍 بحث فوري عن أفضل صفقة متاحة الآن (يدوي — تيليجرام /findtrade والتطبيق)
+# ──────────────────────────────────────────────
+def find_best_trade(client, top_n: int = 3):
+    """
+    يفحص قائمة "المراقبة المكثفة" الحالية (watch_list) — نفس العملات يلي
+    البوت أصلاً بيراقبها بالخلفية — ويرتبها حسب قوة الزخم (momentum_score)،
+    وبيسأل الوكيل عن أفضل top_n مرشح بالترتيب لحد ما يلاقي وحدة موافق عليها.
+
+    ما بيشتري أي شي — بس بيرجع تقرير:
+        {"found": bool, "symbol": str|None, "reason_ar": str,
+         "indicators": dict|None, "checked": [قائمة العملات المفحوصة]}
+    """
+    with _lock:
+        strategy = current_strategy
+        candidates_symbols = [s for s in watch_list if s not in open_trades]
+
+    if not candidates_symbols:
+        return {
+            "found": False, "symbol": None,
+            "reason_ar": "ما في عملات قيد المراقبة المكثفة حالياً — جرب بعد شوي.",
+            "indicators": None, "checked": [],
+        }
+
+    scored = []
+    for symbol in candidates_symbols:
+        try:
+            ind = check_stoch_rsi(client, symbol) if strategy == "stoch_rsi" else get_indicators(client, symbol)
+        except Exception as e:
+            log.error(f"❌ find_best_trade — {symbol}: {e}")
+            continue
+        if ind:
+            scored.append((ind.get("momentum_score", 0.0), symbol, ind))
+
+    if not scored:
+        return {
+            "found": False, "symbol": None,
+            "reason_ar": "تعذر جلب بيانات كافية للعملات المراقبة حالياً — جرب بعد شوي.",
+            "indicators": None, "checked": candidates_symbols,
+        }
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_candidates = scored[:top_n]
+    checked_names = [s for _, s, _ in top_candidates]
+
+    last_reason = ""
+    for _, symbol, ind in top_candidates:
+        verdict = ai_agent.evaluate_signal(symbol, ind)
+        if verdict["approved"] and verdict["source"] == "gemini":
+            return {
+                "found": True, "symbol": symbol, "reason_ar": verdict["reason_ar"],
+                "indicators": ind, "checked": checked_names,
+            }
+        last_reason = f"{symbol.replace('USDT','')}: {verdict['reason_ar']}"
+
+    return {
+        "found": False, "symbol": None,
+        "reason_ar": f"فحصت أقوى {len(top_candidates)} مرشحين بالمراقبة وما في وحدة نظيفة كفاية هلق. آخر تقييم — {last_reason}",
+        "indicators": None, "checked": checked_names,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -2920,6 +2997,34 @@ def api_ask_agent():
             "adx": ind.get("adx"), "volume": ind.get("volume"),
             "momentum_score": ind.get("momentum_score"),
         },
+    })
+
+
+@app.route("/api/find_trade", methods=["POST"])
+@login_required
+def api_find_trade():
+    """
+    نسخة التطبيق من أمر /findtrade — يفحص قائمة المراقبة المكثفة الحالية
+    ويرجع أفضل فرصة وافق عليها الوكيل، أو سبب عدم وجود فرصة حالياً.
+    """
+    if not _binance_client:
+        return jsonify({"error": "البوت غير متصل ببينانس"}), 503
+    try:
+        result = find_best_trade(_binance_client)
+    except Exception as e:
+        return jsonify({"error": f"صار خطأ أثناء البحث: {e}"}), 500
+
+    ind = result.get("indicators") or {}
+    return jsonify({
+        "ok": True,
+        "found": result["found"],
+        "symbol": result["symbol"],
+        "reason_ar": result["reason_ar"],
+        "checked": result["checked"],
+        "indicators": {
+            "price": ind.get("price"), "rsi": ind.get("rsi"), "mfi": ind.get("mfi"),
+            "adx": ind.get("adx"), "momentum_score": ind.get("momentum_score"),
+        } if ind else None,
     })
 
 
