@@ -1985,11 +1985,12 @@ def update_symbol_correlations(client, symbols):
 # ──────────────────────────────────────────────
 # 🔍 بحث فوري عن أفضل صفقة متاحة الآن (يدوي — تيليجرام /findtrade والتطبيق)
 # ──────────────────────────────────────────────
-def find_best_trade(client, top_n: int = 3):
+def find_best_trade(client, top_n: int = 8):
     """
     يفحص قائمة "المراقبة المكثفة" الحالية (watch_list) — نفس العملات يلي
     البوت أصلاً بيراقبها بالخلفية — ويرتبها حسب قوة الزخم (momentum_score)،
-    وبيسأل الوكيل عن أفضل top_n مرشح بالترتيب لحد ما يلاقي وحدة موافق عليها.
+    وبيبعت أقوى top_n مرشح للوكيل بطلب واحد يقارن بينهم ويختار الأقوى،
+    أو يرفضهم كلهم لو ولا وحدة نظيفة كفاية.
 
     ما بيشتري أي شي — بس بيرجع تقرير:
         {"found": bool, "symbol": str|None, "reason_ar": str,
@@ -2045,19 +2046,28 @@ def find_best_trade(client, top_n: int = 3):
     top_candidates = scored[:top_n]
     checked_names = [s for _, s, _ in top_candidates]
 
-    last_reason = ""
-    for _, symbol, ind in top_candidates:
-        verdict = ai_agent.evaluate_signal(symbol, ind)
-        if verdict["approved"] and verdict["source"] == "gemini":
-            return {
-                "found": True, "symbol": symbol, "reason_ar": verdict["reason_ar"],
-                "indicators": ind, "checked": checked_names,
-            }
-        last_reason = f"{symbol.replace('USDT','')}: {verdict['reason_ar']}"
+    # 🆚 مقارنة جماعية بطلب واحد بدل تقييم وحدة وحدة — الوكيل بيشوف كل
+    # المرشحين مع بعض ويختار الأقوى فعلياً، مش أول وحدة "مقبولة" بالترتيب.
+    payload = [{"symbol": symbol, **ind} for _, symbol, ind in top_candidates]
+    verdict = ai_agent.compare_candidates(payload)
+
+    if verdict["source"] == "error":
+        return {
+            "found": False, "symbol": None,
+            "reason_ar": verdict["reason_ar"],
+            "indicators": None, "checked": checked_names,
+        }
+
+    if verdict["approved"] and verdict["symbol"]:
+        chosen_ind = next((ind for _, s, ind in top_candidates if s == verdict["symbol"]), None)
+        return {
+            "found": True, "symbol": verdict["symbol"], "reason_ar": verdict["reason_ar"],
+            "indicators": chosen_ind, "checked": checked_names,
+        }
 
     return {
         "found": False, "symbol": None,
-        "reason_ar": f"فحصت أقوى {len(top_candidates)} مرشحين بالمراقبة وما في وحدة نظيفة كفاية هلق. آخر تقييم — {last_reason}",
+        "reason_ar": f"قارنت أقوى {len(top_candidates)} مرشحين بالمراقبة وما في وحدة نظيفة كفاية هلق. {verdict['reason_ar']}",
         "indicators": None, "checked": checked_names,
     }
 

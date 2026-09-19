@@ -125,3 +125,79 @@ def evaluate_signal(symbol: str, signal_data: dict) -> dict:
             "reason_ar": f"تعذر التواصل مع وكيل Gemini ({type(e).__name__}) — تم رفض الصفقة احتياطاً",
             "source": "error",
         }
+
+
+_COMPARE_RULES = """أنت مستشار مخاطر لصفقات تداول عملات رقمية قصيرة/متوسطة المدى.
+بتوصلك قائمة بعدة عملات مرشحة مع مؤشراتها الفنية. مهمتك: قارن بينهم واختار
+**عملة واحدة بس** — الأقوى والأنظف فرصة دخول الآن من بين كل القائمة — أو
+لا تختار ولا وحدة لو كلهم ضعاف أو فيهم مخاطر واضحة.
+
+اعتبر المؤشرات دي بالمقارنة:
+- الفوليوم (volume / momentum_score): كلما أعلى وأكثر دعم للحركة، أفضل
+- MFI: تجنب المناطق المتطرفة (أعلى من 80 تقريباً = خطر ارتداد هبوطي)
+- ADX: كلما أعلى (فوق 20-25 تقريباً)، اتجاه أوضح وأوثق
+- تناسق عام بين المؤشرات (بدون تناقضات صارخة)
+
+اختار الأفضل نسبياً من القائمة المعطاة، مش معيار مطلق منعزل — يعني ممكن
+توافق على عملة مؤشراتها متوسطة لو باقي القائمة أضعف منها بوضوح، والعكس:
+ممكن ترفض القائمة كلها لو كل الخيارات فيها مخاطر واضحة.
+
+رد حصراً بصيغة JSON صحيحة بدون أي نص إضافي وبدون ```، بالشكل التالي بالضبط:
+{"best_symbol": "BTCUSDT" أو null لو ولا وحدة مناسبة, "reason_ar": "جملة أو جملتين بالعربي تشرح ليش هاي الأفضل (أو ليش رفضت الكل)"}
+"""
+
+
+def compare_candidates(candidates: list) -> dict:
+    """
+    يقارن بين عدة مرشحين بطلب واحد ويختار الأقوى، بدل تقييمهم وحدة وحدة.
+
+    Args:
+        candidates: list من dicts، كل وحدة فيها على الأقل "symbol" وباقي
+            المؤشرات المتوفرة (نفس شكل signal_data بـ evaluate_signal).
+
+    Returns:
+        dict: {"approved": bool, "symbol": str|None, "reason_ar": str,
+               "source": "gemini"|"fallback"|"error"}
+    """
+    if not AI_AGENT_ENABLED or not GEMINI_API_KEY or not candidates:
+        return {
+            "approved": False, "symbol": None,
+            "reason_ar": "الوكيل مطفي أو لا يوجد مرشحين للمقارنة",
+            "source": "fallback",
+        }
+
+    body = {
+        "system_instruction": {"parts": [{"text": _COMPARE_RULES}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": json.dumps(candidates, ensure_ascii=False, default=str)}]}
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    try:
+        resp = requests.post(
+            _GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json=body,
+            timeout=AI_AGENT_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(text)
+        best_symbol = parsed.get("best_symbol") or None
+        reason = str(parsed.get("reason_ar") or "").strip() or "بدون توضيح من الوكيل"
+        valid_symbols = {c.get("symbol") for c in candidates}
+        if best_symbol not in valid_symbols:
+            best_symbol = None
+        return {"approved": best_symbol is not None, "symbol": best_symbol, "reason_ar": reason, "source": "gemini"}
+    except Exception as e:
+        log.error(f"❌ AI Agent (Gemini) مقارنة مرشحين: {e}")
+        return {
+            "approved": False, "symbol": None,
+            "reason_ar": f"تعذر التواصل مع وكيل Gemini ({type(e).__name__}) — تم التجاوز احتياطاً",
+            "source": "error",
+        }
