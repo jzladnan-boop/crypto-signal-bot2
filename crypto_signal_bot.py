@@ -1810,6 +1810,8 @@ def get_indicators(client, symbol):
         price   = float(closes.iloc[-1])   # من الـ klines مباشرة، بدون طلب API ثاني
         vwap_value = calculate_vwap(highs, lows, closes, volumes)
         bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
+        sma50       = closes.rolling(window=50).mean().iloc[-1] if len(closes) >= 50 else None
+        volume_mean = volumes.rolling(window=20).mean().iloc[-1] if len(volumes) >= 20 else None
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
@@ -1823,6 +1825,8 @@ def get_indicators(client, symbol):
             "volume"  : float(volumes.iloc[-1]),
             "mfi"     : calculate_mfi(highs, lows, closes, volumes),
             "adx"     : calculate_adx(highs, lows, closes),
+            "sma50"       : round(float(sma50), 8) if sma50 is not None and not pd.isna(sma50) else None,
+            "volume_mean" : round(float(volume_mean), 4) if volume_mean is not None and not pd.isna(volume_mean) else None,
         }
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
@@ -2019,6 +2023,7 @@ def find_best_trade(client, top_n: int = 8):
         }
 
     scored = []
+    fetched_count = 0
     global _last_indicator_error
     _last_indicator_error = ""
     for symbol in candidates_symbols:
@@ -2035,14 +2040,38 @@ def find_best_trade(client, top_n: int = 8):
             log.error(f"❌ find_best_trade — {symbol}: {e}")
             _set_last_indicator_error(symbol, e)
             ind = None
+
+        # 🔒 فلتر صارم بطلب المستخدم — قبل ما نعتبر العملة مرشح أصلاً:
+        # 1) MFI < 35 (تشبع بيعي حقيقي، مش عملة بمنطقة عادية/مرتفعة)
+        # 2) close > SMA50 (لسا باتجاه صاعد عام — مش انهيار مستمر Falling Knife)
+        # 3) volume > volume_mean × 1.5 (سيولة داخلة حقيقية، مش سكون)
+        # لو أي شرط من الثلاثة ناقص بيانات أو ما تحقق، العملة تُستبعد كلياً
+        # ولا توصل حتى لمرحلة "أقوى المرشحين" — الوكيل ما بيشوفها إطلاقاً.
         if ind:
-            scored.append((ind.get("momentum_score", 0.0), symbol, ind))
+            fetched_count += 1
+            mfi         = ind.get("mfi")
+            sma50       = ind.get("sma50")
+            price       = ind.get("price")
+            volume      = ind.get("volume")
+            volume_mean = ind.get("volume_mean")
+            passes_hard_filter = (
+                mfi is not None and mfi < 35
+                and sma50 is not None and price is not None and price > sma50
+                and volume is not None and volume_mean is not None and volume_mean > 0
+                and volume > volume_mean * 1.5
+            )
+            if passes_hard_filter:
+                scored.append((ind.get("momentum_score", 0.0), symbol, ind))
         time.sleep(0.35)
 
     if not scored:
+        if fetched_count == 0:
+            reason = f"تعذر جلب بيانات لأي عملة من قائمة المراقبة. سبب حقيقي: {_last_indicator_error or 'غير معروف (راجع Logs)'}"
+        else:
+            reason = "لا توجد فرص آمنة حالياً، انتظر سيولة الماركت."
         return {
             "found": False, "symbol": None,
-            "reason_ar": f"تعذر جلب بيانات لأي عملة من قائمة المراقبة. سبب حقيقي: {_last_indicator_error or 'غير معروف (راجع Logs)'}",
+            "reason_ar": reason,
             "indicators": None, "checked": candidates_symbols,
         }
 
