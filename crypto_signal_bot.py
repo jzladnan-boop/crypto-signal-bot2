@@ -2316,7 +2316,12 @@ def buy_market(client, symbol, usdt_amount):
             )
             net_qty = total_qty - commission_in_asset
             if net_qty > 0 and total_qty > 0:
-                actual_entry_price = total_spent / total_qty   # سعر التنفيذ الفعلي (weighted average)
+                # ✅ إصلاح: سعر الدخول الحقيقي = المبلغ المدفوع ÷ الكمية الصافية
+                # يلي فعلاً صارت بالمحفظة (بعد خصم عمولة الشراء)، مش ÷ الكمية
+                # الإجمالية قبل العمولة. كان الحساب القديم يقلل الكمية بالذاكرة
+                # (net_qty) بس بلا ما يرفع سعر التكلفة للوحدة، فيطلع الربح المعروض
+                # أعلى (أو الخسارة أقل) من الحقيقي على بينانس.
+                actual_entry_price = total_spent / net_qty   # سعر التكلفة الفعلي للوحدة المملوكة فعلياً
             else:
                 actual_entry_price = price
                 net_qty = qty
