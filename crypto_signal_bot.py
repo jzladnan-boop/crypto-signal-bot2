@@ -631,15 +631,18 @@ def save_profit_log(log_data, month=None):
     except Exception as e:
         log.error(f"❌ خطأ حفظ الأرباح: {e}")
 
-def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slippage_pct=0.0, strategy=None):
+def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slippage_pct=0.0, strategy=None, exit_fee_usdt=0.0):
     """يسجل نتيجة كل صفقة في ملف الشهر الحالي"""
     month       = time.strftime("%Y_%m")
     profit_log  = load_profit_log(month)
-    profit      = round((exit_price - entry_price) * qty, 4)
+    # ✅ إصلاح: نطرح عمولة البيع الفعلية (USDT) من الربح — قبل هيك كان الربح
+    # المعروض بالتطبيق أعلى شوي من الربح الحقيقي ببينانس لأنه ما كان يحسب
+    # عمولة البيع (عمولة الشراء متطروحة أصلاً ضمنياً عبر تقليل الكمية net_qty).
+    profit      = round((exit_price - entry_price) * qty - exit_fee_usdt, 4)
     # ✅ إصلاح: نخزن مبلغ الشراء/البيع الكامل ونسبة التغيّر % مع كل صفقة،
     # عشان تكون جاهزة لعرضها بالإشعارات وبالداشبورد بدون إعادة حساب بأكثر من مكان
     buy_amount  = round(entry_price * qty, 4)
-    sell_amount = round(exit_price * qty, 4)
+    sell_amount = round(exit_price * qty - exit_fee_usdt, 4)
     pct         = round((exit_price - entry_price) / entry_price * 100, 2) if entry_price else 0.0
     # ⬅️ بطلب المستخدم: نخزّن اسم الاستراتيجية الفعّالة وقت الصفقة مع كل سجل.
     # ⬅️ إصلاح: نفضّل الاستراتيجية المخزّنة فعلياً بالصفقة نفسها (trade["strategy"])
@@ -660,6 +663,7 @@ def record_trade_result(symbol, entry_price, exit_price, qty, reason, entry_slip
         "reason"     : reason,
         "time"       : utc_now_iso(),
         "strategy"   : strategy_name,
+        "exit_fee_usdt": round(exit_fee_usdt, 6),
     })
     save_profit_log(profit_log, month)
 
@@ -2160,13 +2164,13 @@ def close_trade(client, symbol):
             return None, "not_found"
         trade = open_trades[symbol]
 
-    sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
+    sell_price, sold_qty, sell_fee_usdt = sell_market(client, symbol, trade["qty"])
     if sell_price:
         # ✅ إصلاح: نستخدم الكمية الفعلية المُنفَّذة (sold_qty) لحساب الربح،
         # مش الكمية المسجلة بالذاكرة، عشان الربح يطابق تمامًا اللي صار على بينانس
         record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "manual_close",
                              entry_slippage_pct=trade.get("entry_slippage_pct", 0.0),
-                             strategy=trade.get("strategy"))
+                             strategy=trade.get("strategy"), exit_fee_usdt=sell_fee_usdt)
         with _lock:
             if symbol in open_trades:
                 del open_trades[symbol]
@@ -2384,20 +2388,35 @@ def sell_market(client, symbol, qty):
         if fills:
             executed_qty = sum(float(f["qty"]) for f in fills)
             price        = sum(float(f["price"]) * float(f["qty"]) for f in fills) / executed_qty
+            # ✅ إصلاح إضافي: عمولة البيع (عادة تُخصم من USDT مباشرة عند البيع،
+            # بعكس الشراء يلي عمولته بتُخصم من العملة المشتراة). كانت هاي العمولة
+            # مش متطروحة من الربح المعروض، فيطلع أعلى شوي من الربح الحقيقي ببينانس.
+            fee_usdt = 0.0
+            for f in fills:
+                c_asset = f.get("commissionAsset")
+                c_amt   = float(f.get("commission", 0))
+                if c_asset == "USDT":
+                    fee_usdt += c_amt
+                elif c_asset == asset:
+                    # نادراً ما تُخصم عمولة البيع بنفس عملة الأصل — نحولها لـ USDT
+                    # بسعر التنفيذ عشان تبقى بنفس وحدة الربح
+                    fee_usdt += c_amt * price
         else:
             executed_qty = sell_qty
             price        = float(client.get_symbol_ticker(symbol=symbol)["price"])
-        log.info(f"✅ بيع {symbol} | السعر: {price:.6f} | الكمية المطلوبة: {sell_qty} | الكمية المنفذة فعلياً: {executed_qty}")
-        return price, executed_qty
+            fee_usdt     = 0.0
+        log.info(f"✅ بيع {symbol} | السعر: {price:.6f} | الكمية المطلوبة: {sell_qty} | الكمية المنفذة فعلياً: {executed_qty} | عمولة: {fee_usdt:.6f} USDT")
+        return price, executed_qty, fee_usdt
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
             register_api_block(f"sell_market({symbol})")
         log.error(f"❌ بيع {symbol}: {e.status_code} | {e.message}")
         send_admin(f"خطأ بيع {symbol}: {e.message}")
-        return None, None
+        return None, None, 0.0
     except Exception as e:
         log.error(f"❌ بيع {symbol}: {e}")
         send_admin(f"خطأ بيع {symbol}: {e}")
+        return None, None, 0.0
         return None, None
 
 # ──────────────────────────────────────────────
@@ -3371,17 +3390,18 @@ def run_bot():
                             trade["stop_loss"]     = compute_trail_stop(price, trade)
                             save_trades()
                         elif price <= trade["stop_loss"]:
-                            sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
+                            sell_price, sold_qty, sell_fee_usdt = sell_market(client, symbol, trade["qty"])
                             if sell_price:
                                 # ✅ إصلاح: الربح ومبلغ الشراء/البيع محسوبين على الكمية الفعلية المُنفَّذة
                                 # (sold_qty) بدل الكمية المسجلة بالذاكرة، عشان تطابق بينانس تمامًا
-                                profit      = round((sell_price - trade["entry_price"]) * sold_qty, 4)
+                                # ✅ إصلاح إضافي: طرح عمولة البيع الفعلية (USDT) من الربح المعروض
+                                profit      = round((sell_price - trade["entry_price"]) * sold_qty - sell_fee_usdt, 4)
                                 buy_amount  = round(trade["entry_price"] * sold_qty, 4)
-                                sell_amount = round(sell_price * sold_qty, 4)
+                                sell_amount = round(sell_price * sold_qty - sell_fee_usdt, 4)
                                 pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
                                 record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "trailing_stop",
                                                      entry_slippage_pct=trade.get("entry_slippage_pct", 0.0),
-                                                     strategy=trade.get("strategy"))  # ✅ إصلاح #3
+                                                     strategy=trade.get("strategy"), exit_fee_usdt=sell_fee_usdt)  # ✅ إصلاح #3
                                 consecutive_losses = 0   # 🛑 صفقة رابحة → تصفير عدّاد الخسارات المتتالية
                                 save_circuit_state()
                                 send_telegram(
@@ -3400,17 +3420,18 @@ def run_bot():
                         # (المبني على ATR أو الاحتياطي الثابت)، بدل إعادة حسابه من الصفر بالنسبة الثابتة
                         # في كل دورة — كان هذا يلغي فائدة ATR قبل تفعيل Trailing.
                         if price <= trade["stop_loss"]:
-                            sell_price, sold_qty = sell_market(client, symbol, trade["qty"])
+                            sell_price, sold_qty, sell_fee_usdt = sell_market(client, symbol, trade["qty"])
                             if sell_price:
                                 # ✅ إصلاح: الخسارة ومبلغ الشراء/البيع محسوبين على الكمية الفعلية المُنفَّذة
                                 # (sold_qty) بدل الكمية المسجلة بالذاكرة، عشان تطابق بينانس تمامًا
-                                loss        = round((sell_price - trade["entry_price"]) * sold_qty, 4)
+                                # ✅ إصلاح إضافي: طرح عمولة البيع الفعلية (USDT)
+                                loss        = round((sell_price - trade["entry_price"]) * sold_qty - sell_fee_usdt, 4)
                                 buy_amount  = round(trade["entry_price"] * sold_qty, 4)
-                                sell_amount = round(sell_price * sold_qty, 4)
+                                sell_amount = round(sell_price * sold_qty - sell_fee_usdt, 4)
                                 pct         = round((sell_price - trade["entry_price"]) / trade["entry_price"] * 100, 2)
                                 record_trade_result(symbol, trade["entry_price"], sell_price, sold_qty, "stop_loss",
                                                      entry_slippage_pct=trade.get("entry_slippage_pct", 0.0),
-                                                     strategy=trade.get("strategy"))  # ✅ إصلاح #3
+                                                     strategy=trade.get("strategy"), exit_fee_usdt=sell_fee_usdt)  # ✅ إصلاح #3
                                 send_telegram(
                                     f"🚨 <b>ستوب لوز - {coin}</b>\n"
                                     f"📉 السعر: {sell_price:.6f}$\n"
