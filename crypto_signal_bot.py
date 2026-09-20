@@ -3118,11 +3118,26 @@ def _build_chat_context():
         for t in reversed(recent)
     ) or "لا يوجد صفقات مسجلة بعد"
 
+    # 🧠 ذاكرة الأداء التاريخي لكل عملة (coin_memory.db) — نسبة نجاح، متوسط
+    # انزلاق سعري، ونوع ارتباطها بـ BTC. مصدر مختلف وأدق من سجل الصفقات الخام.
+    try:
+        all_stats = coin_memory.get_all_stats()
+        all_stats.sort(key=lambda s: s.total_pnl, reverse=True)
+        coin_memory_txt = "; ".join(
+            f"{s.symbol}: {s.wins}ر/{s.losses}خ (نجاح {round(s.win_rate*100)}%), "
+            f"صافي {round(s.total_pnl, 3)} USDT, ارتباط BTC: {s.correlation_type}"
+            for s in all_stats[:15]
+        ) or "لا يوجد بيانات ذاكرة كافية بعد"
+    except Exception as e:
+        log.error(f"❌ chat context — coin_memory: {e}")
+        coin_memory_txt = "تعذر جلب ذاكرة الأداء التاريخي"
+
     return (
         f"استراتيجية حالية: {strategy_txt} | قائمة مراقبة: {watch_count} عملة\n"
         f"صفقات مفتوحة حالياً ({len(open_list)}): {', '.join(open_list) or 'لا يوجد'}\n"
         f"إجمالي السجل: {total} صفقة (رابحة: {wins}, خاسرة: {losses}) | صافي الربح الكلي: {total_profit} USDT\n"
-        f"آخر 10 صفقات: {recent_txt}"
+        f"آخر 10 صفقات: {recent_txt}\n"
+        f"ذاكرة الأداء لكل عملة (مرتبة من الأفضل): {coin_memory_txt}"
     )
 
 
