@@ -3106,6 +3106,13 @@ def _build_chat_context():
             for sym, t in open_trades.items()
         ]
         watch_count = len(watch_list)
+        settings_txt = (
+            f"مبلغ الصفقة: {TRADE_AMOUNT} USDT | أقصى صفقات متزامنة: {MAX_TRADES} | "
+            f"Stop Loss: {round(STOP_LOSS_PCT*100, 3)}% | Activate Trailing: {round(TRAIL_ACTIVATE_PCT*100, 3)}% | "
+            f"Trailing Stop: {round(TRAIL_PCT*100, 3)}% | "
+            f"ATR مفعّل: {'نعم' if ATR_ENABLED else 'لا'}"
+            + (f" (فترة {ATR_PERIOD}، مضاعف الستوب الأولي {ATR_MULTIPLIER}، مضاعف الـ Trailing {TRAIL_ATR_MULTIPLIER})" if ATR_ENABLED else "")
+        )
 
     all_trades = load_all_profit_log()
     total = len(all_trades)
@@ -3133,10 +3140,11 @@ def _build_chat_context():
         coin_memory_txt = "تعذر جلب ذاكرة الأداء التاريخي"
 
     return (
+        f"إعدادات البوت الحالية: {settings_txt}\n"
         f"استراتيجية حالية: {strategy_txt} | قائمة مراقبة: {watch_count} عملة\n"
         f"صفقات مفتوحة حالياً ({len(open_list)}): {', '.join(open_list) or 'لا يوجد'}\n"
         f"إجمالي السجل: {total} صفقة (رابحة: {wins}, خاسرة: {losses}) | صافي الربح الكلي: {total_profit} USDT\n"
-        f"آخر 10 صفقات: {recent_txt}\n"
+        f"آخر 10 صفقات (الأحدث أولاً): {recent_txt}\n"
         f"ذاكرة الأداء لكل عملة (مرتبة من الأفضل): {coin_memory_txt}"
     )
 
