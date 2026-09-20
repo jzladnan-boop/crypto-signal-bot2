@@ -206,6 +206,11 @@ def compare_candidates(candidates: list) -> dict:
 _CHAT_RULES = """أنت مساعد ذكي جوا تطبيق بوت تداول عملات رقمية آلي. بتحكي مع صاحب البوت
 مباشرة بمحادثة حرة (مو تقييم صفقة محددة). جاوب بالعربي العامي بأسلوب طبيعي.
 
+مع كل رسالة، بتوصلك معلومات حية حقيقية عن حالة البوت (الصفقات المفتوحة،
+سجل الصفقات، الإحصائيات) — استخدمها بثقة للإجابة عن أسئلة زي "شو آخر
+صفقاتي؟" أو "شو نسبة نجاحي؟"، وما تقول "ما عندي وصول لبياناتك" لأنه
+فعلاً عندك.
+
 قاعدة مهمة جداً: **جوابك دايماً مختصر جداً** — سطر أو سطرين كحد أقصى، بدون
 مقدمات أو حشو أو تفاصيل زايدة عن المطلوب. لو السؤال يحتاج توضيح أكتر، اختصر
 لأهم نقطة بس واسأل هو إذا بده تفصيل أكتر بدل ما تفصّل من نفسك.
@@ -214,14 +219,16 @@ _CHAT_RULES = """أنت مساعد ذكي جوا تطبيق بوت تداول ع
 تحليلي بس، القرار النهائي للمستخدم."""
 
 
-def chat(message: str, context: str = "") -> dict:
+def chat(message: str, context: str = "", history: list = None) -> dict:
     """
     محادثة حرة عامة مع الوكيل (مو تقييم صفقة). الجواب مختصر دايماً.
 
     Args:
-        message: رسالة المستخدم
-        context: سياق اختياري عن حالة البوت الحالية (عدد الصفقات المفتوحة،
-            الاستراتيجية الحالة، إلخ) يُضاف كخلفية بدون ما يفرض إجابة معينة
+        message: رسالة المستخدم الحالية
+        context: سياق حي عن حالة البوت (صفقات مفتوحة، سجل، إحصائيات) —
+            يُعاد بناؤه بكل طلب عشان يكون محدّث دايماً، مش جزء من history
+        history: قائمة الرسائل السابقة بنفس الجلسة، كل عنصر
+            {"role": "user"|"model", "text": str}، بالترتيب الزمني
 
     Returns:
         dict: {"ok": bool, "reply": str, "source": "gemini"|"fallback"|"error"}
@@ -229,10 +236,16 @@ def chat(message: str, context: str = "") -> dict:
     if not AI_AGENT_ENABLED or not GEMINI_API_KEY:
         return {"ok": False, "reply": "الوكيل مطفي حالياً أو لا يوجد مفتاح Gemini مضبوط.", "source": "fallback"}
 
-    user_text = f"[سياق: {context}]\n{message}" if context else message
+    contents = []
+    for h in (history or []):
+        contents.append({"role": h["role"], "parts": [{"text": h["text"]}]})
+
+    user_text = f"[معلومات حية عن البوت الآن:\n{context}]\n\n{message}" if context else message
+    contents.append({"role": "user", "parts": [{"text": user_text}]})
+
     body = {
         "system_instruction": {"parts": [{"text": _CHAT_RULES}]},
-        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "contents": contents,
         "generationConfig": {"temperature": 0.4, "maxOutputTokens": 200},
     }
 

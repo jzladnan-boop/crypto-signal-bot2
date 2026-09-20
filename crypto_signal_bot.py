@@ -3093,21 +3093,63 @@ def api_ask_agent():
     })
 
 
+def _build_chat_context():
+    """
+    يبني ملخص نصي عن حالة البوت الحالية وسجل صفقاته — يُستخدم كسياق خلفية
+    لمحادثة الوكيل الحرة، عشان يقدر يجاوب عن أسئلة زي 'شو آخر صفقاتي؟' أو
+    'شو نسبة نجاحي؟' بمعلومات حقيقية، مش تخمين.
+    """
+    with _lock:
+        strategy_txt = current_strategy
+        open_list = [
+            f"{sym} (دخول {t.get('entry_price')}, استراتيجية {t.get('strategy', '?')})"
+            for sym, t in open_trades.items()
+        ]
+        watch_count = len(watch_list)
+
+    all_trades = load_all_profit_log()
+    total = len(all_trades)
+    wins  = sum(1 for t in all_trades if t.get("profit", 0) > 0)
+    losses = total - wins
+    total_profit = round(sum(t.get("profit", 0) for t in all_trades), 4)
+    recent = all_trades[-10:] if all_trades else []
+    recent_txt = "; ".join(
+        f"{t.get('symbol')}: {t.get('profit')} USDT ({t.get('reason')}, {t.get('time','')[:10]})"
+        for t in reversed(recent)
+    ) or "لا يوجد صفقات مسجلة بعد"
+
+    return (
+        f"استراتيجية حالية: {strategy_txt} | قائمة مراقبة: {watch_count} عملة\n"
+        f"صفقات مفتوحة حالياً ({len(open_list)}): {', '.join(open_list) or 'لا يوجد'}\n"
+        f"إجمالي السجل: {total} صفقة (رابحة: {wins}, خاسرة: {losses}) | صافي الربح الكلي: {total_profit} USDT\n"
+        f"آخر 10 صفقات: {recent_txt}"
+    )
+
+
 @app.route("/api/chat_agent", methods=["POST"])
 @login_required
 def api_chat_agent():
     """
     محادثة حرة عامة مع وكيل Gemini (مو تقييم صفقة) — لشاشة الوكيل بالتطبيق.
+    بتستقبل history (آخر رسائل المحادثة) من التطبيق عشان يكون عند الوكيل
+    سياق المحادثة، وبتضيف له تلقائياً ملخص حي عن حالة البوت وسجل صفقاته.
     """
     data = request.get_json(silent=True) or {}
     message = str(data.get("message", "")).strip()
     if not message:
         return jsonify({"error": "message مفقود"}), 400
 
-    with _lock:
-        context = f"استراتيجية: {current_strategy} | صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES} | مراقبة: {len(watch_list)} عملة"
+    raw_history = data.get("history", [])
+    history = []
+    if isinstance(raw_history, list):
+        for h in raw_history[-12:]:  # آخر 12 رسالة بس (6 أزواج) — كافي للسياق، ومحافظ على حجم الطلب
+            role = h.get("role")
+            text = str(h.get("text", "")).strip()
+            if role in ("user", "model") and text:
+                history.append({"role": role, "text": text})
 
-    result = ai_agent.chat(message, context=context)
+    context = _build_chat_context()
+    result = ai_agent.chat(message, context=context, history=history)
     if not result["ok"]:
         return jsonify({"error": result["reply"]}), 502
     return jsonify({"ok": True, "reply": result["reply"]})
