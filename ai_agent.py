@@ -201,3 +201,47 @@ def compare_candidates(candidates: list) -> dict:
             "reason_ar": f"تعذر التواصل مع وكيل Gemini ({type(e).__name__}) — تم التجاوز احتياطاً",
             "source": "error",
         }
+
+
+_CHAT_RULES = """أنت مساعد ذكي جوا تطبيق بوت تداول عملات رقمية آلي. بتحكي مع صاحب البوت
+مباشرة بمحادثة حرة (مو تقييم صفقة محددة). جاوب بالعربي العامي بأسلوب طبيعي.
+
+قاعدة مهمة جداً: **جوابك دايماً مختصر جداً** — سطر أو سطرين كحد أقصى، بدون
+مقدمات أو حشو أو تفاصيل زايدة عن المطلوب. لو السؤال يحتاج توضيح أكتر، اختصر
+لأهم نقطة بس واسأل هو إذا بده تفصيل أكتر بدل ما تفصّل من نفسك.
+
+ما تعطي نصيحة استثمارية قاطعة ("اشتري الآن") ولا تضمن نتائج — أنت مساعد
+تحليلي بس، القرار النهائي للمستخدم."""
+
+
+def chat(message: str, context: str = "") -> dict:
+    """
+    محادثة حرة عامة مع الوكيل (مو تقييم صفقة). الجواب مختصر دايماً.
+
+    Args:
+        message: رسالة المستخدم
+        context: سياق اختياري عن حالة البوت الحالية (عدد الصفقات المفتوحة،
+            الاستراتيجية الحالة، إلخ) يُضاف كخلفية بدون ما يفرض إجابة معينة
+
+    Returns:
+        dict: {"ok": bool, "reply": str, "source": "gemini"|"fallback"|"error"}
+    """
+    if not AI_AGENT_ENABLED or not GEMINI_API_KEY:
+        return {"ok": False, "reply": "الوكيل مطفي حالياً أو لا يوجد مفتاح Gemini مضبوط.", "source": "fallback"}
+
+    user_text = f"[سياق: {context}]\n{message}" if context else message
+    body = {
+        "system_instruction": {"parts": [{"text": _CHAT_RULES}]},
+        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 200},
+    }
+
+    try:
+        resp = requests.post(_GEMINI_URL, params={"key": GEMINI_API_KEY}, json=body, timeout=AI_AGENT_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return {"ok": True, "reply": text, "source": "gemini"}
+    except Exception as e:
+        log.error(f"❌ AI Agent (Gemini) شات: {e}")
+        return {"ok": False, "reply": f"تعذر التواصل مع الوكيل ({type(e).__name__})", "source": "error"}

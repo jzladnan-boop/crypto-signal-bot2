@@ -3093,6 +3093,26 @@ def api_ask_agent():
     })
 
 
+@app.route("/api/chat_agent", methods=["POST"])
+@login_required
+def api_chat_agent():
+    """
+    محادثة حرة عامة مع وكيل Gemini (مو تقييم صفقة) — لشاشة الوكيل بالتطبيق.
+    """
+    data = request.get_json(silent=True) or {}
+    message = str(data.get("message", "")).strip()
+    if not message:
+        return jsonify({"error": "message مفقود"}), 400
+
+    with _lock:
+        context = f"استراتيجية: {current_strategy} | صفقات مفتوحة: {len(open_trades)}/{MAX_TRADES} | مراقبة: {len(watch_list)} عملة"
+
+    result = ai_agent.chat(message, context=context)
+    if not result["ok"]:
+        return jsonify({"error": result["reply"]}), 502
+    return jsonify({"ok": True, "reply": result["reply"]})
+
+
 @app.route("/api/find_trade", methods=["POST"])
 @login_required
 def api_find_trade():
