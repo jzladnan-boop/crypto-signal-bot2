@@ -3156,6 +3156,21 @@ def _build_chat_context():
         log.error(f"❌ chat context — coin_memory: {e}")
         coin_memory_txt = "تعذر جلب ذاكرة الأداء التاريخي"
 
+    # 📊 أداء كل استراتيجية على حدة — عشان أسئلة زي "أي استراتيجية عم تخسرني"
+    try:
+        strategy_ids = ["rsi", "stoch_rsi", "trend_stoch_parallel", "squeeze_breakout", "mean_reversion_parallel", "manual"]
+        strategy_lines = []
+        for sid in strategy_ids:
+            s = coin_memory.get_strategy_stats(sid)
+            if s["total_trades"] > 0:
+                strategy_lines.append(
+                    f"{sid}: {s['total_trades']} صفقة ({s['wins']}ر/{s['losses']}خ, نجاح {s['win_rate_pct']}%), صافي {s['total_pnl']} USDT"
+                )
+        strategy_txt2 = "; ".join(strategy_lines) or "لا يوجد بيانات كافية بعد"
+    except Exception as e:
+        log.error(f"❌ chat context — strategy stats: {e}")
+        strategy_txt2 = "تعذر جلب أداء الاستراتيجيات"
+
     return (
         f"🔴 آخر صفقة أُغلقت (الأحدث إطلاقاً — استخدم هاد السطر حصراً لأي سؤال عن 'آخر صفقة'): {last_trade_txt}\n"
         f"إعدادات البوت الحالية: {settings_txt}\n"
@@ -3163,6 +3178,7 @@ def _build_chat_context():
         f"صفقات مفتوحة حالياً ({len(open_list)}): {', '.join(open_list) or 'لا يوجد'}\n"
         f"إجمالي السجل: {total} صفقة (رابحة: {wins}, خاسرة: {losses}) | صافي الربح الكلي: {total_profit} USDT\n"
         f"آخر 10 صفقات (الأحدث أولاً): {recent_txt}\n"
+        f"أداء كل استراتيجية على حدة (من مصدر منفصل وأدق، عبر كل العملات): {strategy_txt2}\n"
         f"ذاكرة الأداء لكل عملة (مرتبة من الأفضل): {coin_memory_txt}"
     )
 
