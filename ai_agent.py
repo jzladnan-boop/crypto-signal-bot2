@@ -258,7 +258,7 @@ def chat(message: str, context: str = "", history: list = None) -> dict:
     body = {
         "system_instruction": {"parts": [{"text": _CHAT_RULES}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 200},
+        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 200},
     }
 
     try:

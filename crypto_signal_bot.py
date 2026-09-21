@@ -3159,17 +3159,32 @@ def _build_chat_context():
     # 📊 أداء كل استراتيجية على حدة — عشان أسئلة زي "أي استراتيجية عم تخسرني"
     try:
         strategy_ids = ["rsi", "stoch_rsi", "trend_stoch_parallel", "squeeze_breakout", "mean_reversion_parallel", "manual"]
-        strategy_lines = []
+        strategy_stats = []
         for sid in strategy_ids:
             s = coin_memory.get_strategy_stats(sid)
             if s["total_trades"] > 0:
-                strategy_lines.append(
-                    f"{sid}: {s['total_trades']} صفقة ({s['wins']}ر/{s['losses']}خ, نجاح {s['win_rate_pct']}%), صافي {s['total_pnl']} USDT"
-                )
-        strategy_txt2 = "; ".join(strategy_lines) or "لا يوجد بيانات كافية بعد"
+                strategy_stats.append(s)
+        strategy_txt2 = "; ".join(
+            f"{s['strategy']}: {s['total_trades']} صفقة ({s['wins']}ر/{s['losses']}خ, نجاح {s['win_rate_pct']}%), صافي {s['total_pnl']} USDT"
+            for s in strategy_stats
+        ) or "لا يوجد بيانات كافية بعد"
+
+        # ✅ إصلاح: أفضل/أسوأ استراتيجية محسوبة صراحة بكود (max/min على total_pnl)،
+        # مش متروكة للموديل يستنتجها من نص — هيك تفادينا تناقض الإجابة بين رسالة
+        # وتانية (صار فعلياً: قال مرة mean_reversion الأفضل ومرة stoch_rsi الأفضل).
+        if strategy_stats:
+            best = max(strategy_stats, key=lambda s: s["total_pnl"])
+            worst = min(strategy_stats, key=lambda s: s["total_pnl"])
+            best_worst_txt = (
+                f"✅ الأفضل ربحاً (صافي أعلى): {best['strategy']} ({best['total_pnl']} USDT)\n"
+                f"❌ الأسوأ (صافي أقل/أكتر خسارة): {worst['strategy']} ({worst['total_pnl']} USDT)"
+            )
+        else:
+            best_worst_txt = "لا يوجد بيانات كافية بعد"
     except Exception as e:
         log.error(f"❌ chat context — strategy stats: {e}")
         strategy_txt2 = "تعذر جلب أداء الاستراتيجيات"
+        best_worst_txt = "تعذر جلب أداء الاستراتيجيات"
 
     return (
         f"🔴 آخر صفقة أُغلقت (الأحدث إطلاقاً — استخدم هاد السطر حصراً لأي سؤال عن 'آخر صفقة'): {last_trade_txt}\n"
@@ -3179,6 +3194,7 @@ def _build_chat_context():
         f"إجمالي السجل: {total} صفقة (رابحة: {wins}, خاسرة: {losses}) | صافي الربح الكلي: {total_profit} USDT\n"
         f"آخر 10 صفقات (الأحدث أولاً): {recent_txt}\n"
         f"أداء كل استراتيجية على حدة (من مصدر منفصل وأدق، عبر كل العملات): {strategy_txt2}\n"
+        f"{best_worst_txt}\n"
         f"ذاكرة الأداء لكل عملة (مرتبة من الأفضل): {coin_memory_txt}"
     )
 
