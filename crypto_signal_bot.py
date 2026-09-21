@@ -3120,6 +3120,18 @@ def _build_chat_context():
     losses = total - wins
     total_profit = round(sum(t.get("profit", 0) for t in all_trades), 4)
     recent = all_trades[-10:] if all_trades else []
+
+    # ✅ إصلاح: نحسب "آخر صفقة" كحقل منفصل وصريح 100% (مش نعتمد على إنه
+    # الموديل يفهم صح ترتيب قائمة نصية) — هذا العنصر الأخير الحقيقي بـ
+    # all_trades، محسوب بكود عادي بدون أي احتمال لبس بالقراءة.
+    last_trade_txt = "لا يوجد صفقات مسجلة بعد"
+    if all_trades:
+        lt = all_trades[-1]
+        last_trade_txt = (
+            f"{lt.get('symbol')} | الربح/الخسارة: {lt.get('profit')} USDT | "
+            f"السبب: {lt.get('reason')} | التاريخ: {lt.get('time', '')[:19]}"
+        )
+
     recent_txt = "; ".join(
         f"{t.get('symbol')}: {t.get('profit')} USDT ({t.get('reason')}, {t.get('time','')[:10]})"
         for t in reversed(recent)
@@ -3140,6 +3152,7 @@ def _build_chat_context():
         coin_memory_txt = "تعذر جلب ذاكرة الأداء التاريخي"
 
     return (
+        f"🔴 آخر صفقة أُغلقت (الأحدث إطلاقاً — استخدم هاد السطر حصراً لأي سؤال عن 'آخر صفقة'): {last_trade_txt}\n"
         f"إعدادات البوت الحالية: {settings_txt}\n"
         f"استراتيجية حالية: {strategy_txt} | قائمة مراقبة: {watch_count} عملة\n"
         f"صفقات مفتوحة حالياً ({len(open_list)}): {', '.join(open_list) or 'لا يوجد'}\n"
