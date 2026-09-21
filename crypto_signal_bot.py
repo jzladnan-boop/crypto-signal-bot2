@@ -3114,7 +3114,12 @@ def _build_chat_context():
             + (f" (فترة {ATR_PERIOD}، مضاعف الستوب الأولي {ATR_MULTIPLIER}، مضاعف الـ Trailing {TRAIL_ATR_MULTIPLIER})" if ATR_ENABLED else "")
         )
 
-    all_trades = load_all_profit_log()
+    # ✅ إصلاح جذري: كنا نفترض إنه ترتيب load_all_profit_log() = ترتيب زمني
+    # صحيح تلقائياً — هذا غلط (نفس افتراض غلط تجنبه /api/history صراحة بعمل
+    # sort على حقل "time"). وكمان كنا ناقصين صفقات الاستراتيجيات الموازية.
+    # هلق نطابق بالضبط نفس منطق /api/history: كل المصادر + ترتيب حقيقي بالوقت.
+    all_trades = load_all_profit_log() + load_parallel_strategies_history()
+    all_trades.sort(key=lambda r: parse_record_time_epoch(r.get("time", "")))
     total = len(all_trades)
     wins  = sum(1 for t in all_trades if t.get("profit", 0) > 0)
     losses = total - wins
