@@ -3158,7 +3158,7 @@ def _build_chat_context():
 
     # 📊 أداء كل استراتيجية على حدة — عشان أسئلة زي "أي استراتيجية عم تخسرني"
     try:
-        strategy_ids = ["rsi", "stoch_rsi", "trend_stoch_parallel", "squeeze_breakout", "mean_reversion_parallel", "manual"]
+        strategy_ids = coin_memory.get_all_strategies()  # ✅ إصلاح: من قاعدة البيانات نفسها، مش قائمة ثابتة بالكود
         strategy_stats = []
         for sid in strategy_ids:
             s = coin_memory.get_strategy_stats(sid)
@@ -3168,6 +3168,20 @@ def _build_chat_context():
             f"{s['strategy']}: {s['total_trades']} صفقة ({s['wins']}ر/{s['losses']}خ, نجاح {s['win_rate_pct']}%), صافي {s['total_pnl']} USDT"
             for s in strategy_stats
         ) or "لا يوجد بيانات كافية بعد"
+
+        # 🩺 فحص تحقق: مجموع صفقات/أرباح الاستراتيجيات لازم يقارب إجمالي السجل
+        # (all_trades) — لو في فرق كبير، منبّه الوكيل صراحة بدل ما يقدم أرقام
+        # ناقصة وكأنها كاملة.
+        strategy_trades_sum = sum(s["total_trades"] for s in strategy_stats)
+        strategy_pnl_sum = round(sum(s["total_pnl"] for s in strategy_stats), 4)
+        coverage_note = ""
+        if strategy_stats and abs(strategy_trades_sum - total) > max(5, total * 0.02):
+            coverage_note = (
+                f"\n⚠️ تنبيه دقة: مجموع صفقات الاستراتيجيات ({strategy_trades_sum}) "
+                f"مش مطابق تماماً لإجمالي السجل ({total}) — فيه فرق مصدره غالباً بيانات قديمة "
+                f"بمصدر مختلف (coin_memory.db مقابل ملفات السجل). لو المستخدم سأل عن أرقام دقيقة "
+                f"100%، نبّهه إنه في فرق بسيط بين المصدرين بدل ما تقدم الرقم وكأنه مؤكد تماماً."
+            )
 
         # ✅ إصلاح: أفضل/أسوأ استراتيجية محسوبة صراحة بكود (max/min على total_pnl)،
         # مش متروكة للموديل يستنتجها من نص — هيك تفادينا تناقض الإجابة بين رسالة
@@ -3185,6 +3199,7 @@ def _build_chat_context():
         log.error(f"❌ chat context — strategy stats: {e}")
         strategy_txt2 = "تعذر جلب أداء الاستراتيجيات"
         best_worst_txt = "تعذر جلب أداء الاستراتيجيات"
+        coverage_note = ""
 
     return (
         f"🔴 آخر صفقة أُغلقت (الأحدث إطلاقاً — استخدم هاد السطر حصراً لأي سؤال عن 'آخر صفقة'): {last_trade_txt}\n"
@@ -3193,7 +3208,7 @@ def _build_chat_context():
         f"صفقات مفتوحة حالياً ({len(open_list)}): {', '.join(open_list) or 'لا يوجد'}\n"
         f"إجمالي السجل: {total} صفقة (رابحة: {wins}, خاسرة: {losses}) | صافي الربح الكلي: {total_profit} USDT\n"
         f"آخر 10 صفقات (الأحدث أولاً): {recent_txt}\n"
-        f"أداء كل استراتيجية على حدة (من مصدر منفصل وأدق، عبر كل العملات): {strategy_txt2}\n"
+        f"أداء كل استراتيجية على حدة (من مصدر منفصل وأدق، عبر كل العملات): {strategy_txt2}{coverage_note}\n"
         f"{best_worst_txt}\n"
         f"ذاكرة الأداء لكل عملة (مرتبة من الأفضل): {coin_memory_txt}"
     )

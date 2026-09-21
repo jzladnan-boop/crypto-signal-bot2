@@ -219,6 +219,16 @@ class CoinMemory:
             for r in rows
         ]
 
+    def get_all_strategies(self) -> list:
+        """
+        يرجع أسماء كل الاستراتيجيات الموجودة فعلياً بقاعدة البيانات (مش قائمة
+        مُخمّنة بالكود) — يشمل تلقائياً أي تصنيف قديم زي 'unknown' أو أي
+        استراتيجية جديدة تُضاف بالمستقبل، بدون ما نحتاج نعدّل الكود كل مرة.
+        """
+        with self._connect() as conn:
+            rows = conn.execute("SELECT DISTINCT strategy FROM trades").fetchall()
+        return [r[0] for r in rows]
+
     def get_strategy_stats(self, strategy: str) -> dict:
         """
         يرجع ملخص أداء استراتيجية معينة عبر كل العملات مجتمعة — عدد الصفقات،
