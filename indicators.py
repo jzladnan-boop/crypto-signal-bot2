@@ -163,3 +163,66 @@ def calculate_momentum_score(closes: pd.Series, volumes: pd.Series, volume_perio
         return round(float(score), 4)
     except Exception:
         return 0.0
+
+
+def calculate_support_resistance(highs: pd.Series, lows: pd.Series, closes: pd.Series,
+                                  swing_window: int = 3, cluster_pct: float = 0.015, max_levels: int = 3):
+    """
+    يكتشف مستويات الدعم والمقاومة آلياً من القمم والقيعان المحلية (Swing
+    Highs/Lows) — مش خطوط مرسومة يدوياً.
+
+    الطريقة:
+    1) قمة/قاع محلي = شمعة أعلى/أدنى من swing_window شمعة قبلها وبعدها
+    2) تجميع المستويات القريبة من بعض (ضمن cluster_pct) بمستوى واحد،
+       وعدد مرات الارتداد عنه (touches) = قوته
+    3) نرجع أقرب max_levels مستوى دعم (تحت السعر الحالي) وأقرب max_levels
+       مقاومة (فوق السعر الحالي)، مرتبين بالقرب من السعر
+
+    Returns:
+        dict: {"current_price": float,
+               "support": [{"level": float, "touches": int}, ...],
+               "resistance": [{"level": float, "touches": int}, ...]}
+        أو None لو البيانات غير كافية.
+    """
+    try:
+        n = len(closes)
+        if n < swing_window * 2 + 10:
+            return None
+
+        current_price = float(closes.iloc[-1])
+        swing_highs, swing_lows = [], []
+
+        for i in range(swing_window, n - swing_window):
+            window_h = highs.iloc[i - swing_window:i + swing_window + 1]
+            window_l = lows.iloc[i - swing_window:i + swing_window + 1]
+            if highs.iloc[i] == window_h.max():
+                swing_highs.append(float(highs.iloc[i]))
+            if lows.iloc[i] == window_l.min():
+                swing_lows.append(float(lows.iloc[i]))
+
+        def cluster(points):
+            """يجمع نقاط قريبة من بعض (ضمن cluster_pct) بمستوى واحد بعدد لمسات"""
+            if not points:
+                return []
+            points = sorted(points)
+            clusters = [[points[0]]]
+            for p in points[1:]:
+                if abs(p - clusters[-1][-1]) / clusters[-1][-1] <= cluster_pct:
+                    clusters[-1].append(p)
+                else:
+                    clusters.append([p])
+            return [{"level": round(sum(c) / len(c), 8), "touches": len(c)} for c in clusters]
+
+        support_levels = [c for c in cluster(swing_lows) if c["level"] < current_price]
+        resistance_levels = [c for c in cluster(swing_highs) if c["level"] > current_price]
+
+        support_levels.sort(key=lambda c: current_price - c["level"])
+        resistance_levels.sort(key=lambda c: c["level"] - current_price)
+
+        return {
+            "current_price": current_price,
+            "support": support_levels[:max_levels],
+            "resistance": resistance_levels[:max_levels],
+        }
+    except Exception:
+        return None

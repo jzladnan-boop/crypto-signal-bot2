@@ -19,6 +19,7 @@ import time
 import datetime
 import json
 import logging
+import re
 import requests
 import threading
 import secrets
@@ -65,7 +66,7 @@ def _get_live_risk_config():
             "min_profit_lock_pct": MIN_PROFIT_LOCK_PCT,
             "trail_distance_max_pct": TRAIL_DISTANCE_MAX_PCT,
         }
-from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx
+from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx, calculate_support_resistance
 import ai_agent
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
@@ -3093,6 +3094,38 @@ def api_ask_agent():
     })
 
 
+def get_support_resistance_for_symbol(client, symbol):
+    """يجيب شموع العملة ويحسب مستويات الدعم/المقاومة الحقيقية (مش رسمة يدوية)."""
+    try:
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=150)
+        if not klines or len(klines) < 30:
+            return None
+        highs  = pd.Series([float(k[2]) for k in klines])
+        lows   = pd.Series([float(k[3]) for k in klines])
+        closes = pd.Series([float(k[4]) for k in klines])
+        return calculate_support_resistance(highs, lows, closes)
+    except Exception as e:
+        log.error(f"❌ get_support_resistance_for_symbol({symbol}): {e}")
+        return None
+
+
+def _detect_symbol_in_text(text: str):
+    """
+    يدور على اسم عملة مذكور بنص المستخدم (بأي صيغة: BTC، btcusdt، إلخ)
+    بمطابقته مع قائمة SYMBOLS الفعلية — عشان ميزة تحليل الدعم/المقاومة
+    بالمحادثة الحرة تشتغل تلقائياً بدون ما يحتاج المستخدم صيغة معينة.
+    """
+    words = re.findall(r"[A-Za-z]{2,15}", text.upper())
+    with _lock:
+        symbols_snapshot = list(SYMBOLS)
+    symbol_bases = {s[:-4]: s for s in symbols_snapshot if s.endswith("USDT")}
+    for w in words:
+        base = w[:-4] if w.endswith("USDT") else w
+        if base in symbol_bases:
+            return symbol_bases[base]
+    return None
+
+
 def _build_chat_context():
     """
     يبني ملخص نصي عن حالة البوت الحالية وسجل صفقاته — يُستخدم كسياق خلفية
@@ -3237,6 +3270,22 @@ def api_chat_agent():
                 history.append({"role": role, "text": text})
 
     context = _build_chat_context()
+
+    # 🆕 دعم/مقاومة: لو المستخدم ذكر اسم عملة بالرسالة، نحسب مستويات دعم/مقاومة
+    # حقيقية (Swing Highs/Lows فعلية من الشموع)، مش خط مرسوم أو تخمين من الموديل.
+    if _binance_client:
+        detected_symbol = _detect_symbol_in_text(message)
+        if detected_symbol:
+            sr = get_support_resistance_for_symbol(_binance_client, detected_symbol)
+            if sr:
+                support_txt = "; ".join(f"{s['level']} (لمسات: {s['touches']})" for s in sr["support"]) or "لا يوجد مستوى دعم واضح بالنطاق المفحوص"
+                resistance_txt = "; ".join(f"{r['level']} (لمسات: {r['touches']})" for r in sr["resistance"]) or "لا يوجد مستوى مقاومة واضح بالنطاق المفحوص"
+                context += (
+                    f"\n📐 دعم/مقاومة محسوبة آلياً لـ {detected_symbol} (من قمم/قيعان الشموع الفعلية، "
+                    f"أقرب المستويات للسعر الحالي {sr['current_price']}): "
+                    f"دعم: {support_txt} | مقاومة: {resistance_txt}"
+                )
+
     result = ai_agent.chat(message, context=context, history=history)
     if not result["ok"]:
         return jsonify({"error": result["reply"]}), 502
