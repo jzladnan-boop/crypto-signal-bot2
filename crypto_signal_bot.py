@@ -66,7 +66,7 @@ def _get_live_risk_config():
             "min_profit_lock_pct": MIN_PROFIT_LOCK_PCT,
             "trail_distance_max_pct": TRAIL_DISTANCE_MAX_PCT,
         }
-from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx, calculate_support_resistance
+from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx, calculate_support_resistance, calculate_supertrend
 import ai_agent
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
@@ -1813,6 +1813,7 @@ def get_indicators(client, symbol):
         bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(closes)
         sma50       = closes.rolling(window=50).mean().iloc[-1] if len(closes) >= 50 else None
         volume_mean = volumes.rolling(window=20).mean().iloc[-1] if len(volumes) >= 20 else None
+        st = calculate_supertrend(highs, lows, closes)
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
@@ -1828,6 +1829,8 @@ def get_indicators(client, symbol):
             "adx"     : calculate_adx(highs, lows, closes),
             "sma50"       : round(float(sma50), 8) if sma50 is not None and not pd.isna(sma50) else None,
             "volume_mean" : round(float(volume_mean), 4) if volume_mean is not None and not pd.isna(volume_mean) else None,
+            "supertrend_direction": st["direction"] if st else None,
+            "supertrend_value"    : st["value"] if st else None,
         }
     except BinanceAPIException as e:
         if is_rate_limit_error(e):

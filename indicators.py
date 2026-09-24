@@ -226,3 +226,65 @@ def calculate_support_resistance(highs: pd.Series, lows: pd.Series, closes: pd.S
         }
     except Exception:
         return None
+
+
+def calculate_supertrend(highs: pd.Series, lows: pd.Series, closes: pd.Series,
+                          period: int = 10, multiplier: float = 3.0):
+    """
+    مؤشر Supertrend — خط اتجاه ديناميكي مبني على ATR، بيتحول فوق/تحت
+    السعر حسب قوة واتجاه الحركة. القيم الافتراضية (period=10,
+    multiplier=3) هي المعيارية الشائعة عموماً (TradingView/الاستخدام
+    العام) — مش أرقام Hyperopt مضبوطة على فريم أو سوق معين، عشان تبقى
+    منطقية بأي ظرف سوق بدل overfitting لفترة تاريخية محددة.
+
+    المنطق: نحسب "الحد الأعلى/الأدنى النهائي" لكل شمعة (بيتحرك بشكل
+    مستمر مع الاتجاه، ما بيرجع للخلف إلا لما ينكسر)، وبعدين نحدد أي
+    حد (أعلى أو أدنى) هو خط الـ Supertrend الفعلي حسب مكان الإغلاق.
+
+    Returns:
+        dict: {"direction": "up"|"down", "value": float} لآخر شمعة،
+        أو None لو البيانات غير كافية.
+    """
+    try:
+        import ta
+        n = len(closes)
+        if n < period + 5:
+            return None
+
+        atr_series = ta.volatility.AverageTrueRange(
+            high=highs, low=lows, close=closes, window=period
+        ).average_true_range()
+
+        hl2 = (highs + lows) / 2
+        basic_upper = hl2 + multiplier * atr_series
+        basic_lower = hl2 - multiplier * atr_series
+
+        final_upper = [0.0] * n
+        final_lower = [0.0] * n
+        st = [0.0] * n
+        direction = [None] * n
+
+        for i in range(period, n):
+            bu, bl = basic_upper.iloc[i], basic_lower.iloc[i]
+            c_prev = closes.iloc[i - 1]
+
+            final_upper[i] = bu if (bu < final_upper[i - 1] or c_prev > final_upper[i - 1]) else final_upper[i - 1]
+            final_lower[i] = bl if (bl > final_lower[i - 1] or c_prev < final_lower[i - 1]) else final_lower[i - 1]
+
+            c = closes.iloc[i]
+            if st[i - 1] == final_upper[i - 1]:
+                st[i] = final_upper[i] if c <= final_upper[i] else final_lower[i]
+            elif st[i - 1] == final_lower[i - 1]:
+                st[i] = final_lower[i] if c >= final_lower[i] else final_upper[i]
+            else:
+                st[i] = final_upper[i] if c <= final_upper[i] else final_lower[i]
+
+            direction[i] = "down" if c < st[i] else "up"
+
+        last_st = st[-1]
+        last_dir = direction[-1]
+        if last_dir is None or pd.isna(last_st) or last_st == 0:
+            return None
+        return {"direction": last_dir, "value": round(float(last_st), 8)}
+    except Exception:
+        return None
