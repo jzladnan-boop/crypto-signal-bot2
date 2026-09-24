@@ -3319,6 +3319,7 @@ def api_find_trade():
         "indicators": {
             "price": ind.get("price"), "rsi": ind.get("rsi"), "mfi": ind.get("mfi"),
             "adx": ind.get("adx"), "momentum_score": ind.get("momentum_score"),
+            "supertrend_direction": ind.get("supertrend_direction"),
         } if ind else None,
     })
 
