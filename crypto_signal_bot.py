@@ -468,7 +468,7 @@ def save_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
-    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
@@ -494,6 +494,7 @@ def save_settings():
                 "atr_period"       : ATR_PERIOD,
                 "atr_multiplier"   : ATR_MULTIPLIER,
                 "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
+                "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
                 "auto_strategy_enabled": AUTO_STRATEGY_ENABLED,
                 "vwap_filter_enabled": VWAP_FILTER_ENABLED,
                 "bb_filter_enabled"  : BB_FILTER_ENABLED,
@@ -508,7 +509,7 @@ def load_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT
     global RSI_BUY_PREV, RSI_BUY_CURR
-    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
@@ -551,6 +552,7 @@ def load_settings():
         ATR_PERIOD          = s.get("atr_period", ATR_PERIOD)
         ATR_MULTIPLIER      = s.get("atr_multiplier", ATR_MULTIPLIER)
         TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
+        TRAIL_ACTIVATE_ATR_MULTIPLE = s.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
         AUTO_STRATEGY_ENABLED = s.get("auto_strategy_enabled", AUTO_STRATEGY_ENABLED)
         VWAP_FILTER_ENABLED = s.get("vwap_filter_enabled", VWAP_FILTER_ENABLED)
         BB_FILTER_ENABLED   = s.get("bb_filter_enabled", BB_FILTER_ENABLED)
@@ -2755,6 +2757,7 @@ def api_get_settings():
             "atr_period": ATR_PERIOD,
             "atr_multiplier": ATR_MULTIPLIER,
             "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
+            "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
             "vwap_filter_enabled": VWAP_FILTER_ENABLED,
             "bb_filter_enabled": BB_FILTER_ENABLED,
             "current_strategy": current_strategy,
@@ -2778,7 +2781,7 @@ def api_get_settings():
 def api_set_settings():
     global TRADE_AMOUNT, MAX_TRADES, TRAIL_PCT, RSI_WATCH_LOW, RSI_WATCH_HIGH
     global current_interval, ma20_enabled, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
-    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
+    global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global AUTO_STRATEGY_ENABLED
     global VWAP_FILTER_ENABLED, BB_FILTER_ENABLED
@@ -2871,6 +2874,11 @@ def api_set_settings():
             v = float(data["trail_atr_multiplier"])
             if v <= 0: errors.append("trail_atr_multiplier لازم أكبر من صفر")
             else: TRAIL_ATR_MULTIPLIER = v
+
+        if "trail_activate_atr_multiple" in data:
+            v = float(data["trail_activate_atr_multiple"])
+            if v <= 0: errors.append("trail_activate_atr_multiple لازم أكبر من صفر")
+            else: TRAIL_ACTIVATE_ATR_MULTIPLE = v
 
         if "vwap_filter_enabled" in data:
             VWAP_FILTER_ENABLED = bool(data["vwap_filter_enabled"])
