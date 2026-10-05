@@ -327,7 +327,7 @@ BB_LOWER_MARGIN_PCT = 0.01    # هامش القرب المسموح من الحد
 # مطفية افتراضياً — تفعّل/تطفى من تيليغرام (/set_trend_parallel on|off) أو التطبيق.
 # ──────────────────────────────────────────────
 TREND_PARALLEL_ENABLED = False
-TREND_PARALLEL_USDT_PER_TRADE = 20.0
+TREND_PARALLEL_USDT_PER_TRADE = TRADE_AMOUNT  # ✅ إصلاح: مربوط بحجم الصفقة الأساسي، بطلب المستخدم — مش رقم مستقل
 _trend_parallel_strategy = None   # ⬅️ نسخة TrendStochParallel الوحيدة
 
 # ──────────────────────────────────────────────
@@ -337,7 +337,7 @@ _trend_parallel_strategy = None   # ⬅️ نسخة TrendStochParallel الوح�
 # (/set_squeeze_breakout on|off) أو التطبيق.
 # ──────────────────────────────────────────────
 SQUEEZE_BREAKOUT_ENABLED = False
-SQUEEZE_BREAKOUT_USDT_PER_TRADE = 20.0
+SQUEEZE_BREAKOUT_USDT_PER_TRADE = TRADE_AMOUNT  # ✅ إصلاح: مربوط بحجم الصفقة الأساسي
 _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحيدة
 
 # ──────────────────────────────────────────────
@@ -348,7 +348,7 @@ _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحي
 # افتراضياً — تفعّل/تطفى من تيليغرام (/set_mean_reversion on|off) أو التطبيق.
 # ──────────────────────────────────────────────
 MEAN_REVERSION_ENABLED = False
-MEAN_REVERSION_USDT_PER_TRADE = 20.0
+MEAN_REVERSION_USDT_PER_TRADE = TRADE_AMOUNT  # ✅ إصلاح: مربوط بحجم الصفقة الأساسي
 _mean_reversion_strategy = None   # ⬅️ نسخة MeanReversionParallel الوحيدة
 
 # ──────────────────────────────────────────────
@@ -516,12 +516,19 @@ def load_settings():
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global MEAN_REVERSION_ENABLED
+    global TREND_PARALLEL_USDT_PER_TRADE, SQUEEZE_BREAKOUT_USDT_PER_TRADE, MEAN_REVERSION_USDT_PER_TRADE
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             s = json.load(f)
         TRADE_AMOUNT       = s.get("trade_amount", TRADE_AMOUNT)
+        # ✅ إصلاح: الاستراتيجيات الموازية تتبع حجم الصفقة الأساسي المحمّل من
+        # الملف — لولا هاد السطر كانت تضل على القيمة الافتراضية وقت استيراد
+        # الملف (قبل ما يُحمّل أي إعداد محفوظ)
+        TREND_PARALLEL_USDT_PER_TRADE = TRADE_AMOUNT
+        SQUEEZE_BREAKOUT_USDT_PER_TRADE = TRADE_AMOUNT
+        MEAN_REVERSION_USDT_PER_TRADE = TRADE_AMOUNT
         MAX_TRADES          = s.get("max_trades", MAX_TRADES)
         TRAIL_PCT           = s.get("trail_pct", TRAIL_PCT)
         RSI_WATCH_LOW       = s.get("rsi_watch_low", RSI_WATCH_LOW)
@@ -830,6 +837,7 @@ def telegram_command_listener(client):
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global MEAN_REVERSION_ENABLED
+    global TREND_PARALLEL_USDT_PER_TRADE, SQUEEZE_BREAKOUT_USDT_PER_TRADE, MEAN_REVERSION_USDT_PER_TRADE
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
     for attempt in range(3):   # ✅ إصلاح: 3 محاولات بدل محاولة وحيدة
@@ -1003,8 +1011,19 @@ def telegram_command_listener(client):
                             else:
                                 with _lock:   # ✅ إصلاح: حماية race condition
                                     TRADE_AMOUNT = amount
+                                    # ✅ إصلاح: نفس الربط يلي بالتطبيق — الاستراتيجيات
+                                    # الموازية تتبع حجم الصفقة الأساسي دايماً
+                                    TREND_PARALLEL_USDT_PER_TRADE = amount
+                                    SQUEEZE_BREAKOUT_USDT_PER_TRADE = amount
+                                    MEAN_REVERSION_USDT_PER_TRADE = amount
+                                    if _trend_parallel_strategy is not None:
+                                        _trend_parallel_strategy.cfg["usdt_per_trade"] = amount
+                                    if _squeeze_breakout_strategy is not None:
+                                        _squeeze_breakout_strategy.cfg["usdt_per_trade"] = amount
+                                    if _mean_reversion_strategy is not None:
+                                        _mean_reversion_strategy.cfg["usdt_per_trade"] = amount
                                 save_settings()
-                                send_admin(f"✅ حجم الصفقة الجديد: ${TRADE_AMOUNT}")
+                                send_admin(f"✅ حجم الصفقة الجديد (بكل الاستراتيجيات بما فيها الموازية): ${TRADE_AMOUNT}")
                         except:
                             send_admin("❌ مثال: /set_trade_amount 20")
 
@@ -2788,14 +2807,30 @@ def api_set_settings():
     global TREND_PARALLEL_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global MEAN_REVERSION_ENABLED
+    global TREND_PARALLEL_USDT_PER_TRADE, SQUEEZE_BREAKOUT_USDT_PER_TRADE, MEAN_REVERSION_USDT_PER_TRADE
     data = request.get_json(silent=True) or {}
     errors = []
 
     with _lock:
         if "trade_amount" in data:
             v = float(data["trade_amount"])
-            if v <= 0: errors.append("trade_amount لازم أكبر من صفر")
-            else: TRADE_AMOUNT = v
+            if v <= 0:
+                errors.append("trade_amount لازم أكبر من صفر")
+            else:
+                TRADE_AMOUNT = v
+                # ✅ إصلاح: الاستراتيجيات الموازية مربوطة بنفس حجم الصفقة
+                # الأساسي — بطلب المستخدم، بدل رقم مستقل لكل وحدة. نحدّث
+                # الثوابت وكمان النسخ الشغالة فعلياً (لو موجودة) فوراً بلا
+                # حاجة لإعادة تشغيل.
+                TREND_PARALLEL_USDT_PER_TRADE = v
+                SQUEEZE_BREAKOUT_USDT_PER_TRADE = v
+                MEAN_REVERSION_USDT_PER_TRADE = v
+                if _trend_parallel_strategy is not None:
+                    _trend_parallel_strategy.cfg["usdt_per_trade"] = v
+                if _squeeze_breakout_strategy is not None:
+                    _squeeze_breakout_strategy.cfg["usdt_per_trade"] = v
+                if _mean_reversion_strategy is not None:
+                    _mean_reversion_strategy.cfg["usdt_per_trade"] = v
 
         if "max_trades" in data:
             v = int(data["max_trades"])
