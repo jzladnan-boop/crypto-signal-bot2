@@ -66,7 +66,7 @@ def _get_live_risk_config():
             "min_profit_lock_pct": MIN_PROFIT_LOCK_PCT,
             "trail_distance_max_pct": TRAIL_DISTANCE_MAX_PCT,
         }
-from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx, calculate_support_resistance, calculate_supertrend
+from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx, calculate_support_resistance, calculate_supertrend, calculate_volume_profile
 import ai_agent
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
@@ -1835,6 +1835,7 @@ def get_indicators(client, symbol):
         sma50       = closes.rolling(window=50).mean().iloc[-1] if len(closes) >= 50 else None
         volume_mean = volumes.rolling(window=20).mean().iloc[-1] if len(volumes) >= 20 else None
         st = calculate_supertrend(highs, lows, closes)
+        vp = calculate_volume_profile(highs, lows, closes, volumes)
         return {
             "rsi"     : round(rsi.iloc[-1], 2),
             "rsi_prev": round(rsi.iloc[-2], 2),
@@ -1852,6 +1853,13 @@ def get_indicators(client, symbol):
             "volume_mean" : round(float(volume_mean), 4) if volume_mean is not None and not pd.isna(volume_mean) else None,
             "supertrend_direction": st["direction"] if st else None,
             "supertrend_value"    : st["value"] if st else None,
+            # Volume Profile — معلومات للوكيل فقط (مش فلتر إجباري)
+            "vp_poc"        : vp["poc"] if vp else None,
+            "vp_vah"        : vp["vah"] if vp else None,
+            "vp_val"        : vp["val"] if vp else None,
+            "vp_position"   : vp["position"] if vp else None,
+            "vp_stop_hint"  : vp["stop_hint"] if vp else None,
+            "vp_target_hint": vp["target_hint"] if vp else None,
         }
     except BinanceAPIException as e:
         if is_rate_limit_error(e):
@@ -3155,6 +3163,22 @@ def get_support_resistance_for_symbol(client, symbol):
         return None
 
 
+def get_volume_profile_for_symbol(client, symbol):
+    """يجيب شموع العملة ويحسب Volume Profile (POC/VAH/VAL) حقيقي من الشموع."""
+    try:
+        klines = client.get_klines(symbol=symbol, interval=current_interval, limit=150)
+        if not klines or len(klines) < 30:
+            return None
+        highs   = pd.Series([float(k[2]) for k in klines])
+        lows    = pd.Series([float(k[3]) for k in klines])
+        closes  = pd.Series([float(k[4]) for k in klines])
+        volumes = pd.Series([float(k[5]) for k in klines])
+        return calculate_volume_profile(highs, lows, closes, volumes)
+    except Exception as e:
+        log.error(f"❌ get_volume_profile_for_symbol({symbol}): {e}")
+        return None
+
+
 def _detect_symbol_in_text(text: str):
     """
     يدور على اسم عملة مذكور بنص المستخدم (بأي صيغة: BTC، btcusdt، إلخ)
@@ -3331,6 +3355,13 @@ def api_chat_agent():
                     f"أقرب المستويات للسعر الحالي {sr['current_price']}): "
                     f"دعم: {support_txt} | مقاومة: {resistance_txt}"
                 )
+            vp = get_volume_profile_for_symbol(_binance_client, detected_symbol)
+            if vp:
+                context += (
+                    f"\n📊 Volume Profile محسوب آلياً لـ {detected_symbol} (من حجم الشموع الفعلية): "
+                    f"POC={vp['poc']} | VAL={vp['val']} | VAH={vp['vah']} | موقع السعر: {vp['position']} "
+                    f"| أقرب دعم حجمي: {vp['stop_hint']} | أقرب هدف حجمي: {vp['target_hint']}"
+                )
 
     result = ai_agent.chat(message, context=context, history=history)
     if not result["ok"]:
@@ -3363,6 +3394,9 @@ def api_find_trade():
             "price": ind.get("price"), "rsi": ind.get("rsi"), "mfi": ind.get("mfi"),
             "adx": ind.get("adx"), "momentum_score": ind.get("momentum_score"),
             "supertrend_direction": ind.get("supertrend_direction"),
+            "vp_position": ind.get("vp_position"), "vp_poc": ind.get("vp_poc"),
+            "vp_val": ind.get("vp_val"), "vp_vah": ind.get("vp_vah"),
+            "vp_stop_hint": ind.get("vp_stop_hint"), "vp_target_hint": ind.get("vp_target_hint"),
         } if ind else None,
     })
 

@@ -288,3 +288,91 @@ def calculate_supertrend(highs: pd.Series, lows: pd.Series, closes: pd.Series,
         return {"direction": last_dir, "value": round(float(last_st), 8)}
     except Exception:
         return None
+
+
+def calculate_volume_profile(highs: pd.Series, lows: pd.Series, closes: pd.Series,
+                              volumes: pd.Series, bins: int = 24, value_area_pct: float = 0.70):
+    """
+    Volume Profile (ملف حجم التداول) — بيوزع حجم كل شمعة على المستويات السعرية
+    اللي لمستها الشمعة (توزيع منتظم بين Low و High)، وبيطلع:
+
+    - POC: السعر اللي صار عليه أكبر حجم تداول
+    - VAH / VAL: حدود "منطقة القيمة" — النطاق حوالي 70% من الحجم حول الـ POC
+    - position: وين السعر الحالي بالنسبة لهاي المستويات
+    - stop_hint: أقرب مستوى دعم حجمي تحت السعر (POC أو VAL)
+    - target_hint: أقرب مستوى حجمي فوق السعر (POC أو VAH)
+
+    تقريب مناسب لفريم الساعة (مش tick-by-tick حقيقي). مستويات معلوماتية فقط.
+
+    Returns:
+        dict أو None لو البيانات غير كافية.
+    """
+    try:
+        n = len(closes)
+        if n < 30 or bins < 5:
+            return None
+
+        lo = float(lows.min())
+        hi = float(highs.max())
+        if hi <= lo:
+            return None
+
+        step = (hi - lo) / bins
+        profile = [0.0] * bins
+
+        for i in range(n):
+            c_lo, c_hi, vol = float(lows.iloc[i]), float(highs.iloc[i]), float(volumes.iloc[i])
+            if vol <= 0:
+                continue
+            first = min(bins - 1, max(0, int((c_lo - lo) / step)))
+            last = min(bins - 1, max(0, int((c_hi - lo) / step)))
+            share = vol / (last - first + 1)
+            for b in range(first, last + 1):
+                profile[b] += share
+
+        total = sum(profile)
+        if total <= 0:
+            return None
+
+        poc_idx = max(range(bins), key=lambda b: profile[b])
+
+        # توسيع منطقة القيمة من الـ POC للخارج (دايماً نضيف الجهة الأعلى حجماً)
+        low_idx = high_idx = poc_idx
+        covered = profile[poc_idx]
+        while covered / total < value_area_pct and (low_idx > 0 or high_idx < bins - 1):
+            below = profile[low_idx - 1] if low_idx > 0 else -1.0
+            above = profile[high_idx + 1] if high_idx < bins - 1 else -1.0
+            if above >= below:
+                high_idx += 1
+                covered += profile[high_idx]
+            else:
+                low_idx -= 1
+                covered += profile[low_idx]
+
+        poc = lo + (poc_idx + 0.5) * step
+        val = lo + low_idx * step
+        vah = lo + (high_idx + 1) * step
+        price = float(closes.iloc[-1])
+
+        if price < val:
+            position = "below_val"
+        elif price < poc:
+            position = "val_to_poc"
+        elif price <= vah:
+            position = "poc_to_vah"
+        else:
+            position = "above_vah"
+
+        below_levels = [lv for lv in (poc, val) if lv < price]
+        above_levels = [lv for lv in (poc, vah) if lv > price]
+        stop_hint = max(below_levels) if below_levels else None
+        target_hint = min(above_levels) if above_levels else None
+
+        return {
+            "poc": round(poc, 8), "vah": round(vah, 8), "val": round(val, 8),
+            "position": position,
+            "stop_hint": round(stop_hint, 8) if stop_hint is not None else None,
+            "target_hint": round(target_hint, 8) if target_hint is not None else None,
+        }
+    except Exception:
+        return None
