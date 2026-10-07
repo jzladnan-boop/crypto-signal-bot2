@@ -31,7 +31,6 @@ from flask import Flask, request, jsonify, session, send_from_directory
 from functools import wraps
 from market_regime import MarketRegimeDetector
 from squeeze_breakout import SqueezeBreakout
-from agent_scanner import AgentScanner
 from portfolio_manager import get_portfolio_manager
 
 _PORTFOLIO_OWNER = "main_bot"
@@ -304,12 +303,6 @@ SQUEEZE_BREAKOUT_USDT_PER_TRADE = TRADE_AMOUNT  # ✅ إصلاح: مربوط ب�
 _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحيدة
 
 # ──────────────────────────────────────────────
-# 🎯 ماسح الوكيل (agent_scanner.py) — توصيات فقط بدون شراء، كل ساعة، مع قياس النتائج
-# ──────────────────────────────────────────────
-AGENT_SCAN_ENABLED = True
-_agent_scanner = None
-
-# ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
 logging.basicConfig(
@@ -428,7 +421,7 @@ def save_settings():
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
-    global SQUEEZE_BREAKOUT_ENABLED, AGENT_SCAN_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -449,7 +442,6 @@ def save_settings():
                 "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
                 "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
-                "agent_scan_enabled": AGENT_SCAN_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -460,7 +452,7 @@ def load_settings():
     global RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
-    global SQUEEZE_BREAKOUT_ENABLED, AGENT_SCAN_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     if not os.path.exists(SETTINGS_FILE):
         return
@@ -501,7 +493,6 @@ def load_settings():
         TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
         TRAIL_ACTIVATE_ATR_MULTIPLE = s.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
-        AGENT_SCAN_ENABLED = s.get("agent_scan_enabled", AGENT_SCAN_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -768,7 +759,7 @@ def telegram_command_listener(client):
     global pause_until, consecutive_losses, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global ATR_ENABLED
-    global SQUEEZE_BREAKOUT_ENABLED, AGENT_SCAN_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
@@ -1122,24 +1113,6 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
-                    # ── /set_agent_scan (تشغيل/إيقاف ماسح الوكيل — توصيات فقط) ──
-                    elif text.startswith("/set_agent_scan "):
-                        value = text.replace("/set_agent_scan ", "").strip().lower()
-                        if value in ("on", "off"):
-                            with _lock:
-                                AGENT_SCAN_ENABLED = (value == "on")
-                            save_settings()
-                            send_admin("✅ ماسح الوكيل مفعّل — توصيات بتيليغرام كل ساعة (بدون أي شراء)" if AGENT_SCAN_ENABLED else "❌ تم إيقاف ماسح الوكيل")
-                        else:
-                            send_admin("❌ مثال: /set_agent_scan on  أو  /set_agent_scan off")
-
-                    # ── /agent_report (قياس أداء توصيات الوكيل مقابل السوق) ──
-                    elif text == "/agent_report":
-                        if _agent_scanner:
-                            send_admin(_agent_scanner.report())
-                        else:
-                            send_admin("⚠️ الماسح لسا ما اشتغل")
-
                     # ── /atr_status ─────────────────────────────
                     elif text == "/atr_status":
                         with _lock:
@@ -1379,9 +1352,6 @@ def telegram_command_listener(client):
                             "/set_squeeze_breakout on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم 30 دقيقة)\n"
                             "/set_squeeze_breakout off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/squeeze_breakout_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
-                            "<b>🎯 ماسح الوكيل (توصيات فقط، بدون شراء):</b>\n"
-                            "/set_agent_scan on|off — تشغيل/إيقاف الفحص الساعي والتوصيات\n"
-                            "/agent_report — أداء توصيات الوكيل بعد 4 و24 ساعة مقابل السوق\n\n"
                             "<b>التقارير:</b>\n"
                             "/config — عرض كل الإعدادات الحالية\n"
                             "/push_status — عدد الأجهزة المسجلة لاستقبال Push Notifications\n"
@@ -2377,7 +2347,7 @@ def api_set_settings():
     global current_interval, current_strategy, STOP_LOSS_PCT, TRAIL_ACTIVATE_PCT, RSI_BUY_PREV, RSI_BUY_CURR
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
-    global SQUEEZE_BREAKOUT_ENABLED, AGENT_SCAN_ENABLED
+    global SQUEEZE_BREAKOUT_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     data = request.get_json(silent=True) or {}
     errors = []
@@ -3029,21 +2999,6 @@ def run_bot():
         daemon=True,
     )
     squeeze_breakout_thread.start()
-
-    # ── 🎯 ماسح الوكيل — توصيات فقط (بدون شراء) مع قياس النتائج ──
-    global _agent_scanner
-    _agent_scanner = AgentScanner(
-        client,
-        symbols_fn=lambda: list(SYMBOLS),
-        indicators_fn=get_indicators,
-        regime_fn=lambda: _regime_detector.get_regime_label() if _regime_detector else "SIDEWAYS",
-        notify_fn=send_telegram,
-        blocked_fn=is_api_blocked,
-        exclude_fn=lambda: set(open_trades.keys()),
-        data_dir=DATA_DIR,
-        enabled_fn=lambda: AGENT_SCAN_ENABLED,
-    )
-    threading.Thread(target=_agent_scanner.run, daemon=True).start()
 
     last_heartbeat = time.time()
     last_scan      = 0
