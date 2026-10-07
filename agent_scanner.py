@@ -285,6 +285,39 @@ class AgentScanner:
             self._save()
 
     # ──────────────────────────────────────────────
+    # تشخيص: ليش ما في توصيات؟
+    # ──────────────────────────────────────────────
+    _EXCL_AR = {
+        "low_liquidity": "سيولة ضعيفة", "supertrend_down": "Supertrend هابط",
+        "extended_above_vah": "ممتدة فوق منطقة القيمة", "weak_adx": "ADX ضعيف (<20)",
+        "overbought_mfi": "MFI فوق 80", "weak_volume": "فوليوم ضعيف", "no_price": "بدون سعر",
+    }
+
+    def _diagnosis(self, scans):
+        if not scans:
+            return "\n🔎 لسا ما صار أي مسح"
+        no_cand = sum(1 for s in scans if not s.get("top"))
+        failed = sum(1 for s in scans if s.get("top") and s.get("agent_source") in ("error", "fallback"))
+        rejected = sum(1 for s in scans if s.get("top") and s.get("agent_source") == "gemini" and not s.get("pick"))
+        picked = sum(1 for s in scans if s.get("pick"))
+        out = [
+            "\n🔎 <b>تشخيص المسوحات</b>",
+            f"• بدون مرشحين (القواعد استبعدت الكل): {no_cand}",
+            f"• الوكيل رفض كل المرشحين: {rejected}",
+            f"• تعذر التواصل مع Gemini أو معطّل: {failed}",
+            f"• وكيل اختار عملة: {picked}",
+        ]
+        last = scans[-1]
+        ex = last.get("excluded") or {}
+        if ex:
+            parts = [f"{self._EXCL_AR.get(k, k)}: {v}" for k, v in sorted(ex.items(), key=lambda x: -x[1])]
+            out.append("\n<b>آخر مسح — سبب الاستبعاد:</b>\n" + " | ".join(parts))
+        out.append(f"مرشحين وصلوا للوكيل بآخر مسح: {len(last.get('top') or [])}")
+        if last.get("reason"):
+            out.append(f"💬 آخر رد: {last['reason'][:300]}")
+        return "\n".join(out)
+
+    # ──────────────────────────────────────────────
     # التقرير
     # ──────────────────────────────────────────────
     def report(self):
@@ -293,6 +326,7 @@ class AgentScanner:
         total_scans = len(scans)
         picks = [s for s in scans if s.get("pick") and s.get("agent_source") == "gemini" and not s.get("duplicate")]
         lines = [f"📈 <b>تقرير ماسح الوكيل</b>\nمسوحات: {total_scans} | توصيات: {len(picks)}"]
+        lines.append(self._diagnosis(scans))
         for key, label in (("r4", "بعد 4 ساعات"), ("r24", "بعد 24 ساعة")):
             done = [s for s in picks if s.get(key) and s[key].get("pick") is not None and s[key].get("market") is not None]
             if not done:
