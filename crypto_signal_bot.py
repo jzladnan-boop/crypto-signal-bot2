@@ -72,7 +72,6 @@ from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, Ma
 DATA_DIR       = os.getenv("DATA_DIR", "/app/data")   # 📁 مجلد دائم (Volume) على Railway
 SYMBOLS_FILE   = os.path.join(DATA_DIR, "symbols.txt")
 TRADES_FILE    = os.path.join(DATA_DIR, "open_trades.json")
-PROFIT_FILE    = os.path.join(DATA_DIR, f"profit_{time.strftime('%Y_%m')}.json")   # ✅ إصلاح #4: ملف شهري منفصل
 CIRCUIT_FILE   = os.path.join(DATA_DIR, "circuit_breaker.json")   # 🛑 ملف لحفظ حالة التوقف التلقائي
 SETTINGS_FILE  = os.path.join(DATA_DIR, "settings.json")   # ⚙️ ملف حفظ الإعدادات (تنجو من إعادة التشغيل)
 PUSH_TOKENS_FILE = os.path.join(DATA_DIR, "push_tokens.json")   # 📱 ملف حفظ Push Tokens
@@ -107,8 +106,6 @@ INTERVAL           = Client.KLINE_INTERVAL_30MINUTE
 current_interval   = INTERVAL
 
 RSI_PERIOD         = 14
-RSI_BUY            = 30
-RSI_SELL           = 70
 RSI_BUY_PREV       = 25
 RSI_BUY_CURR       = 30
 STOP_LOSS_PCT      = 0.02
@@ -147,7 +144,6 @@ RESERVE_USDT       = 0.0   # ✅ إصلاح: تم إلغاء الاحتياطي 
 MAX_TRADES         = 2   # 🎯 أقصى عدد صفقات "نشطة" (لسا ما فعّلت Trailing) بالتزامن — لا يوجد سقف على العدد الكلي للصفقات المفتوحة
 HEARTBEAT_INTERVAL = 3600
 MA_PERIOD          = 20
-ADX_PERIOD              = 14
 
 SCAN_INTERVAL      = 120
 WATCH_INTERVAL      = 10
@@ -1280,8 +1276,6 @@ def telegram_command_listener(client):
                             trail            = TRAIL_PCT * 100
                             stoploss         = STOP_LOSS_PCT * 100
                             activate         = TRAIL_ACTIVATE_PCT * 100
-                            rsi_prev         = RSI_BUY_PREV
-                            rsi_curr         = RSI_BUY_CURR
                             atr_period_val   = ATR_PERIOD
                             atr_mult_val     = ATR_MULTIPLIER
                             trail_atr_val    = TRAIL_ATR_MULTIPLIER
@@ -1399,9 +1393,6 @@ def scan_all_symbols(client):
         log.warning("🚦 تخطي دورة الفحص الخفيف — البوت بفترة إيقاف مؤقت بسبب حظر -1003")
         return
     new_watch = set()
-
-    with _lock:
-        strategy = current_strategy
 
     log.info(f"🔍 فحص خفيف لـ {len(SYMBOLS)} عملة...")
     for symbol in list(SYMBOLS):
@@ -1660,7 +1651,6 @@ def find_best_trade(client, top_n: int = 8):
          "indicators": dict|None, "checked": [قائمة العملات المفحوصة]}
     """
     with _lock:
-        strategy = current_strategy
         candidates_symbols = [s for s in watch_list if s not in open_trades]
 
     if not candidates_symbols:
@@ -2449,20 +2439,6 @@ def api_set_settings():
     save_settings()
     return jsonify({"ok": True})
 
-# ── الاستراتيجيات ───────────────────────────────────
-@app.route("/api/strategies")
-@login_required
-def api_strategies():
-    """يرجع حالة كل استراتيجية (للـ Toggleات بالتطبيق)"""
-    with _lock:
-        return jsonify({
-            "current_strategy": current_strategy,
-            "rsi_enabled": current_strategy == "rsi",
-            "strategy_label": STRATEGY_LABELS.get(current_strategy, current_strategy),
-        })
-
-
-
 # ── التحكم بالتداول ───────────────────────────────
 @app.route("/api/control", methods=["POST"])
 @login_required
@@ -2772,7 +2748,6 @@ def _build_chat_context():
         # (all_trades) — لو في فرق كبير، منبّه الوكيل صراحة بدل ما يقدم أرقام
         # ناقصة وكأنها كاملة.
         strategy_trades_sum = sum(s["total_trades"] for s in strategy_stats)
-        strategy_pnl_sum = round(sum(s["total_pnl"] for s in strategy_stats), 4)
         coverage_note = ""
         if strategy_stats and abs(strategy_trades_sum - total) > max(5, total * 0.02):
             coverage_note = (

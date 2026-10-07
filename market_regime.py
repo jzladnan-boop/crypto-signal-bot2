@@ -9,9 +9,7 @@
 هذا الملف بس بيرجع تصنيف حالة السوق، ما بيقرر أي استراتيجية.
 """
 
-import time
 import pandas as pd
-import ta
 from binance.client import Client
 
 
