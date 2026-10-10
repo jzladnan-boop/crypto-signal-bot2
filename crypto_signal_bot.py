@@ -1639,10 +1639,45 @@ def update_symbol_correlations(client, symbols):
 # ──────────────────────────────────────────────
 # 🔍 بحث فوري عن أفضل صفقة متاحة الآن (يدوي — تيليجرام /findtrade والتطبيق)
 # ──────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# 🔍 إعدادات "ابحث عن صفقة" (قيم تقديرية مني — مو مضبوطة على بيانات، عدّلها هون)
+# ──────────────────────────────────────────────
+FIND_TRADE_EXTRA_COINS      = 30          # عملات إضافية من أعلى سيولة 24س (فوق قائمة المراقبة)
+FIND_TRADE_MIN_QUOTE_VOLUME = 2_000_000   # سيولة دنيا (USDT/24س) للعملات الإضافية
+FIND_TRADE_CHANGE_RANGE     = (-3.0, 12.0)  # تغيّر 24س المقبول %: مو منهارة ولا طايرة (دخول متأخر)
+FIND_TRADE_MFI_MAX          = 50          # كان 35 — الآن: مو بمنطقة شراء متضخم
+FIND_TRADE_VOLUME_MULT      = 1.2         # كان 1.5 — فوليوم أعلى من المتوسط بوضوح
+
+
+def _find_trade_candidates(client):
+    """قائمة المراقبة المكثفة + أعلى عملات سيولة بمجال تغيّر مقبول (بطلب API واحد)."""
+    with _lock:
+        base = [s for s in watch_list if s not in open_trades]
+        symbols_now = list(SYMBOLS)
+        opened = set(open_trades.keys())
+    extra = []
+    try:
+        lo, hi = FIND_TRADE_CHANGE_RANGE
+        tickers = {t["symbol"]: t for t in client.get_ticker()}
+        pool = []
+        for sym in symbols_now:
+            t = tickers.get(sym)
+            if not t or sym in opened or sym in base:
+                continue
+            qv, ch = float(t["quoteVolume"]), float(t["priceChangePercent"])
+            if qv >= FIND_TRADE_MIN_QUOTE_VOLUME and lo <= ch <= hi:
+                pool.append((qv, sym))
+        pool.sort(reverse=True)
+        extra = [sym for _, sym in pool[:FIND_TRADE_EXTRA_COINS]]
+    except Exception as e:
+        log.error(f"❌ find_best_trade — تعذر جلب شريحة السيولة (نكمل بقائمة المراقبة فقط): {e}")
+    return base + extra
+
+
 def find_best_trade(client, top_n: int = 8):
     """
-    يفحص قائمة "المراقبة المكثفة" الحالية (watch_list) — نفس العملات يلي
-    البوت أصلاً بيراقبها بالخلفية — ويرتبها حسب قوة الزخم (momentum_score)،
+    يفحص قائمة "المراقبة المكثفة" الحالية (watch_list) + أعلى عملات السيولة
+    بمجال تغيّر مقبول (_find_trade_candidates) — ويرتبها حسب قوة الزخم (momentum_score)،
     وبيبعت أقوى top_n مرشح للوكيل بطلب واحد يقارن بينهم ويختار الأقوى،
     أو يرفضهم كلهم لو ولا وحدة نظيفة كفاية.
 
@@ -1650,13 +1685,12 @@ def find_best_trade(client, top_n: int = 8):
         {"found": bool, "symbol": str|None, "reason_ar": str,
          "indicators": dict|None, "checked": [قائمة العملات المفحوصة]}
     """
-    with _lock:
-        candidates_symbols = [s for s in watch_list if s not in open_trades]
+    candidates_symbols = _find_trade_candidates(client)
 
     if not candidates_symbols:
         return {
             "found": False, "symbol": None,
-            "reason_ar": "ما في عملات قيد المراقبة المكثفة حالياً — جرب بعد شوي.",
+            "reason_ar": "ما في عملات تصلح للفحص حالياً (قائمة المراقبة فاضية وما في عملات بسيولة كافية) — جرب بعد شوي.",
             "indicators": None, "checked": [],
         }
 
@@ -1684,10 +1718,10 @@ def find_best_trade(client, top_n: int = 8):
             _set_last_indicator_error(symbol, e)
             ind = None
 
-        # 🔒 فلتر صارم بطلب المستخدم — قبل ما نعتبر العملة مرشح أصلاً:
-        # 1) MFI < 35 (تشبع بيعي حقيقي، مش عملة بمنطقة عادية/مرتفعة)
+        # 🔒 فلتر بالكود — قبل ما نعتبر العملة مرشح أصلاً (القيم من الثوابت FIND_TRADE_*):
+        # 1) MFI < FIND_TRADE_MFI_MAX (مش بمنطقة شراء متضخم)
         # 2) close > SMA50 (لسا باتجاه صاعد عام — مش انهيار مستمر Falling Knife)
-        # 3) volume > volume_mean × 1.5 (سيولة داخلة حقيقية، مش سكون)
+        # 3) volume > volume_mean × FIND_TRADE_VOLUME_MULT (سيولة داخلة حقيقية، مش سكون)
         # لو أي شرط من الثلاثة ناقص بيانات أو ما تحقق، العملة تُستبعد كلياً
         # ولا توصل حتى لمرحلة "أقوى المرشحين" — الوكيل ما بيشوفها إطلاقاً.
         if ind:
@@ -1698,10 +1732,10 @@ def find_best_trade(client, top_n: int = 8):
             volume      = ind.get("volume")
             volume_mean = ind.get("volume_mean")
             passes_hard_filter = (
-                mfi is not None and mfi < 35
+                mfi is not None and mfi < FIND_TRADE_MFI_MAX
                 and sma50 is not None and price is not None and price > sma50
                 and volume is not None and volume_mean is not None and volume_mean > 0
-                and volume > volume_mean * 1.5
+                and volume > volume_mean * FIND_TRADE_VOLUME_MULT
             )
             if passes_hard_filter:
                 scored.append((ind.get("momentum_score", 0.0), symbol, ind))
@@ -1709,7 +1743,7 @@ def find_best_trade(client, top_n: int = 8):
 
     if not scored:
         if fetched_count == 0:
-            reason = f"تعذر جلب بيانات لأي عملة من قائمة المراقبة. سبب حقيقي: {_last_indicator_error or 'غير معروف (راجع Logs)'}"
+            reason = f"تعذر جلب بيانات لأي عملة من القائمة المفحوصة. سبب حقيقي: {_last_indicator_error or 'غير معروف (راجع Logs)'}"
         else:
             reason = "لا توجد فرص آمنة حالياً، انتظر سيولة الماركت."
         return {
