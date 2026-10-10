@@ -2650,6 +2650,10 @@ def api_ask_agent():
             "price": ind.get("price"), "rsi": ind.get("rsi"), "mfi": ind.get("mfi"),
             "adx": ind.get("adx"), "volume": ind.get("volume"),
             "momentum_score": ind.get("momentum_score"),
+            "supertrend_direction": ind.get("supertrend_direction"),
+            "vp_position": ind.get("vp_position"), "vp_poc": ind.get("vp_poc"),
+            "vp_val": ind.get("vp_val"), "vp_vah": ind.get("vp_vah"),
+            "vp_stop_hint": ind.get("vp_stop_hint"), "vp_target_hint": ind.get("vp_target_hint"),
         },
     })
 
