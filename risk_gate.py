@@ -34,6 +34,11 @@ RR_GOOD = 2.0
 MIN_APPROVE_SCORE = 1         # أقل مجموع نقاط للموافقة (إذا ما في Veto)
 
 
+def _ltr(s):
+    """يثبّت اتجاه الرقم/النسبة يسار-يمين داخل النص العربي (وإلا بتنعكس علامة + - و %)."""
+    return "\u200e" + s + "\u200e"
+
+
 def _num(x):
     try:
         if x is None:
@@ -85,7 +90,7 @@ def evaluate_signal(symbol: str, ind: dict) -> dict:
 
     # ── رفض فوري ──
     if vr is not None and vr < VOL_RATIO_VETO:
-        vetoes.append(f"الفوليوم ضعيف ({vr:.1f}× المتوسط) والحركة مش مدعومة بشراء كافي")
+        vetoes.append(f"الفوليوم ضعيف ({_ltr(f'{vr:.1f}×')} المتوسط) والحركة مش مدعومة بشراء كافي")
     if mfi is not None and mfi > MFI_VETO:
         vetoes.append(f"MFI بمنطقة تشبع شرائي ({mfi:.0f}) واحتمال الارتداد الهبوطي قريب")
     if adx is not None and adx < ADX_VETO:
@@ -97,14 +102,14 @@ def evaluate_signal(symbol: str, ind: dict) -> dict:
     if vp == "above_vah":
         vetoes.append("السعر ممتد فوق منطقة القيمة الحجمية (مطاردة بعد ما خلصت الحركة غالباً)")
     if risk is not None and reward is not None and risk >= RR_MIN_RISK_PCT and reward < risk * RR_VETO_RATIO:
-        vetoes.append(f"العائد للمخاطرة سيئ: أقرب هدف حجمي +{reward:.1f}% مقابل دعم -{risk:.1f}%")
+        vetoes.append(f"العائد للمخاطرة سيئ: أقرب هدف حجمي {_ltr(f'+{reward:.1f}%')} مقابل دعم {_ltr(f'-{risk:.1f}%')}")
 
     # ── نقاط ──
     if vr is not None:
         if VOL_RATIO_VETO <= vr < VOL_RATIO_LOW:
             notes.append((-1, "الفوليوم أقل من المتوسط"))
         elif vr >= VOL_RATIO_STRONG:
-            notes.append((1, f"فوليوم قوي ({vr:.1f}× المتوسط)"))
+            notes.append((1, f"فوليوم قوي ({_ltr(f'{vr:.1f}×')} المتوسط)"))
     if adx is not None:
         if ADX_VETO <= adx < ADX_LOW:
             notes.append((-1, f"ADX ضعيف نسبياً ({adx:.0f})"))
@@ -127,9 +132,9 @@ def evaluate_signal(symbol: str, ind: dict) -> dict:
     if risk is not None and reward is not None and not vetoes and risk > 0:
         ratio = reward / risk
         if ratio >= RR_GOOD:
-            notes.append((1, f"عائد/مخاطرة جيد (هدف +{reward:.1f}% مقابل دعم -{risk:.1f}%)"))
+            notes.append((1, f"عائد/مخاطرة جيد (هدف {_ltr(f'+{reward:.1f}%')} مقابل دعم {_ltr(f'-{risk:.1f}%')})"))
         elif ratio < 1:
-            notes.append((-1, f"عائد/مخاطرة ضعيف (هدف +{reward:.1f}% مقابل دعم -{risk:.1f}%)"))
+            notes.append((-1, f"عائد/مخاطرة ضعيف (هدف {_ltr(f'+{reward:.1f}%')} مقابل دعم {_ltr(f'-{risk:.1f}%')})"))
 
     score = sum(p for p, _ in notes)
 
