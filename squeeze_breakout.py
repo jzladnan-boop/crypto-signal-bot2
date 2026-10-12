@@ -40,7 +40,7 @@ from coin_memory import ATRGuard, CoinMemory
 from market_regime import MarketRegimeDetector
 from portfolio_manager import get_portfolio_manager
 from indicators import calculate_mfi, calculate_adx
-import ai_agent
+import risk_gate
 
 _PORTFOLIO_OWNER = "squeeze_breakout"
 
@@ -473,13 +473,10 @@ class SqueezeBreakout:
             self._notify(f"⚠️ Squeeze Breakout: تراجعت عن شراء {symbol.replace('USDT','')} — محجوزة لاستراتيجية تانية حالياً")
             return
 
-        agent_verdict = ai_agent.evaluate_signal(symbol, signal)
+        agent_verdict = risk_gate.evaluate_signal(symbol, signal)
         coin_name_agent = symbol.replace("USDT", "")
-        if agent_verdict["source"] == "gemini":
-            icon = "✅" if agent_verdict["approved"] else "⛔"
-            self._notify(f"{icon} وكيل Gemini (Squeeze Breakout) بخصوص {coin_name_agent}: {agent_verdict['reason_ar']}")
-        elif agent_verdict["source"] == "error":
-            self._notify(f"⚠️ Squeeze Breakout — تجاوز {coin_name_agent}: {agent_verdict['reason_ar']}")
+        icon = "✅" if agent_verdict["approved"] else "⛔"
+        self._notify(f"{icon} بوابة المخاطر (Squeeze Breakout) بخصوص {coin_name_agent}: {agent_verdict['reason_ar']}")
         if not agent_verdict["approved"]:
             get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
             return

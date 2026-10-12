@@ -64,6 +64,7 @@ def _get_live_risk_config():
         }
 from indicators import calculate_vwap, calculate_bollinger_bands, calculate_momentum_score, calculate_mfi, calculate_adx, calculate_support_resistance, calculate_supertrend, calculate_volume_profile
 import ai_agent
+import risk_gate
 from coin_memory import CoinMemory, CorrelationEngine, SmartRanker, ATRGuard, MarketRegime
 
 # ──────────────────────────────────────────────
@@ -830,19 +831,16 @@ def telegram_command_listener(client):
                             if ind is None:
                                 send_admin(f"❌ تعذر جلب بيانات {coin} — تأكد إنها موجودة على بينانس وبصيغة صحيحة (مثلاً: /ask BTC).")
                             else:
-                                verdict = ai_agent.evaluate_signal(symbol, ind)
-                                if verdict["source"] == "gemini":
-                                    icon = "✅" if verdict["approved"] else "⛔"
-                                    send_admin(f"{icon} رأي الوكيل بـ {coin} هلق: {verdict['reason_ar']}")
-                                else:
-                                    send_admin(f"⚠️ {verdict['reason_ar']}")
+                                verdict = risk_gate.evaluate_signal(symbol, ind)
+                                icon = "✅" if verdict["approved"] else "⛔"
+                                send_admin(f"{icon} تقييم بوابة المخاطر لـ {coin} هلق: {verdict['reason_ar']}")
                         except Exception as e:
                             log.error(f"❌ /ask {coin}: {e}")
                             send_admin(f"❌ صار خطأ أثناء استشارة الوكيل بخصوص {coin}.")
 
                     # ── /findtrade ────────────────────────────
                     elif text == "/findtrade":
-                        send_admin("🔍 عم أفحص قائمة المراقبة وأستشير الوكيل...")
+                        send_admin("🔍 عم أفحص قائمة المراقبة وأقيّم المرشحين ببوابة المخاطر...")
                         try:
                             result = find_best_trade(client)
                             if result["found"]:
@@ -1756,17 +1754,10 @@ def find_best_trade(client, top_n: int = 8):
     top_candidates = scored[:top_n]
     checked_names = [s for _, s, _ in top_candidates]
 
-    # 🆚 مقارنة جماعية بطلب واحد بدل تقييم وحدة وحدة — الوكيل بيشوف كل
-    # المرشحين مع بعض ويختار الأقوى فعلياً، مش أول وحدة "مقبولة" بالترتيب.
+    # 🆚 مقارنة جماعية: بوابة المخاطر (risk_gate.py) بتقيّم كل المرشحين بنفس القواعد
+    # وبتختار الأعلى نقاطاً بين المقبولين، مش أول وحدة "مقبولة" بالترتيب.
     payload = [{"symbol": symbol, **ind} for _, symbol, ind in top_candidates]
-    verdict = ai_agent.compare_candidates(payload)
-
-    if verdict["source"] == "error":
-        return {
-            "found": False, "symbol": None,
-            "reason_ar": verdict["reason_ar"],
-            "indicators": None, "checked": checked_names,
-        }
+    verdict = risk_gate.compare_candidates(payload)
 
     if verdict["approved"] and verdict["symbol"]:
         chosen_ind = next((ind for _, s, ind in top_candidates if s == verdict["symbol"]), None)
@@ -2639,7 +2630,7 @@ def api_ask_agent():
     if ind is None:
         return jsonify({"error": f"تعذر جلب بيانات {coin} — تأكد إنها موجودة على بينانس"}), 404
 
-    verdict = ai_agent.evaluate_signal(symbol, ind)
+    verdict = risk_gate.evaluate_signal(symbol, ind)
     return jsonify({
         "ok": True,
         "symbol": symbol,
@@ -3329,19 +3320,16 @@ def run_bot():
                                 watch_list.discard(symbol)
                                 continue
 
-                            # 🤖 وكيل Gemini — استشارة أخيرة قبل تنفيذ الشراء فعلياً.
-                            # يعتمد على المؤشرات نفسها اللي ولّدت الإشارة (Volume, MFI, ADX,
-                            # Bollinger, VWAP, Momentum). لو رفض أو تعذر الوصول له (Fail-Closed)
-                            # → نحرر الحجز ونجرب المرشح التالي بدل ما نوقف الدورة كلها.
-                            agent_verdict = ai_agent.evaluate_signal(symbol, signal_indicators)
+                            # 🛡️ بوابة المخاطر (risk_gate.py) — فحص أخير بالكود قبل تنفيذ الشراء.
+                            # قواعد ثابتة على المؤشرات اللي ولّدت الإشارة (Volume, MFI, ADX,
+                            # Bollinger, Volume Profile, Supertrend). لو رفضت → نحرر الحجز
+                            # ونجرب المرشح التالي بدل ما نوقف الدورة كلها.
+                            agent_verdict = risk_gate.evaluate_signal(symbol, signal_indicators)
                             coin_name_agent = symbol.replace("USDT", "")
-                            if agent_verdict["source"] == "gemini":
-                                if agent_verdict["approved"]:
-                                    send_telegram(f"✅ وكيل Gemini وافق على صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
-                                else:
-                                    send_telegram(f"⛔ وكيل Gemini رفض صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
-                            elif agent_verdict["source"] == "error":
-                                send_telegram(f"⚠️ تم تجاوز صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
+                            if agent_verdict["approved"]:
+                                send_telegram(f"✅ بوابة المخاطر وافقت على صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
+                            else:
+                                send_telegram(f"⛔ بوابة المخاطر رفضت صفقة {coin_name_agent}: {agent_verdict['reason_ar']}")
 
                             if not agent_verdict["approved"]:
                                 get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)
