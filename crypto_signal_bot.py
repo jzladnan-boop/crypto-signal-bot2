@@ -831,9 +831,10 @@ def telegram_command_listener(client):
                             if ind is None:
                                 send_admin(f"❌ تعذر جلب بيانات {coin} — تأكد إنها موجودة على بينانس وبصيغة صحيحة (مثلاً: /ask BTC).")
                             else:
-                                verdict = risk_gate.evaluate_signal(symbol, ind)
+                                verdict = ask_verdict(symbol, ind)
                                 icon = "✅" if verdict["approved"] else "⛔"
-                                send_admin(f"{icon} تقييم بوابة المخاطر لـ {coin} هلق: {verdict['reason_ar']}")
+                                who = "رأي الوكيل" if verdict.get("source") == "gemini" else "تقييم"
+                                send_admin(f"{icon} {who} بـ {coin} هلق: {verdict['reason_ar']}")
                         except Exception as e:
                             log.error(f"❌ /ask {coin}: {e}")
                             send_admin(f"❌ صار خطأ أثناء استشارة الوكيل بخصوص {coin}.")
@@ -1637,6 +1638,20 @@ def update_symbol_correlations(client, symbols):
 # ──────────────────────────────────────────────
 # 🔍 بحث فوري عن أفضل صفقة متاحة الآن (يدوي — تيليجرام /findtrade والتطبيق)
 # ──────────────────────────────────────────────
+def ask_verdict(symbol, ind):
+    """
+    رأي "سؤال عن عملة" (تطبيق + تيليغرام): Gemini أولاً (شرح واستشارة).
+    لو تعذر الوصول له أو الوكيل مطفي → نرجع تقييم بوابة المخاطر بدل رسالة خطأ،
+    مع توضيح السبب بنص الرد. (قرارات الشراء الفعلية بتمر على البوابة بس، مو Gemini.)
+    """
+    verdict = ai_agent.evaluate_signal(symbol, ind)
+    if verdict.get("source") == "gemini":
+        return verdict
+    gate = risk_gate.evaluate_signal(symbol, ind)
+    gate["reason_ar"] = "تعذر الوصول لـ Gemini، هاد تقييم بوابة المخاطر: " + gate["reason_ar"]
+    return gate
+
+
 # ──────────────────────────────────────────────
 # 🔍 إعدادات "ابحث عن صفقة" (قيم تقديرية مني — مو مضبوطة على بيانات، عدّلها هون)
 # ──────────────────────────────────────────────
@@ -2630,7 +2645,7 @@ def api_ask_agent():
     if ind is None:
         return jsonify({"error": f"تعذر جلب بيانات {coin} — تأكد إنها موجودة على بينانس"}), 404
 
-    verdict = risk_gate.evaluate_signal(symbol, ind)
+    verdict = ask_verdict(symbol, ind)
     return jsonify({
         "ok": True,
         "symbol": symbol,
