@@ -138,11 +138,11 @@ def evaluate_signal(symbol: str, ind: dict) -> dict:
         approved = False
     elif score >= MIN_APPROVE_SCORE:
         top = [t for p, t in sorted(notes, key=lambda x: -x[0]) if p > 0][:3]
-        reason = "موافقة: " + ("، ".join(top) if top else "المؤشرات متوافقة بشكل معقول") + f" (نقاط {score})."
+        reason = "موافقة: " + ("، ".join(top) if top else "المؤشرات متوافقة بشكل معقول") + f" (نقاط \u200e{score})."
         approved = True
     else:
         neg = [t for p, t in sorted(notes, key=lambda x: x[0]) if p < 0][:3]
-        reason = "رفض: الصورة ما بتدعم الدخول بوضوح — " + ("، ".join(neg) if neg else "نقاط غير كافية") + f" (نقاط {score})."
+        reason = "رفض: الصورة ما بتدعم الدخول بوضوح — " + ("، ".join(neg) if neg else "نقاط غير كافية") + f" (نقاط \u200e{score})."
         approved = False
 
     return {
