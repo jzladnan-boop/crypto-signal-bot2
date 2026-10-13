@@ -2871,6 +2871,37 @@ def handle_watch_chat(message: str):
         _pending_watch = None
         return "تم إلغاء طلب المراقبة، ما فعّلت شي."
 
+    # 🛑 إلغاء المراقبات النشطة من المحادثة: "الغي مراقبة STX" أو "الغي كل المراقبات" (آمن — ما بيصرف فلوس)
+    if "مراقب" in message and re.search(r"(?:الغ|ألغ|إلغ|وقف)", message) and "اشتر" not in message:
+        active = _watch_orders.active()
+        if not active:
+            return "ما في مراقبات نشطة هلق لألغيها."
+        targets = _detect_symbols_in_text(message)
+        if targets:
+            done = [x.replace("USDT", "") for x in targets if _watch_orders.cancel(x)]
+            missed = [x.replace("USDT", "") for x in targets if x.replace("USDT", "") not in done]
+            lines = []
+            if done:
+                lines.append("✅ ألغيت مراقبة: " + "، ".join(done) + ".")
+            if missed:
+                lines.append("ℹ️ ما كان في مراقبة نشطة على: " + "، ".join(missed) + ".")
+            return "\n".join(lines)
+        names = [o["symbol"] for o in active]
+        for sym in names:
+            _watch_orders.cancel(sym)
+        return "✅ ألغيت كل المراقبات النشطة: " + "، ".join(x.replace("USDT", "") for x in names) + "."
+
+    # 📋 عرض المراقبات النشطة: "شو المراقبات" / "المراقبات النشطة"
+    if re.search(r"المراقبات|مراقباتي|شو.*(?:عم )?تراقب", message) and "اشتر" not in message:
+        active = _watch_orders.active()
+        if not active:
+            return "ما في مراقبات نشطة هلق."
+        lines = ["👀 المراقبات النشطة:"]
+        for o in active:
+            left_h = max(0, (o["expires"] - now) / 3600)
+            lines.append(f"• {o['symbol'].replace('USDT', '')} (باقي {left_h:.1f} ساعة)")
+        return "\n".join(lines)
+
     if "راقب" in message and "اشتر" in message and not _WATCH_NEGATION.search(message):
         symbols = _detect_symbols_in_text(message)
         if not symbols:
