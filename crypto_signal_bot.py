@@ -31,6 +31,7 @@ from flask import Flask, request, jsonify, session, send_from_directory
 from functools import wraps
 from market_regime import MarketRegimeDetector
 from squeeze_breakout import SqueezeBreakout
+from watch_orders import WatchOrders
 from portfolio_manager import get_portfolio_manager
 
 _PORTFOLIO_OWNER = "main_bot"
@@ -268,6 +269,7 @@ current_strategy   = "rsi"   # 🎯 الاستراتيجية الأساسية ا
 
 STRATEGY_LABELS = {
     "rsi"        : "RSI العادي",
+    "watch_order": "مراقبة من المحادثة",
     "stoch_rsi"  : "Stochastic RSI",   # قديم — محفوظ لعرض سجلات الصفقات التاريخية فقط
     # ⬅️ الاستراتيجيات الموازية المستقلة (كل وحدة عندها Thread وصفقة خاصة فيها،
     # منفصلة عن current_strategy) — مضافة هون كمان حتى أي سجل صفقة (من profit_log
@@ -302,6 +304,13 @@ _last_correlation_update = 0   # timestamp لآخر تحديث لتصنيف ال
 SQUEEZE_BREAKOUT_ENABLED = False
 SQUEEZE_BREAKOUT_USDT_PER_TRADE = TRADE_AMOUNT  # ✅ إصلاح: مربوط بحجم الصفقة الأساسي
 _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحيدة
+
+# ──────────────────────────────────────────────
+# 👀 أوامر المراقبة من المحادثة (watch_orders.py)
+# ──────────────────────────────────────────────
+_watch_orders = None
+_pending_watch = None           # طلب مراقبة بانتظار "تأكيد" من المستخدم: {"symbols": [...], "expires": ts}
+WATCH_PENDING_TTL = 600         # مهلة التأكيد: 10 دقايق
 
 # ──────────────────────────────────────────────
 # Logging
@@ -1112,6 +1121,44 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
+                    # ── /watch AVAX SOL (مراقبة مباشرة بالأمر — أمر صريح من الأدمن) ──
+                    elif text.startswith("/watch ") and not text.startswith("/watch_"):
+                        syms = _detect_symbols_in_text(text.replace("/watch ", "", 1))
+                        if not syms:
+                            send_admin("❌ مثال: /watch AVAX SOL")
+                        elif _watch_orders is None:
+                            send_admin("⚠️ نظام المراقبة لسا ما اشتغل")
+                        else:
+                            added, ignored = _watch_orders.add(syms[:5])
+                            msg = ""
+                            if added:
+                                msg += "✅ فعّلت مراقبة: " + "، ".join(x.replace("USDT", "") for x in added) + " (24 ساعة، شراء مرة وحدة عند تحقق الدخول)\n"
+                            for sym, why in ignored:
+                                msg += f"ℹ️ {sym.replace('USDT', '')}: {why}\n"
+                            send_admin(msg.strip())
+
+                    # ── /watch_list ──
+                    elif text == "/watch_list":
+                        orders = _watch_orders.active() if _watch_orders else []
+                        if not orders:
+                            send_admin("👀 ما في مراقبات نشطة")
+                        else:
+                            lines = ["👀 <b>المراقبات النشطة:</b>"]
+                            for o in orders:
+                                left_h = max(0, (o["expires"] - time.time()) / 3600)
+                                why = f" — آخر فحص: {o['last_reason']}" if o.get("last_reason") else ""
+                                lines.append(f"• {o['symbol'].replace('USDT', '')} (باقي {left_h:.1f} س){why}")
+                            send_admin("\n".join(lines))
+
+                    # ── /watch_cancel AVAX ──
+                    elif text.startswith("/watch_cancel "):
+                        syms = _detect_symbols_in_text(text.replace("/watch_cancel ", "", 1))
+                        if not syms or _watch_orders is None:
+                            send_admin("❌ مثال: /watch_cancel AVAX")
+                        else:
+                            done = [x.replace("USDT", "") for x in syms if _watch_orders.cancel(x)]
+                            send_admin("✅ ألغيت مراقبة: " + "، ".join(done) if done else "ℹ️ ما في مراقبة نشطة على هالعملة")
+
                     # ── /atr_status ─────────────────────────────
                     elif text == "/atr_status":
                         with _lock:
@@ -1351,6 +1398,10 @@ def telegram_command_listener(client):
                             "/set_squeeze_breakout on — تشغيل (صفقات حقيقية 15 USDT، سلة العملات، فريم 30 دقيقة)\n"
                             "/set_squeeze_breakout off — إيقاف (أي صفقة مفتوحة بتضل تكمل لحد ما تقفل عادي)\n"
                             "/squeeze_breakout_status — عرض الحالة والصفقة المفتوحة إن وجدت\n\n"
+                            "<b>👀 المراقبة (شراء عند دخول ممتاز):</b>\n"
+                            "/watch AVAX SOL — مراقبة مباشرة (أو من محادثة الوكيل: \"راقب AVAX واشتري\" ثم تأكيد)\n"
+                            "/watch_list — المراقبات النشطة\n"
+                            "/watch_cancel AVAX — إلغاء مراقبة\n\n"
                             "<b>التقارير:</b>\n"
                             "/config — عرض كل الإعدادات الحالية\n"
                             "/push_status — عدد الأجهزة المسجلة لاستقبال Push Notifications\n"
@@ -1687,6 +1738,24 @@ def _find_trade_candidates(client):
     return base + extra
 
 
+def passes_find_trade_filter(ind):
+    """
+    الفلتر الصارم بالكود لـ "ابحث عن صفقة" — وبنفسه بيعتمد دخول أوامر المراقبة من المحادثة:
+    MFI < FIND_TRADE_MFI_MAX، والسعر فوق SMA50، والفوليوم > المتوسط × FIND_TRADE_VOLUME_MULT.
+    أي بيانات ناقصة = ما تحقق.
+    """
+    if not ind:
+        return False
+    mfi, sma50, price = ind.get("mfi"), ind.get("sma50"), ind.get("price")
+    volume, volume_mean = ind.get("volume"), ind.get("volume_mean")
+    return bool(
+        mfi is not None and mfi < FIND_TRADE_MFI_MAX
+        and sma50 is not None and price is not None and price > sma50
+        and volume is not None and volume_mean is not None and volume_mean > 0
+        and volume > volume_mean * FIND_TRADE_VOLUME_MULT
+    )
+
+
 def find_best_trade(client, top_n: int = 8):
     """
     يفحص قائمة "المراقبة المكثفة" الحالية (watch_list) + أعلى عملات السيولة
@@ -1739,18 +1808,7 @@ def find_best_trade(client, top_n: int = 8):
         # ولا توصل حتى لمرحلة "أقوى المرشحين" — الوكيل ما بيشوفها إطلاقاً.
         if ind:
             fetched_count += 1
-            mfi         = ind.get("mfi")
-            sma50       = ind.get("sma50")
-            price       = ind.get("price")
-            volume      = ind.get("volume")
-            volume_mean = ind.get("volume_mean")
-            passes_hard_filter = (
-                mfi is not None and mfi < FIND_TRADE_MFI_MAX
-                and sma50 is not None and price is not None and price > sma50
-                and volume is not None and volume_mean is not None and volume_mean > 0
-                and volume > volume_mean * FIND_TRADE_VOLUME_MULT
-            )
-            if passes_hard_filter:
+            if passes_find_trade_filter(ind):
                 scored.append((ind.get("momentum_score", 0.0), symbol, ind))
         time.sleep(0.35)
 
@@ -2712,6 +2770,128 @@ def _detect_symbol_in_text(text: str):
     return None
 
 
+def _detect_symbols_in_text(text: str):
+    """كل العملات المذكورة بالنص (بنفس منطق _detect_symbol_in_text لكن بترجع القائمة كاملة بدون تكرار)."""
+    words = re.findall(r"[A-Za-z]{2,15}", text.upper())
+    with _lock:
+        symbols_snapshot = list(SYMBOLS)
+    symbol_bases = {s[:-4]: s for s in symbols_snapshot if s.endswith("USDT")}
+    found = []
+    for w in words:
+        base = w[:-4] if w.endswith("USDT") else w
+        sym = symbol_bases.get(base)
+        if sym and sym not in found:
+            found.append(sym)
+    return found
+
+
+def _current_market_regime():
+    label = _regime_detector.get_regime_label() if _regime_detector else "SIDEWAYS"
+    try:
+        return MarketRegime(label)
+    except ValueError:
+        return MarketRegime.SIDEWAYS
+
+
+def _watch_entry_check(symbol):
+    """شرط دخول أوامر المراقبة = نفس شروط "ابحث عن صفقة": الفلتر الصارم + موافقة بوابة المخاطر."""
+    if _binance_client is None or is_api_blocked():
+        return False, "بينانس غير متاح حالياً", None
+    ind = get_indicators(_binance_client, symbol)
+    if not ind:
+        return False, "تعذر جلب المؤشرات", None
+    if not passes_find_trade_filter(ind):
+        return False, "فلتر الدخول ما تحقق (MFI / SMA50 / الفوليوم)", ind
+    verdict = risk_gate.evaluate_signal(symbol, ind)
+    return verdict["approved"], verdict["reason_ar"], ind
+
+
+def _watch_open(symbol, ind, reason):
+    """ينفّذ شراء أمر مراقبة تحقق شرطه، بنفس مسار الاستراتيجيات (حدود/رصيد/حجز/ستوب/Trailing)."""
+    with _lock:
+        enabled = trading_enabled
+        already_open = symbol in open_trades
+    if already_open:
+        return "skip", "عندك صفقة مفتوحة على هالعملة أصلاً"
+    if not enabled:
+        return "wait", "التداول متوقف حالياً"
+    if is_api_blocked():
+        return "wait", "حظر مؤقت من بينانس"
+    if count_active_trades() >= MAX_TRADES:
+        return "wait", f"وصلنا للحد الأقصى للصفقات النشطة ({MAX_TRADES})"
+    try:
+        balance = float(_binance_client.get_asset_balance(asset="USDT")["free"])
+    except Exception as e:
+        log.error(f"❌ رصيد USDT (مراقبة): {e}")
+        return "wait", "تعذر قراءة الرصيد"
+    if balance < (TRADE_AMOUNT + RESERVE_USDT):
+        return "wait", f"الرصيد غير كافٍ ({balance:.2f} USDT)"
+    if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
+        return "wait", "العملة محجوزة لاستراتيجية تانية حالياً"
+    res = open_main_position(
+        _binance_client, symbol, ind.get("atr"), False, "watch_order", _current_market_regime(),
+        f"👀 أمر مراقبة من المحادثة — {reason}",
+    )
+    if res:
+        return "bought", "تم الشراء"
+    return "wait", "فشل تنفيذ الشراء (راجع Logs)"
+
+
+_WATCH_CONFIRM_WORDS = {"تأكيد", "تاكيد", "اكد", "أكد", "أكّد", "confirm"}
+_WATCH_CANCEL_WORDS = {"إلغاء", "الغاء", "الغي", "ألغي", "لا", "cancel"}
+_WATCH_NEGATION = re.compile(r"(?:لا|ما|بدون)\s*(?:ما\s*)?[تا]?شتر")
+
+
+def handle_watch_chat(message: str):
+    """
+    يعالج أوامر المراقبة داخل المحادثة العامة. يرجع نص الرد، أو None لو الرسالة مو أمر مراقبة
+    (فتكمل لـ Gemini عادي). التفعيل مشروط بكلمة "تأكيد" صريحة بعد عرض الفهم بالتفصيل.
+    الفهم بالكود (مو بالنموذج اللغوي) لأنه بيحرك فلوس حقيقية.
+    """
+    global _pending_watch
+    if _watch_orders is None:
+        return None
+    norm = re.sub(r"[\s\.\!\،\,\?؟]+", " ", message).strip().lower()
+    now = time.time()
+    if _pending_watch and now > _pending_watch["expires"]:
+        _pending_watch = None
+
+    if _pending_watch and norm in _WATCH_CONFIRM_WORDS:
+        symbols = _pending_watch["symbols"]
+        _pending_watch = None
+        added, ignored = _watch_orders.add(symbols)
+        lines = []
+        if added:
+            names = "، ".join(x.replace("USDT", "") for x in added)
+            lines.append(f"✅ فعّلت المراقبة على: {names}. بدخل أي عملة منهم لما تتحقق شروط الدخول، وبنبهك على تيليغرام.")
+        for sym, why in ignored:
+            lines.append(f"ℹ️ {sym.replace('USDT', '')}: {why}.")
+        return "\n".join(lines) or "ما فعّلت شي."
+    if _pending_watch and norm in _WATCH_CANCEL_WORDS:
+        _pending_watch = None
+        return "تم إلغاء طلب المراقبة، ما فعّلت شي."
+
+    if "راقب" in message and "اشتر" in message and not _WATCH_NEGATION.search(message):
+        symbols = _detect_symbols_in_text(message)
+        if not symbols:
+            return "فهمت إنك بدك مراقبة وشراء، بس ما قدرت أحدد العملات. اكتب الرمز مثل AVAX أو SOL (من عملات القائمة اللي بيراقبها البوت)."
+        symbols = symbols[:5]
+        _pending_watch = {"symbols": symbols, "expires": now + WATCH_PENDING_TTL}
+        names = " و".join(x.replace("USDT", "") for x in symbols)
+        with _lock:
+            amount = TRADE_AMOUNT
+        return (
+            f"فهمت: راقب {names} (زوج USDT)، وأشتري عملة منهم بس لما يتحقق الدخول بنفس شروط \"ابحث عن صفقة\" "
+            f"(MFI تحت {FIND_TRADE_MFI_MAX}، السعر فوق SMA50، الفوليوم أعلى من المتوسط بـ {FIND_TRADE_VOLUME_MULT} مرة، "
+            f"وبوابة المخاطر توافق).\n"
+            f"• مبلغ كل صفقة: {amount}$ (إعداد حجم الصفقة الحالي) مع نفس الستوب والـ Trailing بباقي الاستراتيجيات.\n"
+            f"• كل عملة بتنشترى مرة وحدة وبتنتهي مراقبتها، والمراقبة بتنتهي لحالها بعد 24 ساعة بدون شراء.\n"
+            f"• بتتقيّد بالحد الأقصى للصفقات والرصيد، ولو التداول متوقف بتنتظر.\n"
+            f"اكتب «تأكيد» لتفعيل المراقبة، أو «إلغاء». (الطلب بيبطل بعد 10 دقايق)"
+        )
+    return None
+
+
 def _build_chat_context():
     """
     يبني ملخص نصي عن حالة البوت الحالية وسجل صفقاته — يُستخدم كسياق خلفية
@@ -2854,6 +3034,11 @@ def api_chat_agent():
             if role in ("user", "model") and text:
                 history.append({"role": role, "text": text})
 
+    # 👀 أوامر المراقبة (راقب ... واشتري) — تُعالج بالكود مع تأكيد صريح، مو بالنموذج اللغوي
+    watch_reply = handle_watch_chat(message)
+    if watch_reply is not None:
+        return jsonify({"ok": True, "reply": watch_reply})
+
     context = _build_chat_context()
 
     # 🆕 دعم/مقاومة: لو المستخدم ذكر اسم عملة بالرسالة، نحسب مستويات دعم/مقاومة
@@ -2982,6 +3167,84 @@ def start_dashboard():
 # ──────────────────────────────────────────────
 # 🚀 البوت الرئيسي
 # ──────────────────────────────────────────────
+def open_main_position(client, symbol, atr_value, is_strict, strategy, market_regime,
+                       signal_info, momentum_line="", usdt_amount=None):
+    """
+    ينفّذ شراء صفقة بمسار البوت الأساسي بالضبط: شراء Market، ثم ستوب ATR (بحسب حالة السوق وسقف
+    صلب)، ونقطة تفعيل Trailing، وحفظ الصفقة بـ open_trades وإشعار تيليغرام.
+    (مستخرجة من حلقة الشراء الرئيسية كما هي عشان تستعملها أوامر المراقبة من المحادثة بنفس السلوك.)
+    مسؤولية المستدعي: حجز العملة بـ PortfolioManager والتحقق من الرصيد/الحد الأقصى/بوابة المخاطر.
+    ترجع بيانات الصفقة أو None لو فشل الشراء (ويحرر الحجز).
+    """
+    res = buy_market(client, symbol, usdt_amount if usdt_amount else TRADE_AMOUNT)
+    if res is None:
+        get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
+    if res:
+        res["trailing_active"] = False
+        res["highest_price"]   = res["entry_price"]
+        res["strict_mode"]     = is_strict
+
+        # 📐 صمام أمان ATR/SL: مرتبط بحالة السوق (BULL/BEAR/SIDEWAYS)، مع سقف
+        # صلب لا يتجاوز 3% مطلقًا. سقف Strict Mode تحديدًا يتبع مباشرة إعداد
+        # "حد الخسارة الثابت" (STOP_LOSS_PCT) اللي المستخدم متحكم فيه من التطبيق/تيليغرام،
+        # بدل رقم مبرمج بالكود — فيخفف الضربات تلقائيًا حسب حالة السوق فوق هالسقف.
+        with _lock:
+            multiplier = ATR_MULTIPLIER
+            strict_cap_pct = STOP_LOSS_PCT * 100
+        if atr_value:
+            sl_info = atr_guard.compute_stop_loss(
+                entry_price=res["entry_price"],
+                raw_atr_value=atr_value,
+                market_regime=market_regime,
+                strict_mode=is_strict,
+                atr_sl_multiple=multiplier,
+                strict_cap_pct=strict_cap_pct,
+            )
+            stop_price = sl_info["sl_price"]
+            used_atr   = atr_value
+            stop_method = f"ATR×{sl_info['applied_atr_multiplier']}"
+            if sl_info["capped"]:
+                stop_method += " (سقف صلب)"
+        else:
+            # لا يوجد ATR متاح: احتياطي بنسبة ثابتة، مقيّد بنفس السقف الصلب لضمان الاتساق
+            fallback_pct = min(STOP_LOSS_PCT * 100, atr_guard.HARD_CAP_PCT) / 100
+            stop_price   = res["entry_price"] * (1 - fallback_pct)
+            used_atr     = None
+            stop_method  = "ثابت (سقف صلب)"
+
+        res["stop_loss"] = round(stop_price, 8)
+        res["atr"]       = used_atr   # None لو استخدمنا الاحتياطي الثابت
+
+        # 🧠 مضاعفة نقطة تفعيل Trailing (تقبّليات أوسع) بوضع Strict Mode فقط
+        tp_multiplier = atr_guard.get_take_profit_multiplier(is_strict)
+        res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
+        # ⬅️ نفس المضاعفة، بس بمصطلح مضاعف ATR (يُستخدم أولوية لو ATR متاح وقت الفحص)
+        res["trail_activate_atr_multiple"] = round(TRAIL_ACTIVATE_ATR_MULTIPLE * tp_multiplier, 4)
+
+        # ⬅️ بطلب المستخدم: نسجّل اسم الاستراتيجية الفعّالة وقت الشراء صراحة
+        # بالصفقة نفسها — مش نعتمد بس على current_strategy وقت العرض/الإغلاق،
+        # لأنها ممكن تكون تبدّلت (تلقائياً أو يدوياً) من وقت فتح الصفقة لوقت إغلاقها.
+        res["strategy"] = strategy
+
+        open_trades[symbol]    = res
+        save_trades()
+        watch_list.discard(symbol)
+
+        coin_name   = symbol.replace("USDT", "")
+        sl_value    = res["stop_loss"]
+        strict_line = "\n⚠️ Strict Mode: تاريخ ضعيف/غير مختبر — ATR مخفّض وتقبّل مضاعف" if is_strict else ""
+        send_telegram(
+            f"🟢 <b>شراء {coin_name}</b>\n"
+            f"{signal_info}\n"
+            f"{momentum_line}"
+            f"💵 السعر: {res['entry_price']}\n"
+            f"🛡️ Stop Loss ({stop_method}): {sl_value}"
+            f"{strict_line}\n"
+            f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}"
+        )
+    return res
+
+
 def run_bot():
     global consecutive_losses, pause_until, trading_enabled
     global _binance_client, _regime_detector, _last_correlation_update
@@ -3043,6 +3306,14 @@ def run_bot():
         daemon=True,
     )
     squeeze_breakout_thread.start()
+
+    # ── 👀 أوامر المراقبة من المحادثة (راقب ... واشتري) — بعد تأكيد صريح ──
+    global _watch_orders
+    _watch_orders = WatchOrders(
+        os.path.join(DATA_DIR, "watch_orders.json"),
+        check_fn=_watch_entry_check, open_fn=_watch_open, notify_fn=send_telegram,
+    )
+    threading.Thread(target=_watch_orders.run, daemon=True).start()
 
     last_heartbeat = time.time()
     last_scan      = 0
@@ -3351,73 +3622,9 @@ def run_bot():
                                 watch_list.discard(symbol)
                                 continue
 
-                            res = buy_market(client, symbol, TRADE_AMOUNT)
-                            if res is None:
-                                get_portfolio_manager().release(symbol, _PORTFOLIO_OWNER)   # ما اشترينا فعلياً — نحرر الحجز
-                            if res:
-                                res["trailing_active"] = False
-                                res["highest_price"]   = res["entry_price"]
-                                res["strict_mode"]     = is_strict
-
-                                # 📐 صمام أمان ATR/SL: مرتبط بحالة السوق (BULL/BEAR/SIDEWAYS)، مع سقف
-                                # صلب لا يتجاوز 3% مطلقًا. سقف Strict Mode تحديدًا يتبع مباشرة إعداد
-                                # "حد الخسارة الثابت" (STOP_LOSS_PCT) اللي المستخدم متحكم فيه من التطبيق/تيليغرام،
-                                # بدل رقم مبرمج بالكود — فيخفف الضربات تلقائيًا حسب حالة السوق فوق هالسقف.
-                                with _lock:
-                                    multiplier = ATR_MULTIPLIER
-                                    strict_cap_pct = STOP_LOSS_PCT * 100
-                                if atr_value:
-                                    sl_info = atr_guard.compute_stop_loss(
-                                        entry_price=res["entry_price"],
-                                        raw_atr_value=atr_value,
-                                        market_regime=market_regime,
-                                        strict_mode=is_strict,
-                                        atr_sl_multiple=multiplier,
-                                        strict_cap_pct=strict_cap_pct,
-                                    )
-                                    stop_price = sl_info["sl_price"]
-                                    used_atr   = atr_value
-                                    stop_method = f"ATR×{sl_info['applied_atr_multiplier']}"
-                                    if sl_info["capped"]:
-                                        stop_method += " (سقف صلب)"
-                                else:
-                                    # لا يوجد ATR متاح: احتياطي بنسبة ثابتة، مقيّد بنفس السقف الصلب لضمان الاتساق
-                                    fallback_pct = min(STOP_LOSS_PCT * 100, atr_guard.HARD_CAP_PCT) / 100
-                                    stop_price   = res["entry_price"] * (1 - fallback_pct)
-                                    used_atr     = None
-                                    stop_method  = "ثابت (سقف صلب)"
-
-                                res["stop_loss"] = round(stop_price, 8)
-                                res["atr"]       = used_atr   # None لو استخدمنا الاحتياطي الثابت
-
-                                # 🧠 مضاعفة نقطة تفعيل Trailing (تقبّليات أوسع) بوضع Strict Mode فقط
-                                tp_multiplier = atr_guard.get_take_profit_multiplier(is_strict)
-                                res["trail_activate_pct"] = round(TRAIL_ACTIVATE_PCT * tp_multiplier, 6)
-                                # ⬅️ نفس المضاعفة، بس بمصطلح مضاعف ATR (يُستخدم أولوية لو ATR متاح وقت الفحص)
-                                res["trail_activate_atr_multiple"] = round(TRAIL_ACTIVATE_ATR_MULTIPLE * tp_multiplier, 4)
-
-                                # ⬅️ بطلب المستخدم: نسجّل اسم الاستراتيجية الفعّالة وقت الشراء صراحة
-                                # بالصفقة نفسها — مش نعتمد بس على current_strategy وقت العرض/الإغلاق،
-                                # لأنها ممكن تكون تبدّلت (تلقائياً أو يدوياً) من وقت فتح الصفقة لوقت إغلاقها.
-                                res["strategy"] = strategy
-
-                                open_trades[symbol]    = res
-                                save_trades()
-                                watch_list.discard(symbol)
-
-                                coin_name   = symbol.replace("USDT", "")
-                                sl_value    = res["stop_loss"]
-                                strict_line = "\n⚠️ Strict Mode: تاريخ ضعيف/غير مختبر — ATR مخفّض وتقبّل مضاعف" if is_strict else ""
-                                momentum_line = f"🏆 زخم: {momentum_score:.2f}\n" if len(ranked) > 1 else ""
-                                send_telegram(
-                                    f"🟢 <b>شراء {coin_name}</b>\n"
-                                    f"{signal_info}\n"
-                                    f"{momentum_line}"
-                                    f"💵 السعر: {res['entry_price']}\n"
-                                    f"🛡️ Stop Loss ({stop_method}): {sl_value}"
-                                    f"{strict_line}\n"
-                                    f"💼 صفقات نشطة: {count_active_trades()}/{MAX_TRADES} | إجمالي مفتوحة: {len(open_trades)}"
-                                )
+                            momentum_line = f"🏆 زخم: {momentum_score:.2f}\n" if len(ranked) > 1 else ""
+                            open_main_position(client, symbol, atr_value, is_strict, strategy,
+                                               market_regime, signal_info, momentum_line)
                         else:
                             log.warning(f"⚠️ رصيد غير كافٍ: {usdt_balance:.2f} USDT")
                             break   # الرصيد مش كافي أصلاً، ما فيه داعي نكمل نفحص باقي المرشحين
