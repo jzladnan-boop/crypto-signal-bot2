@@ -3044,8 +3044,7 @@ def api_chat_agent():
     # 🆕 دعم/مقاومة: لو المستخدم ذكر اسم عملة بالرسالة، نحسب مستويات دعم/مقاومة
     # حقيقية (Swing Highs/Lows فعلية من الشموع)، مش خط مرسوم أو تخمين من الموديل.
     if _binance_client:
-        detected_symbol = _detect_symbol_in_text(message)
-        if detected_symbol:
+        for detected_symbol in _detect_symbols_in_text(message)[:3]:   # لحد 3 عملات بالرسالة الواحدة
             sr = get_support_resistance_for_symbol(_binance_client, detected_symbol)
             if sr:
                 support_txt = "; ".join(f"{s['level']} (لمسات: {s['touches']})" for s in sr["support"]) or "لا يوجد مستوى دعم واضح بالنطاق المفحوص"
