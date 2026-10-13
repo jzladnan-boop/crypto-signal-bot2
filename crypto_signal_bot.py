@@ -32,6 +32,7 @@ from functools import wraps
 from market_regime import MarketRegimeDetector
 from squeeze_breakout import SqueezeBreakout
 from watch_orders import WatchOrders
+from radar import Radar
 from portfolio_manager import get_portfolio_manager
 
 _PORTFOLIO_OWNER = "main_bot"
@@ -309,6 +310,14 @@ _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحي
 # 👀 أوامر المراقبة من المحادثة (watch_orders.py)
 # ──────────────────────────────────────────────
 _watch_orders = None
+
+# ──────────────────────────────────────────────
+# 📡 رادار الصاعدين المبكر (radar.py) — تنبيهات + تتبع افتراضي، بدون شراء
+# ──────────────────────────────────────────────
+RADAR_ENABLED = True
+_radar = None
+RADAR_VOL_RATIO = 2.5          # قفزة فوليوم: 2.5× متوسط آخر 20 شمعة (تقديري)
+RADAR_MFI_MAX = 85             # بوابة أخف: رفض لو MFI فوق هالرقم
 _pending_watch = None           # طلب مراقبة بانتظار "تأكيد" من المستخدم: {"symbols": [...], "expires": ts}
 WATCH_PENDING_TTL = 600         # مهلة التأكيد: 10 دقايق
 
@@ -432,6 +441,7 @@ def save_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global RADAR_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -452,6 +462,7 @@ def save_settings():
                 "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
                 "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
+                "radar_enabled": RADAR_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -463,6 +474,7 @@ def load_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global RADAR_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     if not os.path.exists(SETTINGS_FILE):
         return
@@ -503,6 +515,7 @@ def load_settings():
         TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
         TRAIL_ACTIVATE_ATR_MULTIPLE = s.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
+        RADAR_ENABLED = s.get("radar_enabled", RADAR_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -770,6 +783,7 @@ def telegram_command_listener(client):
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global RADAR_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
@@ -1121,6 +1135,21 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
+                    # ── /radar_report (أمر واحد: نتائج الرادار العامة) ──
+                    elif text == "/radar_report":
+                        send_admin(_radar.report() if _radar else "⚠️ الرادار لسا ما اشتغل")
+
+                    # ── /set_radar on|off (تشغيل/إيقاف تنبيهات الرادار — التتبع بيكمّل اللي بدأ) ──
+                    elif text.startswith("/set_radar "):
+                        value = text.replace("/set_radar ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                RADAR_ENABLED = (value == "on")
+                            save_settings()
+                            send_admin("✅ رادار الصاعدين مفعّل (تنبيهات فقط، بدون شراء)" if RADAR_ENABLED else "❌ تم إيقاف تنبيهات الرادار (التتبع الجاري بيكمّل لحاله)")
+                        else:
+                            send_admin("❌ مثال: /set_radar on  أو  /set_radar off")
+
                     # ── /watch AVAX SOL (مراقبة مباشرة بالأمر — أمر صريح من الأدمن) ──
                     elif text.startswith("/watch ") and not text.startswith("/watch_"):
                         syms = _detect_symbols_in_text(text.replace("/watch ", "", 1))
@@ -1402,6 +1431,9 @@ def telegram_command_listener(client):
                             "/watch AVAX SOL — مراقبة مباشرة (أو من محادثة الوكيل: \"راقب AVAX واشتري\" ثم تأكيد)\n"
                             "/watch_list — المراقبات النشطة\n"
                             "/watch_cancel AVAX — إلغاء مراقبة\n\n"
+                            "<b>📡 رادار الصاعدين (تنبيهات فقط، بدون شراء):</b>\n"
+                            "/radar_report — نتائج الرادار العامة (متوسط النتيجة، الرابحة، الستوب، Trailing)\n"
+                            "/set_radar on|off — تشغيل/إيقاف التنبيهات\n\n"
                             "<b>التقارير:</b>\n"
                             "/config — عرض كل الإعدادات الحالية\n"
                             "/push_status — عدد الأجهزة المسجلة لاستقبال Push Notifications\n"
@@ -3197,6 +3229,82 @@ def start_dashboard():
 # ──────────────────────────────────────────────
 # 🚀 البوت الرئيسي
 # ──────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# 📡 دوال ربط الرادار بالبوت (radar.py) — قواعد الخروج هون نفسها اللي بتستعملها الصفقات الحقيقية
+# ──────────────────────────────────────────────
+def _radar_initial_stop(entry, atr):
+    """الستوب الأولي بنفس منطق open_main_position (ATR مع سقف صلب، أو نسبة ثابتة احتياطي)."""
+    with _lock:
+        multiplier = ATR_MULTIPLIER
+        strict_cap_pct = STOP_LOSS_PCT * 100
+    if atr:
+        info = atr_guard.compute_stop_loss(
+            entry_price=entry, raw_atr_value=atr, market_regime=_current_market_regime(),
+            strict_mode=False, atr_sl_multiple=multiplier, strict_cap_pct=strict_cap_pct,
+        )
+        return round(info["sl_price"], 8)
+    fallback_pct = min(STOP_LOSS_PCT * 100, atr_guard.HARD_CAP_PCT) / 100
+    return round(entry * (1 - fallback_pct), 8)
+
+
+def _radar_trigger(entry, atr):
+    """نقطة تفعيل الـ Trailing بنفس منطق حلقة إدارة الصفقات (ATR مع سقف TRAIL_TRIGGER_MAX_PCT)."""
+    if atr:
+        return min(entry + TRAIL_ACTIVATE_ATR_MULTIPLE * atr, entry * (1 + TRAIL_TRIGGER_MAX_PCT / 100))
+    return entry * (1 + TRAIL_ACTIVATE_PCT)
+
+
+def _radar_trail_stop(price, entry, atr):
+    """ستوب الـ Trailing: نفس compute_trail_stop الحقيقية (مسافة ATR بسقف، وقفل حد أدنى للربح)."""
+    return compute_trail_stop(price, {"atr": atr, "entry_price": entry})
+
+
+def _radar_klines(symbol, start_ms):
+    return _binance_client.get_klines(
+        symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, startTime=start_ms, limit=1000,
+    )
+
+
+def _radar_analyze(symbol):
+    """
+    فحص الرادار لعملة: قفزة فوليوم + متوسطات صاعدة + كسر أعلى قمة + بوابة مخاطر أخف.
+    يرجع {"ok": bool, ...} (الفحوصات الرخيصة أولاً عشان نوفّر طلبات بينانس).
+    """
+    klines = _binance_client.get_klines(symbol=symbol, interval=current_interval, limit=120)
+    if not klines or len(klines) < 100:
+        return {"ok": False}
+    highs = [float(k[2]) for k in klines]
+    closes = [float(k[4]) for k in klines]
+    vols = [float(k[5]) for k in klines]
+    mean_vol = sum(vols[-22:-2]) / 20
+    if mean_vol <= 0:
+        return {"ok": False}
+    vol_ratio = max(vols[-1], vols[-2]) / mean_vol          # آخر شمعتين (الأخيرة ممكن تكون لسا تتشكل)
+    if vol_ratio < RADAR_VOL_RATIO:
+        return {"ok": False}
+    ma7, ma25, ma99 = (sum(closes[-n:]) / n for n in (7, 25, 99))
+    if not (ma7 > ma25 > ma99):
+        return {"ok": False}
+    prev_high = max(highs[-22:-2])
+    if max(closes[-1], closes[-2]) <= prev_high:
+        return {"ok": False}
+    ind = get_indicators(_binance_client, symbol)
+    if not ind:
+        return {"ok": False}
+    price, bb_up, mfi = ind.get("price"), ind.get("bb_upper"), ind.get("mfi")
+    if price and bb_up and price > bb_up:
+        return {"ok": False, "reason": "فوق الحد العلوي لبولينجر (ممتد)"}
+    if mfi is not None and mfi > RADAR_MFI_MAX:
+        return {"ok": False, "reason": f"MFI مرتفع جداً ({mfi:.0f})"}
+    notes = [
+        f"متوسطات صاعدة: MA7 {ma7:g} > MA25 {ma25:g} > MA99 {ma99:g}",
+        f"كسر أعلى قمة بآخر 20 شمعة ({prev_high:g})",
+    ]
+    if mfi is not None:
+        notes.append(f"MFI {mfi:.0f}")
+    return {"ok": True, "ind": ind, "vol_ratio": vol_ratio, "notes": notes}
+
+
 def open_main_position(client, symbol, atr_value, is_strict, strategy, market_regime,
                        signal_info, momentum_line="", usdt_amount=None):
     """
@@ -3344,6 +3452,20 @@ def run_bot():
         check_fn=_watch_entry_check, open_fn=_watch_open, notify_fn=send_telegram,
     )
     threading.Thread(target=_watch_orders.run, daemon=True).start()
+
+    # ── 📡 رادار الصاعدين المبكر — تنبيهات + تتبع افتراضي (بدون شراء) ──
+    global _radar
+    _radar = Radar(
+        os.path.join(DATA_DIR, "radar_log.json"),
+        symbols_fn=lambda: list(SYMBOLS),
+        exclude_fn=lambda: set(open_trades.keys()),
+        tickers_fn=lambda: _binance_client.get_ticker(),
+        analyze_fn=_radar_analyze, klines_fn=_radar_klines,
+        initial_stop_fn=_radar_initial_stop, trigger_fn=_radar_trigger, trail_stop_fn=_radar_trail_stop,
+        notify_fn=send_telegram, blocked_fn=is_api_blocked,
+        enabled_fn=lambda: RADAR_ENABLED, amount_fn=lambda: TRADE_AMOUNT,
+    )
+    threading.Thread(target=_radar.run, daemon=True).start()
 
     last_heartbeat = time.time()
     last_scan      = 0
