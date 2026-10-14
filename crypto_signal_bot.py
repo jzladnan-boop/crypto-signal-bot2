@@ -271,6 +271,7 @@ current_strategy   = "rsi"   # 🎯 الاستراتيجية الأساسية ا
 STRATEGY_LABELS = {
     "rsi"        : "RSI العادي",
     "watch_order": "مراقبة من المحادثة",
+    "find_trade" : "ابحث عن صفقة (تلقائي)",
     "stoch_rsi"  : "Stochastic RSI",   # قديم — محفوظ لعرض سجلات الصفقات التاريخية فقط
     # ⬅️ الاستراتيجيات الموازية المستقلة (كل وحدة عندها Thread وصفقة خاصة فيها،
     # منفصلة عن current_strategy) — مضافة هون كمان حتى أي سجل صفقة (من profit_log
@@ -318,6 +319,16 @@ RADAR_ENABLED = True
 _radar = None
 RADAR_VOL_RATIO = 2.5          # قفزة فوليوم: 2.5× متوسط آخر 20 شمعة (تقديري)
 RADAR_MFI_MAX = 85             # بوابة أخف: رفض لو MFI فوق هالرقم
+
+# ──────────────────────────────────────────────
+# 🔍 استراتيجية "ابحث عن صفقة" المستقلة (تلقائية): بتفحص كل FIND_STRATEGY_INTERVAL_SECONDS
+# بنفس مرشحين وشروط "ابحث عن صفقة" بالضبط (فلتر MFI/SMA50/الفوليوم + بوابة المخاطر)
+# وبتشتري أحسن مرشح بنفس مسار البوت الأساسي. مطفية افتراضياً — /set_find_strategy on|off أو التطبيق.
+# ──────────────────────────────────────────────
+FIND_STRATEGY_ENABLED = False
+FIND_STRATEGY_INTERVAL_SECONDS = 900   # كل 15 دقيقة
+FIND_STRATEGY_MAX_OPEN = 2             # أقصى صفقات مفتوحة من هالاستراتيجية بنفس الوقت
+_find_strategy_last_scan = {"time": 0, "summary": "لسا ما فحصت"}
 _pending_watch = None           # طلب مراقبة بانتظار "تأكيد" من المستخدم: {"symbols": [...], "expires": ts}
 WATCH_PENDING_TTL = 600         # مهلة التأكيد: 10 دقايق
 
@@ -442,6 +453,7 @@ def save_settings():
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global RADAR_ENABLED
+    global FIND_STRATEGY_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -463,6 +475,7 @@ def save_settings():
                 "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
                 "radar_enabled": RADAR_ENABLED,
+                "find_strategy_enabled": FIND_STRATEGY_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -475,6 +488,7 @@ def load_settings():
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global RADAR_ENABLED
+    global FIND_STRATEGY_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     if not os.path.exists(SETTINGS_FILE):
         return
@@ -516,6 +530,7 @@ def load_settings():
         TRAIL_ACTIVATE_ATR_MULTIPLE = s.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
         RADAR_ENABLED = s.get("radar_enabled", RADAR_ENABLED)
+        FIND_STRATEGY_ENABLED = s.get("find_strategy_enabled", FIND_STRATEGY_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -784,6 +799,7 @@ def telegram_command_listener(client):
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global RADAR_ENABLED
+    global FIND_STRATEGY_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
@@ -1150,6 +1166,37 @@ def telegram_command_listener(client):
                         else:
                             send_admin("❌ مثال: /set_radar on  أو  /set_radar off")
 
+                    # ── /set_find_strategy on|off (استراتيجية "ابحث عن صفقة" التلقائية — صفقات حقيقية) ──
+                    elif text.startswith("/set_find_strategy "):
+                        value = text.replace("/set_find_strategy ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                FIND_STRATEGY_ENABLED = (value == "on")
+                            save_settings()
+                            send_admin(
+                                f"✅ استراتيجية \"ابحث عن صفقة\" مفعّلة — فحص كل {FIND_STRATEGY_INTERVAL_SECONDS // 60} دقيقة، "
+                                f"{TRADE_AMOUNT} USDT/صفقة، حد أقصى {FIND_STRATEGY_MAX_OPEN} صفقات مفتوحة منها (صفقات حقيقية)"
+                                if FIND_STRATEGY_ENABLED else
+                                "❌ تم إيقاف استراتيجية \"ابحث عن صفقة\" (أي صفقة مفتوحة منها بتكمل لحد ما تقفل عادي)"
+                            )
+                        else:
+                            send_admin("❌ مثال: /set_find_strategy on  أو  /set_find_strategy off")
+
+                    # ── /find_strategy_status ──
+                    elif text == "/find_strategy_status":
+                        with _lock:
+                            fs_on = FIND_STRATEGY_ENABLED
+                            fs_open = [sym for sym, t in open_trades.items() if t.get("strategy") == "find_trade"]
+                        last = _find_strategy_last_scan
+                        ago = f"قبل {int((time.time() - last['time']) // 60)} دقيقة" if last["time"] else "لسا ما فحصت"
+                        send_admin(
+                            f"<b>🔍 استراتيجية ابحث عن صفقة:</b> {'✅ مفعّلة' if fs_on else '❌ متوقفة'}\n"
+                            f"المبلغ لكل صفقة: {TRADE_AMOUNT} USDT\n"
+                            f"صفقات مفتوحة منها: {len(fs_open)}/{FIND_STRATEGY_MAX_OPEN}"
+                            + (f" ({'، '.join(x.replace('USDT', '') for x in fs_open)})" if fs_open else "") + "\n"
+                            f"آخر فحص ({ago}): {last['summary']}"
+                        )
+
                     # ── /watch AVAX SOL (مراقبة مباشرة بالأمر — أمر صريح من الأدمن) ──
                     elif text.startswith("/watch ") and not text.startswith("/watch_"):
                         syms = _detect_symbols_in_text(text.replace("/watch ", "", 1))
@@ -1431,6 +1478,10 @@ def telegram_command_listener(client):
                             "/watch AVAX SOL — مراقبة مباشرة (أو من محادثة الوكيل: \"راقب AVAX واشتري\" ثم تأكيد)\n"
                             "/watch_list — المراقبات النشطة\n"
                             "/watch_cancel AVAX — إلغاء مراقبة\n\n"
+                            "<b>🔍 ابحث عن صفقة (استراتيجية تلقائية):</b>\n"
+                            "/set_find_strategy on — تشغيل (صفقات حقيقية، فحص كل 15 دقيقة، حد أقصى صفقتين)\n"
+                            "/set_find_strategy off — إيقاف (الصفقات المفتوحة بتكمل عادي)\n"
+                            "/find_strategy_status — الحالة وآخر فحص\n\n"
                             "<b>📡 رادار الصاعدين (تنبيهات فقط، بدون شراء):</b>\n"
                             "/radar_report — نتائج الرادار العامة (متوسط النتيجة، الرابحة، الستوب، Trailing)\n"
                             "/set_radar on|off — تشغيل/إيقاف التنبيهات\n\n"
@@ -2467,6 +2518,10 @@ def api_get_settings():
             "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
             "squeeze_breakout_usdt_per_trade": SQUEEZE_BREAKOUT_USDT_PER_TRADE,
             "squeeze_breakout_position": _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None,
+            # ✅ ابحث عن صفقة كاستراتيجية مستقلة
+            "find_strategy_enabled": FIND_STRATEGY_ENABLED,
+            "find_strategy_max_open": FIND_STRATEGY_MAX_OPEN,
+            "find_strategy_last_scan": _find_strategy_last_scan,
         })
 
 
@@ -2478,6 +2533,7 @@ def api_set_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
+    global FIND_STRATEGY_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     data = request.get_json(silent=True) or {}
     errors = []
@@ -2563,6 +2619,10 @@ def api_set_settings():
         # ✅ Squeeze Breakout — تشغيل/إيقاف من التطبيق
         if "squeeze_breakout_enabled" in data:
             SQUEEZE_BREAKOUT_ENABLED = bool(data["squeeze_breakout_enabled"])
+
+        # ✅ ابحث عن صفقة (تلقائي) — تشغيل/إيقاف من التطبيق
+        if "find_strategy_enabled" in data:
+            FIND_STRATEGY_ENABLED = bool(data["find_strategy_enabled"])
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
@@ -2838,8 +2898,8 @@ def _watch_entry_check(symbol):
     return verdict["approved"], verdict["reason_ar"], ind
 
 
-def _watch_open(symbol, ind, reason):
-    """ينفّذ شراء أمر مراقبة تحقق شرطه، بنفس مسار الاستراتيجيات (حدود/رصيد/حجز/ستوب/Trailing)."""
+def _guarded_open(symbol, ind, signal_info, strategy):
+    """شراء بمسار البوت الأساسي مع كل الحمايات (حدود/رصيد/حجز/ستوب/Trailing). يرجع (status, msg)."""
     with _lock:
         enabled = trading_enabled
         already_open = symbol in open_trades
@@ -2854,19 +2914,60 @@ def _watch_open(symbol, ind, reason):
     try:
         balance = float(_binance_client.get_asset_balance(asset="USDT")["free"])
     except Exception as e:
-        log.error(f"❌ رصيد USDT (مراقبة): {e}")
+        log.error(f"❌ رصيد USDT ({strategy}): {e}")
         return "wait", "تعذر قراءة الرصيد"
     if balance < (TRADE_AMOUNT + RESERVE_USDT):
         return "wait", f"الرصيد غير كافٍ ({balance:.2f} USDT)"
     if not get_portfolio_manager().try_claim(symbol, _PORTFOLIO_OWNER):
         return "wait", "العملة محجوزة لاستراتيجية تانية حالياً"
     res = open_main_position(
-        _binance_client, symbol, ind.get("atr"), False, "watch_order", _current_market_regime(),
-        f"👀 أمر مراقبة من المحادثة — {reason}",
+        _binance_client, symbol, ind.get("atr"), False, strategy, _current_market_regime(),
+        signal_info,
     )
     if res:
         return "bought", "تم الشراء"
     return "wait", "فشل تنفيذ الشراء (راجع Logs)"
+
+
+def _watch_open(symbol, ind, reason):
+    """ينفّذ شراء أمر مراقبة تحقق شرطه، بنفس مسار الاستراتيجيات (حدود/رصيد/حجز/ستوب/Trailing)."""
+    return _guarded_open(symbol, ind, f"👀 أمر مراقبة من المحادثة — {reason}", "watch_order")
+
+
+def find_strategy_scan_once(client):
+    """دورة وحدة من استراتيجية \"ابحث عن صفقة\": نفس find_best_trade بالضبط، وإذا لقت مرشح بتشتريه."""
+    with _lock:
+        mine = sum(1 for t in open_trades.values() if t.get("strategy") == "find_trade")
+    if mine >= FIND_STRATEGY_MAX_OPEN:
+        _find_strategy_last_scan.update(time=time.time(), summary=f"تخطّيت — وصلنا الحد الأقصى ({mine}/{FIND_STRATEGY_MAX_OPEN})")
+        return
+    result = find_best_trade(client)
+    if not result["found"] or not result["symbol"]:
+        _find_strategy_last_scan.update(time=time.time(), summary=result["reason_ar"][:160])
+        log.info(f"🔍 استراتيجية ابحث عن صفقة: ما في مرشح — {result['reason_ar'][:120]}")
+        return
+    symbol, ind = result["symbol"], result["indicators"] or {}
+    status, msg = _guarded_open(symbol, ind, f"🔍 استراتيجية ابحث عن صفقة — {result['reason_ar']}", "find_trade")
+    coin = symbol.replace("USDT", "")
+    _find_strategy_last_scan.update(
+        time=time.time(),
+        summary=f"{coin}: {'اشتريت' if status == 'bought' else 'ما اشتريت'} ({msg})",
+    )
+    log.info(f"🔍 استراتيجية ابحث عن صفقة: {symbol} → {status} ({msg})")
+
+
+def find_strategy_loop():
+    """Thread مستقل: كل FIND_STRATEGY_INTERVAL_SECONDS بيفحص إذا الاستراتيجية مفعّلة والتداول شغال."""
+    time.sleep(90)
+    while True:
+        try:
+            with _lock:
+                active = FIND_STRATEGY_ENABLED and trading_enabled
+            if active and _binance_client is not None and not is_api_blocked():
+                find_strategy_scan_once(_binance_client)
+        except Exception as e:
+            log.error(f"❌ استراتيجية ابحث عن صفقة: خطأ بالحلقة: {e}")
+        time.sleep(FIND_STRATEGY_INTERVAL_SECONDS)
 
 
 _WATCH_CONFIRM_WORDS = {"تأكيد", "تاكيد", "اكد", "أكد", "أكّد", "confirm"}
@@ -3452,6 +3553,9 @@ def run_bot():
         check_fn=_watch_entry_check, open_fn=_watch_open, notify_fn=send_telegram,
     )
     threading.Thread(target=_watch_orders.run, daemon=True).start()
+
+    # ── 🔍 استراتيجية ابحث عن صفقة المستقلة (مطفية افتراضياً) ──
+    threading.Thread(target=find_strategy_loop, daemon=True).start()
 
     # ── 📡 رادار الصاعدين المبكر — تنبيهات + تتبع افتراضي (بدون شراء) ──
     global _radar
