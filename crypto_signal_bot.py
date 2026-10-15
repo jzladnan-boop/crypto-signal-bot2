@@ -321,12 +321,12 @@ RADAR_VOL_RATIO = 2.5          # قفزة فوليوم: 2.5× متوسط آخر 
 RADAR_MFI_MAX = 85             # بوابة أخف: رفض لو MFI فوق هالرقم
 
 # ──────────────────────────────────────────────
-# 🔍 استراتيجية "ابحث عن صفقة" المستقلة (تلقائية): بتفحص كل FIND_STRATEGY_INTERVAL_SECONDS
+# 🔍 استراتيجية "ابحث عن صفقة" المستقلة (تلقائية): بتفحص مع إغلاق كل شمعة (حسب الفريم الزمني)
 # بنفس مرشحين وشروط "ابحث عن صفقة" بالضبط (فلتر MFI/SMA50/الفوليوم + بوابة المخاطر)
 # وبتشتري أحسن مرشح بنفس مسار البوت الأساسي. مطفية افتراضياً — /set_find_strategy on|off أو التطبيق.
 # ──────────────────────────────────────────────
 FIND_STRATEGY_ENABLED = False
-FIND_STRATEGY_INTERVAL_SECONDS = 900   # كل 15 دقيقة
+FIND_STRATEGY_CLOSE_DELAY_SECONDS = 10  # بنفحص بعد إغلاق كل شمعة بعدة ثواني (الفريم الزمني الحالي) وعلى شموع مغلقة بس
 FIND_STRATEGY_MAX_OPEN = 2             # أقصى صفقات مفتوحة من هالاستراتيجية بنفس الوقت
 _find_strategy_last_scan = {"time": 0, "summary": "لسا ما فحصت"}
 _pending_watch = None           # طلب مراقبة بانتظار "تأكيد" من المستخدم: {"symbols": [...], "expires": ts}
@@ -1174,7 +1174,7 @@ def telegram_command_listener(client):
                                 FIND_STRATEGY_ENABLED = (value == "on")
                             save_settings()
                             send_admin(
-                                f"✅ استراتيجية \"ابحث عن صفقة\" مفعّلة — فحص كل {FIND_STRATEGY_INTERVAL_SECONDS // 60} دقيقة، "
+                                f"✅ استراتيجية \"ابحث عن صفقة\" مفعّلة — فحص مع إغلاق كل شمعة ({INTERVAL_TO_MINUTES.get(current_interval, 30)} دقيقة) على شموع مغلقة، "
                                 f"{TRADE_AMOUNT} USDT/صفقة، حد أقصى {FIND_STRATEGY_MAX_OPEN} صفقات مفتوحة منها (صفقات حقيقية)"
                                 if FIND_STRATEGY_ENABLED else
                                 "❌ تم إيقاف استراتيجية \"ابحث عن صفقة\" (أي صفقة مفتوحة منها بتكمل لحد ما تقفل عادي)"
@@ -1479,7 +1479,7 @@ def telegram_command_listener(client):
                             "/watch_list — المراقبات النشطة\n"
                             "/watch_cancel AVAX — إلغاء مراقبة\n\n"
                             "<b>🔍 ابحث عن صفقة (استراتيجية تلقائية):</b>\n"
-                            "/set_find_strategy on — تشغيل (صفقات حقيقية، فحص كل 15 دقيقة، حد أقصى صفقتين)\n"
+                            "/set_find_strategy on — تشغيل (صفقات حقيقية، فحص مع إغلاق كل شمعة، حد أقصى صفقتين)\n"
                             "/set_find_strategy off — إيقاف (الصفقات المفتوحة بتكمل عادي)\n"
                             "/find_strategy_status — الحالة وآخر فحص\n\n"
                             "<b>📡 رادار الصاعدين (تنبيهات فقط، بدون شراء):</b>\n"
@@ -1641,9 +1641,12 @@ def _set_last_indicator_error(symbol, exc):
     global _last_indicator_error
     _last_indicator_error = f"{symbol}: {type(exc).__name__}: {exc}"
 
-def get_indicators(client, symbol):
+def get_indicators(client, symbol, closed_only=False):
     try:
         klines  = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
+        # closed_only=True: نحذف الشمعة الأخيرة (المفتوحة وعم تتكوّن) ونحلل شموع مغلقة بس
+        if closed_only and len(klines) > 1:
+            klines = klines[:-1]
         closes  = pd.Series([float(k[4]) for k in klines])
         highs   = pd.Series([float(k[2]) for k in klines])
         lows    = pd.Series([float(k[3]) for k in klines])
@@ -1839,7 +1842,7 @@ def passes_find_trade_filter(ind):
     )
 
 
-def find_best_trade(client, top_n: int = 8):
+def find_best_trade(client, top_n: int = 8, closed_only: bool = False):
     """
     يفحص قائمة "المراقبة المكثفة" الحالية (watch_list) + أعلى عملات السيولة
     بمجال تغيّر مقبول (_find_trade_candidates) — ويرتبها حسب قوة الزخم (momentum_score)،
@@ -1877,7 +1880,7 @@ def find_best_trade(client, top_n: int = 8):
         # ملاحظة: نستخدم get_indicators هون — الهدف استكشافي عام: نجيب مؤشرات كل عملة بغض النظر عن التوقيت
         # الدقيق، والوكيل (Gemini) هو يلي بيحكم إذا وضعها كويس أو لأ.
         try:
-            ind = get_indicators(client, symbol)
+            ind = get_indicators(client, symbol, closed_only=closed_only)
         except Exception as e:
             log.error(f"❌ find_best_trade — {symbol}: {e}")
             _set_last_indicator_error(symbol, e)
@@ -2941,7 +2944,7 @@ def find_strategy_scan_once(client):
     if mine >= FIND_STRATEGY_MAX_OPEN:
         _find_strategy_last_scan.update(time=time.time(), summary=f"تخطّيت — وصلنا الحد الأقصى ({mine}/{FIND_STRATEGY_MAX_OPEN})")
         return
-    result = find_best_trade(client)
+    result = find_best_trade(client, closed_only=True)
     if not result["found"] or not result["symbol"]:
         _find_strategy_last_scan.update(time=time.time(), summary=result["reason_ar"][:160])
         log.info(f"🔍 استراتيجية ابحث عن صفقة: ما في مرشح — {result['reason_ar'][:120]}")
@@ -2956,10 +2959,16 @@ def find_strategy_scan_once(client):
     log.info(f"🔍 استراتيجية ابحث عن صفقة: {symbol} → {status} ({msg})")
 
 
+def _seconds_to_next_candle_close():
+    """ثواني للإغلاق الجاي للشمعة (الفريم الزمني الحالي، شموع بينانس مثبّتة على UTC) + تأخير بسيط."""
+    iv = max(1, INTERVAL_TO_MINUTES.get(current_interval, 30)) * 60
+    return (iv - (time.time() % iv)) + FIND_STRATEGY_CLOSE_DELAY_SECONDS
+
+
 def find_strategy_loop():
-    """Thread مستقل: كل FIND_STRATEGY_INTERVAL_SECONDS بيفحص إذا الاستراتيجية مفعّلة والتداول شغال."""
-    time.sleep(90)
+    """Thread مستقل: بيصحى مع إغلاق كل شمعة (+10 ثواني) ويفحص إذا الاستراتيجية مفعّلة والتداول شغال."""
     while True:
+        time.sleep(_seconds_to_next_candle_close())
         try:
             with _lock:
                 active = FIND_STRATEGY_ENABLED and trading_enabled
@@ -2967,7 +2976,6 @@ def find_strategy_loop():
                 find_strategy_scan_once(_binance_client)
         except Exception as e:
             log.error(f"❌ استراتيجية ابحث عن صفقة: خطأ بالحلقة: {e}")
-        time.sleep(FIND_STRATEGY_INTERVAL_SECONDS)
 
 
 _WATCH_CONFIRM_WORDS = {"تأكيد", "تاكيد", "اكد", "أكد", "أكّد", "confirm"}
