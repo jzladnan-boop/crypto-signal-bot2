@@ -32,7 +32,6 @@ from functools import wraps
 from market_regime import MarketRegimeDetector
 from squeeze_breakout import SqueezeBreakout
 from watch_orders import WatchOrders
-from radar import Radar
 from portfolio_manager import get_portfolio_manager
 
 _PORTFOLIO_OWNER = "main_bot"
@@ -313,20 +312,13 @@ _squeeze_breakout_strategy = None   # ⬅️ نسخة SqueezeBreakout الوحي
 _watch_orders = None
 
 # ──────────────────────────────────────────────
-# 📡 رادار الصاعدين المبكر (radar.py) — تنبيهات + تتبع افتراضي، بدون شراء
-# ──────────────────────────────────────────────
-RADAR_ENABLED = True
-_radar = None
-RADAR_VOL_RATIO = 2.5          # قفزة فوليوم: 2.5× متوسط آخر 20 شمعة (تقديري)
-RADAR_MFI_MAX = 85             # بوابة أخف: رفض لو MFI فوق هالرقم
-
-# ──────────────────────────────────────────────
-# 🔍 استراتيجية "ابحث عن صفقة" المستقلة (تلقائية): بتفحص مع إغلاق كل شمعة (حسب الفريم الزمني)
-# بنفس مرشحين وشروط "ابحث عن صفقة" بالضبط (فلتر MFI/SMA50/الفوليوم + بوابة المخاطر)
-# وبتشتري أحسن مرشح بنفس مسار البوت الأساسي. مطفية افتراضياً — /set_find_strategy on|off أو التطبيق.
+# 🔍 استراتيجية "ابحث عن صفقة" المستقلة (تلقائية): بتفحص كل دقيقتين تقريباً على الشمعة الحية، كل عملة
+# بسيولة كافية (مو بس نطاق تغيّر محدد) بنفس فحص "راقب واشتري" (_watch_entry_check: فلتر MFI/SMA50/الفوليوم
+# + بوابة المخاطر)، وبتشتري الأعلى زخماً بين اللي نجحوا بنفس مسار البوت الأساسي. مطفية افتراضياً — /set_find_strategy on|off أو التطبيق.
 # ──────────────────────────────────────────────
 FIND_STRATEGY_ENABLED = False
-FIND_STRATEGY_CLOSE_DELAY_SECONDS = 10  # بنفحص بعد إغلاق كل شمعة بعدة ثواني (الفريم الزمني الحالي) وعلى شموع مغلقة بس
+FIND_STRATEGY_INTERVAL_SECONDS = 120   # كل دقيقتين تقريباً على الشمعة الحية (متل "راقب واشتري")
+FIND_STRATEGY_MAX_SCAN = 80            # أقصى عدد عملات بكل دورة (قائمة المراقبة أولاً، بعدين الأعلى سيولة)
 FIND_STRATEGY_MAX_OPEN = 2             # أقصى صفقات مفتوحة من هالاستراتيجية بنفس الوقت
 _find_strategy_last_scan = {"time": 0, "summary": "لسا ما فحصت"}
 _pending_watch = None           # طلب مراقبة بانتظار "تأكيد" من المستخدم: {"symbols": [...], "expires": ts}
@@ -452,7 +444,6 @@ def save_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
-    global RADAR_ENABLED
     global FIND_STRATEGY_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -474,7 +465,6 @@ def save_settings():
                 "trail_atr_multiplier": TRAIL_ATR_MULTIPLIER,
                 "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
-                "radar_enabled": RADAR_ENABLED,
                 "find_strategy_enabled": FIND_STRATEGY_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -487,7 +477,6 @@ def load_settings():
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER, TRAIL_ACTIVATE_ATR_MULTIPLE
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
-    global RADAR_ENABLED
     global FIND_STRATEGY_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     if not os.path.exists(SETTINGS_FILE):
@@ -529,7 +518,6 @@ def load_settings():
         TRAIL_ATR_MULTIPLIER = s.get("trail_atr_multiplier", TRAIL_ATR_MULTIPLIER)
         TRAIL_ACTIVATE_ATR_MULTIPLE = s.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
-        RADAR_ENABLED = s.get("radar_enabled", RADAR_ENABLED)
         FIND_STRATEGY_ENABLED = s.get("find_strategy_enabled", FIND_STRATEGY_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
@@ -798,7 +786,6 @@ def telegram_command_listener(client):
     global ATR_PERIOD, ATR_MULTIPLIER, TRAIL_ATR_MULTIPLIER
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
-    global RADAR_ENABLED
     global FIND_STRATEGY_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
@@ -1151,21 +1138,6 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
-                    # ── /radar_report (أمر واحد: نتائج الرادار العامة) ──
-                    elif text == "/radar_report":
-                        send_admin(_radar.report() if _radar else "⚠️ الرادار لسا ما اشتغل")
-
-                    # ── /set_radar on|off (تشغيل/إيقاف تنبيهات الرادار — التتبع بيكمّل اللي بدأ) ──
-                    elif text.startswith("/set_radar "):
-                        value = text.replace("/set_radar ", "").strip().lower()
-                        if value in ("on", "off"):
-                            with _lock:
-                                RADAR_ENABLED = (value == "on")
-                            save_settings()
-                            send_admin("✅ رادار الصاعدين مفعّل (تنبيهات فقط، بدون شراء)" if RADAR_ENABLED else "❌ تم إيقاف تنبيهات الرادار (التتبع الجاري بيكمّل لحاله)")
-                        else:
-                            send_admin("❌ مثال: /set_radar on  أو  /set_radar off")
-
                     # ── /set_find_strategy on|off (استراتيجية "ابحث عن صفقة" التلقائية — صفقات حقيقية) ──
                     elif text.startswith("/set_find_strategy "):
                         value = text.replace("/set_find_strategy ", "").strip().lower()
@@ -1174,7 +1146,7 @@ def telegram_command_listener(client):
                                 FIND_STRATEGY_ENABLED = (value == "on")
                             save_settings()
                             send_admin(
-                                f"✅ استراتيجية \"ابحث عن صفقة\" مفعّلة — فحص مع إغلاق كل شمعة ({INTERVAL_TO_MINUTES.get(current_interval, 30)} دقيقة) على شموع مغلقة، "
+                                f"✅ استراتيجية \"ابحث عن صفقة\" مفعّلة — فحص كل دقيقتين تقريباً على الشمعة الحية لكل العملات بسيولة كافية، "
                                 f"{TRADE_AMOUNT} USDT/صفقة، حد أقصى {FIND_STRATEGY_MAX_OPEN} صفقات مفتوحة منها (صفقات حقيقية)"
                                 if FIND_STRATEGY_ENABLED else
                                 "❌ تم إيقاف استراتيجية \"ابحث عن صفقة\" (أي صفقة مفتوحة منها بتكمل لحد ما تقفل عادي)"
@@ -1479,12 +1451,10 @@ def telegram_command_listener(client):
                             "/watch_list — المراقبات النشطة\n"
                             "/watch_cancel AVAX — إلغاء مراقبة\n\n"
                             "<b>🔍 ابحث عن صفقة (استراتيجية تلقائية):</b>\n"
-                            "/set_find_strategy on — تشغيل (صفقات حقيقية، فحص مع إغلاق كل شمعة، حد أقصى صفقتين)\n"
+                            "/set_find_strategy on — تشغيل (صفقات حقيقية، فحص كل دقيقتين تقريباً، حد أقصى صفقتين)\n"
                             "/set_find_strategy off — إيقاف (الصفقات المفتوحة بتكمل عادي)\n"
                             "/find_strategy_status — الحالة وآخر فحص\n\n"
                             "<b>📡 رادار الصاعدين (تنبيهات فقط، بدون شراء):</b>\n"
-                            "/radar_report — نتائج الرادار العامة (متوسط النتيجة، الرابحة، الستوب، Trailing)\n"
-                            "/set_radar on|off — تشغيل/إيقاف التنبيهات\n\n"
                             "<b>التقارير:</b>\n"
                             "/config — عرض كل الإعدادات الحالية\n"
                             "/push_status — عدد الأجهزة المسجلة لاستقبال Push Notifications\n"
@@ -1641,12 +1611,9 @@ def _set_last_indicator_error(symbol, exc):
     global _last_indicator_error
     _last_indicator_error = f"{symbol}: {type(exc).__name__}: {exc}"
 
-def get_indicators(client, symbol, closed_only=False):
+def get_indicators(client, symbol):
     try:
         klines  = client.get_klines(symbol=symbol, interval=current_interval, limit=100)
-        # closed_only=True: نحذف الشمعة الأخيرة (المفتوحة وعم تتكوّن) ونحلل شموع مغلقة بس
-        if closed_only and len(klines) > 1:
-            klines = klines[:-1]
         closes  = pd.Series([float(k[4]) for k in klines])
         highs   = pd.Series([float(k[2]) for k in klines])
         lows    = pd.Series([float(k[3]) for k in klines])
@@ -1842,7 +1809,7 @@ def passes_find_trade_filter(ind):
     )
 
 
-def find_best_trade(client, top_n: int = 8, closed_only: bool = False):
+def find_best_trade(client, top_n: int = 8):
     """
     يفحص قائمة "المراقبة المكثفة" الحالية (watch_list) + أعلى عملات السيولة
     بمجال تغيّر مقبول (_find_trade_candidates) — ويرتبها حسب قوة الزخم (momentum_score)،
@@ -1880,7 +1847,7 @@ def find_best_trade(client, top_n: int = 8, closed_only: bool = False):
         # ملاحظة: نستخدم get_indicators هون — الهدف استكشافي عام: نجيب مؤشرات كل عملة بغض النظر عن التوقيت
         # الدقيق، والوكيل (Gemini) هو يلي بيحكم إذا وضعها كويس أو لأ.
         try:
-            ind = get_indicators(client, symbol, closed_only=closed_only)
+            ind = get_indicators(client, symbol)
         except Exception as e:
             log.error(f"❌ find_best_trade — {symbol}: {e}")
             _set_last_indicator_error(symbol, e)
@@ -2937,38 +2904,76 @@ def _watch_open(symbol, ind, reason):
     return _guarded_open(symbol, ind, f"👀 أمر مراقبة من المحادثة — {reason}", "watch_order")
 
 
+def _find_strategy_candidates(client):
+    """كل عملة مفتوحة للتداول بسيولة كافية (بدون شرط نطاق تغيّر 24س): قائمة المراقبة أولاً، بعدين الأعلى سيولة."""
+    with _lock:
+        base = [x for x in watch_list if x not in open_trades]
+        symbols_now = list(SYMBOLS)
+        opened = set(open_trades.keys())
+    pool = []
+    try:
+        tickers = {t["symbol"]: t for t in client.get_ticker()}
+        for sym in symbols_now:
+            t = tickers.get(sym)
+            if not t or sym in opened or sym in base:
+                continue
+            qv = float(t["quoteVolume"])
+            if qv >= FIND_TRADE_MIN_QUOTE_VOLUME:
+                pool.append((qv, sym))
+        pool.sort(reverse=True)
+    except Exception as e:
+        log.error(f"❌ استراتيجية ابحث عن صفقة — تعذر جلب السيولة (نكمل بقائمة المراقبة فقط): {e}")
+    return (base + [sym for _, sym in pool])[:FIND_STRATEGY_MAX_SCAN]
+
+
 def find_strategy_scan_once(client):
-    """دورة وحدة من استراتيجية \"ابحث عن صفقة\": نفس find_best_trade بالضبط، وإذا لقت مرشح بتشتريه."""
+    """دورة وحدة: كل عملة بتنفحص بنفس \"راقب واشتري\" بالضبط، وإذا نجح أكتر من وحدة بنشتري الأعلى زخماً."""
     with _lock:
         mine = sum(1 for t in open_trades.values() if t.get("strategy") == "find_trade")
     if mine >= FIND_STRATEGY_MAX_OPEN:
         _find_strategy_last_scan.update(time=time.time(), summary=f"تخطّيت — وصلنا الحد الأقصى ({mine}/{FIND_STRATEGY_MAX_OPEN})")
         return
-    result = find_best_trade(client, closed_only=True)
-    if not result["found"] or not result["symbol"]:
-        _find_strategy_last_scan.update(time=time.time(), summary=result["reason_ar"][:160])
-        log.info(f"🔍 استراتيجية ابحث عن صفقة: ما في مرشح — {result['reason_ar'][:120]}")
+    candidates = _find_strategy_candidates(client)
+    if not candidates:
+        _find_strategy_last_scan.update(time=time.time(), summary="ما في عملات بسيولة كافية للفحص")
         return
-    symbol, ind = result["symbol"], result["indicators"] or {}
-    status, msg = _guarded_open(symbol, ind, f"🔍 استراتيجية ابحث عن صفقة — {result['reason_ar']}", "find_trade")
-    coin = symbol.replace("USDT", "")
+    best, checked, passed = None, 0, 0
+    for sym in candidates:
+        if is_api_blocked():
+            log.warning("🚦 استراتيجية ابحث عن صفقة: توقفت منتصف الفحص — حظر مؤقت من بينانس")
+            break
+        ok, reason, ind = _watch_entry_check(sym)
+        checked += 1
+        if ind is not None and passes_find_trade_filter(ind):
+            passed += 1
+        if ok and ind:
+            score = ind.get("momentum_score") or 0.0
+            if best is None or score > best[0]:
+                best = (score, sym, ind, reason)
+        time.sleep(0.35)
+    if best is None:
+        _find_strategy_last_scan.update(
+            time=time.time(), summary=f"فحصت {checked} عملة — {passed} اجتازت الفلتر وما في وحدة وافقت عليها بوابة المخاطر")
+        log.info(f"🔍 استراتيجية ابحث عن صفقة: فحصت {checked}، اجتاز الفلتر {passed}، لا مرشح")
+        return
+    _, symbol, ind, reason = best
+    with _lock:   # ممكن تنطفي الاستراتيجية أو يتوقف التداول خلال الفحص
+        still_active = FIND_STRATEGY_ENABLED and trading_enabled
+    if not still_active:
+        _find_strategy_last_scan.update(time=time.time(), summary="انطفت الاستراتيجية خلال الفحص — ما اشتريت")
+        return
+    status, msg = _guarded_open(symbol, ind, f"🔍 استراتيجية ابحث عن صفقة — {reason}", "find_trade")
     _find_strategy_last_scan.update(
         time=time.time(),
-        summary=f"{coin}: {'اشتريت' if status == 'bought' else 'ما اشتريت'} ({msg})",
+        summary=f"فحصت {checked} عملة — {symbol.replace('USDT', '')}: {'اشتريت' if status == 'bought' else 'ما اشتريت'} ({msg})",
     )
-    log.info(f"🔍 استراتيجية ابحث عن صفقة: {symbol} → {status} ({msg})")
-
-
-def _seconds_to_next_candle_close():
-    """ثواني للإغلاق الجاي للشمعة (الفريم الزمني الحالي، شموع بينانس مثبّتة على UTC) + تأخير بسيط."""
-    iv = max(1, INTERVAL_TO_MINUTES.get(current_interval, 30)) * 60
-    return (iv - (time.time() % iv)) + FIND_STRATEGY_CLOSE_DELAY_SECONDS
+    log.info(f"🔍 استراتيجية ابحث عن صفقة: {symbol} → {status} ({msg}) | فحصت {checked}، اجتاز الفلتر {passed}")
 
 
 def find_strategy_loop():
-    """Thread مستقل: بيصحى مع إغلاق كل شمعة (+10 ثواني) ويفحص إذا الاستراتيجية مفعّلة والتداول شغال."""
+    """Thread مستقل: كل FIND_STRATEGY_INTERVAL_SECONDS بيفحص إذا الاستراتيجية مفعّلة والتداول شغال."""
+    time.sleep(90)
     while True:
-        time.sleep(_seconds_to_next_candle_close())
         try:
             with _lock:
                 active = FIND_STRATEGY_ENABLED and trading_enabled
@@ -2976,6 +2981,7 @@ def find_strategy_loop():
                 find_strategy_scan_once(_binance_client)
         except Exception as e:
             log.error(f"❌ استراتيجية ابحث عن صفقة: خطأ بالحلقة: {e}")
+        time.sleep(FIND_STRATEGY_INTERVAL_SECONDS)
 
 
 _WATCH_CONFIRM_WORDS = {"تأكيد", "تاكيد", "اكد", "أكد", "أكّد", "confirm"}
@@ -3338,82 +3344,6 @@ def start_dashboard():
 # ──────────────────────────────────────────────
 # 🚀 البوت الرئيسي
 # ──────────────────────────────────────────────
-# ──────────────────────────────────────────────
-# 📡 دوال ربط الرادار بالبوت (radar.py) — قواعد الخروج هون نفسها اللي بتستعملها الصفقات الحقيقية
-# ──────────────────────────────────────────────
-def _radar_initial_stop(entry, atr):
-    """الستوب الأولي بنفس منطق open_main_position (ATR مع سقف صلب، أو نسبة ثابتة احتياطي)."""
-    with _lock:
-        multiplier = ATR_MULTIPLIER
-        strict_cap_pct = STOP_LOSS_PCT * 100
-    if atr:
-        info = atr_guard.compute_stop_loss(
-            entry_price=entry, raw_atr_value=atr, market_regime=_current_market_regime(),
-            strict_mode=False, atr_sl_multiple=multiplier, strict_cap_pct=strict_cap_pct,
-        )
-        return round(info["sl_price"], 8)
-    fallback_pct = min(STOP_LOSS_PCT * 100, atr_guard.HARD_CAP_PCT) / 100
-    return round(entry * (1 - fallback_pct), 8)
-
-
-def _radar_trigger(entry, atr):
-    """نقطة تفعيل الـ Trailing بنفس منطق حلقة إدارة الصفقات (ATR مع سقف TRAIL_TRIGGER_MAX_PCT)."""
-    if atr:
-        return min(entry + TRAIL_ACTIVATE_ATR_MULTIPLE * atr, entry * (1 + TRAIL_TRIGGER_MAX_PCT / 100))
-    return entry * (1 + TRAIL_ACTIVATE_PCT)
-
-
-def _radar_trail_stop(price, entry, atr):
-    """ستوب الـ Trailing: نفس compute_trail_stop الحقيقية (مسافة ATR بسقف، وقفل حد أدنى للربح)."""
-    return compute_trail_stop(price, {"atr": atr, "entry_price": entry})
-
-
-def _radar_klines(symbol, start_ms):
-    return _binance_client.get_klines(
-        symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, startTime=start_ms, limit=1000,
-    )
-
-
-def _radar_analyze(symbol):
-    """
-    فحص الرادار لعملة: قفزة فوليوم + متوسطات صاعدة + كسر أعلى قمة + بوابة مخاطر أخف.
-    يرجع {"ok": bool, ...} (الفحوصات الرخيصة أولاً عشان نوفّر طلبات بينانس).
-    """
-    klines = _binance_client.get_klines(symbol=symbol, interval=current_interval, limit=120)
-    if not klines or len(klines) < 100:
-        return {"ok": False}
-    highs = [float(k[2]) for k in klines]
-    closes = [float(k[4]) for k in klines]
-    vols = [float(k[5]) for k in klines]
-    mean_vol = sum(vols[-22:-2]) / 20
-    if mean_vol <= 0:
-        return {"ok": False}
-    vol_ratio = max(vols[-1], vols[-2]) / mean_vol          # آخر شمعتين (الأخيرة ممكن تكون لسا تتشكل)
-    if vol_ratio < RADAR_VOL_RATIO:
-        return {"ok": False}
-    ma7, ma25, ma99 = (sum(closes[-n:]) / n for n in (7, 25, 99))
-    if not (ma7 > ma25 > ma99):
-        return {"ok": False}
-    prev_high = max(highs[-22:-2])
-    if max(closes[-1], closes[-2]) <= prev_high:
-        return {"ok": False}
-    ind = get_indicators(_binance_client, symbol)
-    if not ind:
-        return {"ok": False}
-    price, bb_up, mfi = ind.get("price"), ind.get("bb_upper"), ind.get("mfi")
-    if price and bb_up and price > bb_up:
-        return {"ok": False, "reason": "فوق الحد العلوي لبولينجر (ممتد)"}
-    if mfi is not None and mfi > RADAR_MFI_MAX:
-        return {"ok": False, "reason": f"MFI مرتفع جداً ({mfi:.0f})"}
-    notes = [
-        f"متوسطات صاعدة: MA7 {ma7:g} > MA25 {ma25:g} > MA99 {ma99:g}",
-        f"كسر أعلى قمة بآخر 20 شمعة ({prev_high:g})",
-    ]
-    if mfi is not None:
-        notes.append(f"MFI {mfi:.0f}")
-    return {"ok": True, "ind": ind, "vol_ratio": vol_ratio, "notes": notes}
-
-
 def open_main_position(client, symbol, atr_value, is_strict, strategy, market_regime,
                        signal_info, momentum_line="", usdt_amount=None):
     """
@@ -3564,20 +3494,6 @@ def run_bot():
 
     # ── 🔍 استراتيجية ابحث عن صفقة المستقلة (مطفية افتراضياً) ──
     threading.Thread(target=find_strategy_loop, daemon=True).start()
-
-    # ── 📡 رادار الصاعدين المبكر — تنبيهات + تتبع افتراضي (بدون شراء) ──
-    global _radar
-    _radar = Radar(
-        os.path.join(DATA_DIR, "radar_log.json"),
-        symbols_fn=lambda: list(SYMBOLS),
-        exclude_fn=lambda: set(open_trades.keys()),
-        tickers_fn=lambda: _binance_client.get_ticker(),
-        analyze_fn=_radar_analyze, klines_fn=_radar_klines,
-        initial_stop_fn=_radar_initial_stop, trigger_fn=_radar_trigger, trail_stop_fn=_radar_trail_stop,
-        notify_fn=send_telegram, blocked_fn=is_api_blocked,
-        enabled_fn=lambda: RADAR_ENABLED, amount_fn=lambda: TRADE_AMOUNT,
-    )
-    threading.Thread(target=_radar.run, daemon=True).start()
 
     last_heartbeat = time.time()
     last_scan      = 0
