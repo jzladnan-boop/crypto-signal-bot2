@@ -321,6 +321,9 @@ FIND_STRATEGY_INTERVAL_SECONDS = 120   # كل دقيقتين تقريباً عل
 FIND_STRATEGY_MAX_SCAN = 80            # أقصى عدد عملات بكل دورة (قائمة المراقبة أولاً، بعدين الأعلى سيولة)
 FIND_STRATEGY_MAX_OPEN = 2             # أقصى صفقات مفتوحة من هالاستراتيجية بنفس الوقت
 _find_strategy_last_scan = {"time": 0, "summary": "لسا ما فحصت"}
+FIND_STRATEGY_NOTIFY_COOLDOWN_SECONDS = 1800   # ما نكرر إشعار نفس العملة (رفض/عدم قدرة على الشراء) قبل 30 دقيقة
+FIND_STRATEGY_MAX_NOTIFY_PER_SCAN = 3          # أقصى إشعارات رفض بالدورة الوحدة
+_find_strategy_notified = {}
 _pending_watch = None           # طلب مراقبة بانتظار "تأكيد" من المستخدم: {"symbols": [...], "expires": ts}
 WATCH_PENDING_TTL = 600         # مهلة التأكيد: 10 دقايق
 
@@ -2926,6 +2929,19 @@ def _find_strategy_candidates(client):
     return (base + [sym for _, sym in pool])[:FIND_STRATEGY_MAX_SCAN]
 
 
+def _find_strategy_notify(key, message):
+    """إشعار تيليغرام + التطبيق (نفس send_telegram) مع تهدئة لكل (عملة، نوع) عشان ما نكرر كل دقيقتين."""
+    now = time.time()
+    if now - _find_strategy_notified.get(key, 0) < FIND_STRATEGY_NOTIFY_COOLDOWN_SECONDS:
+        return False
+    _find_strategy_notified[key] = now
+    try:
+        send_telegram(message)
+    except Exception as e:
+        log.error(f"❌ استراتيجية ابحث عن صفقة: تعذر إرسال الإشعار: {e}")
+    return True
+
+
 def find_strategy_scan_once(client):
     """دورة وحدة: كل عملة بتنفحص بنفس \"راقب واشتري\" بالضبط، وإذا نجح أكتر من وحدة بنشتري الأعلى زخماً."""
     with _lock:
@@ -2938,22 +2954,34 @@ def find_strategy_scan_once(client):
         _find_strategy_last_scan.update(time=time.time(), summary="ما في عملات بسيولة كافية للفحص")
         return
     best, checked, passed = None, 0, 0
+    rejected = []   # عملات اجتازت الفلتر ورفضتها بوابة المخاطر: [(رمز, سبب)]
     for sym in candidates:
         if is_api_blocked():
             log.warning("🚦 استراتيجية ابحث عن صفقة: توقفت منتصف الفحص — حظر مؤقت من بينانس")
             break
         ok, reason, ind = _watch_entry_check(sym)
         checked += 1
-        if ind is not None and passes_find_trade_filter(ind):
+        passed_filter = ind is not None and passes_find_trade_filter(ind)
+        if passed_filter:
             passed += 1
+            if not ok:
+                rejected.append((sym, reason))
         if ok and ind:
             score = ind.get("momentum_score") or 0.0
             if best is None or score > best[0]:
                 best = (score, sym, ind, reason)
         time.sleep(0.35)
+    sent = 0
+    for sym, why in rejected:
+        if sent >= FIND_STRATEGY_MAX_NOTIFY_PER_SCAN:
+            break
+        if _find_strategy_notify((sym, "rejected"), f"⛔ بوابة المخاطر رفضت صفقة {sym.replace('USDT', '')} (ابحث عن صفقة): {why}"):
+            sent += 1
+    rej_names = "، ".join(x.replace("USDT", "") for x, _ in rejected)
     if best is None:
         _find_strategy_last_scan.update(
-            time=time.time(), summary=f"فحصت {checked} عملة — {passed} اجتازت الفلتر وما في وحدة وافقت عليها بوابة المخاطر")
+            time=time.time(),
+            summary=f"فحصت {checked} عملة — {passed} اجتازت الفلتر" + (f" ({rej_names})" if rej_names else "") + " وما في وحدة وافقت عليها بوابة المخاطر")
         log.info(f"🔍 استراتيجية ابحث عن صفقة: فحصت {checked}، اجتاز الفلتر {passed}، لا مرشح")
         return
     _, symbol, ind, reason = best
@@ -2963,6 +2991,10 @@ def find_strategy_scan_once(client):
         _find_strategy_last_scan.update(time=time.time(), summary="انطفت الاستراتيجية خلال الفحص — ما اشتريت")
         return
     status, msg = _guarded_open(symbol, ind, f"🔍 استراتيجية ابحث عن صفقة — {reason}", "find_trade")
+    if status == "wait":
+        _find_strategy_notify(
+            (symbol, "blocked"),
+            f"⏸️ ابحث عن صفقة لقت {symbol.replace('USDT', '')} ووافقت عليها بوابة المخاطر ({reason}) بس ما اشتريت: {msg}")
     _find_strategy_last_scan.update(
         time=time.time(),
         summary=f"فحصت {checked} عملة — {symbol.replace('USDT', '')}: {'اشتريت' if status == 'bought' else 'ما اشتريت'} ({msg})",
