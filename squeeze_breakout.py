@@ -406,7 +406,10 @@ class SqueezeBreakout:
 
             # ── الخطوة 3: حد الأمان ضد مطاردة القمة ──
             squeeze_reference_price = None
-            for i in range(closed_idx, closed_idx - self.cfg["bbw_history_lookback"], -1):
+            # لو شمعة الاختراق تحررت من الانضغاط (المسار الثاني) نبدأ من الشمعة اللي قبلها،
+            # وإلا الحلقة بتكسر من أول تكرار ويبقى المسار الثاني ميت.
+            start_idx = closed_idx if is_squeezed_now else closed_idx - 1
+            for i in range(start_idx, start_idx - self.cfg["bbw_history_lookback"], -1):
                 if pd.isna(bbw.iloc[i]):
                     break
                 if bbw.iloc[i] <= squeeze_cutoff:
