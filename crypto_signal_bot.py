@@ -121,7 +121,7 @@ TRAIL_ACTIVATE_ATR_MULTIPLE     = 1.0
 # ⬅️ إصلاح: سقف أقصى (%) لنسبة الربح المطلوبة لتفعيل Trailing، بغض النظر عن
 # قيمة ATR الخام. بدون هالسقف، عملة متقلبة (ATR كبير) ممكن تحتاج ربح كبير
 # جداً (5-6%+) لتفعيل Trailing بينما الـ Stop Loss النازل مقيّد بسقف صلب
-# 2.5-3% فقط (ATRGuard.HARD_CAP_PCT) — عدم تناسق يخلي صفقات رابحة فعلياً
+# سقف صلب (ATRGuard.HARD_CAP_PCT — حالياً 10%) — عدم تناسق يخلي صفقات رابحة فعلياً
 # تفوت تفعيل الحماية وترجع تنزل بدون ما "تقفل" أي ربح.
 TRAIL_TRIGGER_MAX_PCT           = 3.0
 
@@ -3612,7 +3612,7 @@ def run_bot():
                     # ⬅️ إصلاح: نقيّد العتبة بسقف أقصى (TRAIL_TRIGGER_MAX_PCT) — بدونه،
                     # عملة عندها ATR خام كبير كانت ممكن تطلب ربح ضخم (5-6%+) لتفعيل
                     # Trailing، رغم إن الـ Stop Loss النازل مقيّد بسقف صلب أضيق بكثير
-                    # (2.5-3%) — عدم تناسق يخلي صفقات رابحة فعلياً تفوت "قفل" أي ربح.
+                    # (سقف ATRGuard — حالياً 10%) — عدم تناسق يخلي صفقات رابحة فعلياً تفوت "قفل" أي ربح.
                     if atr_val:
                         trail_atr_multiple     = trade.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
                         raw_trigger_price       = trade["entry_price"] + (trail_atr_multiple * atr_val)
