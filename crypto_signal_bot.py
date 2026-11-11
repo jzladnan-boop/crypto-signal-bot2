@@ -862,8 +862,9 @@ def telegram_command_listener(client):
                             else:
                                 verdict = ask_verdict(symbol, ind)
                                 icon = "✅" if verdict["approved"] else "⛔"
-                                who = "رأي الوكيل" if verdict.get("source") == "gemini" else "تقييم"
-                                send_admin(f"{icon} {who} بـ {coin} هلق: {verdict['reason_ar']}")
+                                who = "رأي الوكيل" if verdict.get("source") in ("gemini", "gemini_search") else "تقييم"
+                                src_line = f"\n🔗 المصادر: {'، '.join(verdict['sources'])}" if verdict.get("sources") else ""
+                                send_admin(f"{icon} {who} بـ {coin} هلق: {verdict['reason_ar']}{src_line}")
                         except Exception as e:
                             log.error(f"❌ /ask {coin}: {e}")
                             send_admin(f"❌ صار خطأ أثناء استشارة الوكيل بخصوص {coin}.")
@@ -1751,11 +1752,20 @@ def ask_verdict(symbol, ind):
     لو تعذر الوصول له أو الوكيل مطفي → نرجع تقييم بوابة المخاطر بدل رسالة خطأ،
     مع توضيح السبب بنص الرد. (قرارات الشراء الفعلية بتمر على البوابة بس، مو Gemini.)
     """
-    verdict = ai_agent.evaluate_signal(symbol, ind)
-    if verdict.get("source") == "gemini":
+    verdict = ai_agent.evaluate_signal_with_search(symbol, ind)
+    if verdict.get("source") == "gemini_search":
         return verdict
+    # البحث ما اشتغل. لو Gemini نفسه ما بيرد (انتهت المهلة/انقطاع) أو الوكيل مطفي → البوابة مباشرة.
+    # غير هيك (مثلاً النموذج ما بيدعم البحث) → نجرّب Gemini بدون بحث قبل ما نروح للبوابة.
+    if verdict.get("source") == "error" and verdict.get("error_type") not in ai_agent.UNREACHABLE_ERRORS:
+        plain = ai_agent.evaluate_signal(symbol, ind)
+        if plain.get("source") == "gemini":
+            plain["reason_ar"] = "(تعذر البحث بالأخبار، هاد رأي من المؤشرات بس) " + plain["reason_ar"]
+            plain["sources"] = []
+            return plain
     gate = risk_gate.evaluate_signal(symbol, ind)
     gate["reason_ar"] = "تعذر الوصول لـ Gemini، هاد تقييم بوابة المخاطر: " + gate["reason_ar"]
+    gate["sources"] = []
     return gate
 
 
@@ -2775,6 +2785,7 @@ def api_ask_agent():
         "approved": verdict["approved"],
         "reason_ar": verdict["reason_ar"],
         "source": verdict["source"],
+        "sources": verdict.get("sources", []),
         "indicators": {
             "price": ind.get("price"), "rsi": ind.get("rsi"), "mfi": ind.get("mfi"),
             "adx": ind.get("adx"), "volume": ind.get("volume"),
@@ -3250,6 +3261,7 @@ def api_chat_agent():
         return jsonify({"ok": True, "reply": watch_reply})
 
     context = _build_chat_context()
+    mentioned_coins = _detect_symbols_in_text(message)   # لو في عملة بالسؤال، الوكيل بيبحث عن أخبارها
 
     # 🆕 دعم/مقاومة: لو المستخدم ذكر اسم عملة بالرسالة، نحسب مستويات دعم/مقاومة
     # حقيقية (Swing Highs/Lows فعلية من الشموع)، مش خط مرسوم أو تخمين من الموديل.
@@ -3272,7 +3284,7 @@ def api_chat_agent():
                     f"| أقرب دعم حجمي: {vp['stop_hint']} | أقرب هدف حجمي: {vp['target_hint']}"
                 )
 
-    result = ai_agent.chat(message, context=context, history=history)
+    result = ai_agent.chat(message, context=context, history=history, use_search=bool(mentioned_coins))
     if not result["ok"]:
         return jsonify({"error": result["reply"]}), 502
     return jsonify({"ok": True, "reply": result["reply"]})

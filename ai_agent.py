@@ -24,6 +24,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
 AI_AGENT_ENABLED = os.getenv("AI_AGENT_ENABLED", "true").strip().lower() == "true"
 AI_AGENT_TIMEOUT = float(os.getenv("AI_AGENT_TIMEOUT_SECONDS", "12"))
+# 🔎 البحث بالإنترنت (Google Search Grounding) لسؤال العملة والمحادثة عن عملة — اختياري:
+#     GEMINI_SEARCH_MODEL=<نموذج يدعم البحث>   (افتراضياً نفس GEMINI_MODEL)
+#     AI_AGENT_SEARCH_TIMEOUT_SECONDS=25       (البحث أبطأ من الطلب العادي)
+GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "").strip() or GEMINI_MODEL
+AI_AGENT_SEARCH_TIMEOUT = float(os.getenv("AI_AGENT_SEARCH_TIMEOUT_SECONDS", "25"))
+_GEMINI_SEARCH_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_SEARCH_MODEL}:generateContent"
+)
+# أخطاء بتدل إنه Gemini نفسه ما بيرد (مو إنه البحث غير مدعوم) — ما في فايدة نعيد المحاولة بدون بحث
+UNREACHABLE_ERRORS = ("Timeout", "ReadTimeout", "ConnectTimeout", "ConnectionError")
 
 _GEMINI_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -126,6 +136,106 @@ def evaluate_signal(symbol: str, signal_data: dict) -> dict:
         }
 
 
+_SEARCH_RULES = """
+
+🔎 عندك أداة بحث بالإنترنت. قبل ما تحكم، ابحث عن آخر أخبار هاي العملة (آخر أيام): اختراق أو
+ثغرة أمنية، إلغاء أو تعليق إدراج من منصة، فك قفل كمية كبيرة من التوكنز، قرار تنظيمي، أو خبر
+إيجابي مهم. حقائق الخبر لازم تكون من نتائج البحث فعلاً — لا تخترع خبراً، ولو ما لقيت خبر مؤثر
+قول هيك. خبر سلبي مؤكد وجديد = سبب كافي للرفض حتى لو المؤشرات حلوة. غياب الأخبار لوحده
+ما يغيّر حكمك المبني على المؤشرات.
+
+الصيغة تصير: {"approved": true أو false, "reason_ar": "...", "news_ar": "جملة وحدة عن الأخبار اللي لقيتها، أو ما في أخبار مؤثرة"}
+رد بـ JSON فقط بدون أي نص قبله أو بعده."""
+
+
+def _extract_json(text: str):
+    """يطلّع أول كائن JSON من نص الرد (الرد المبني على بحث ما بيقبل responseMimeType، فممكن يجي بأسوار ``` أو نص حواليه)."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+    start, end = t.find("{"), t.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError("ما في JSON بالرد")
+    return json.loads(t[start:end + 1])
+
+
+def _candidate_text(data: dict) -> str:
+    parts = data["candidates"][0]["content"]["parts"]
+    return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+
+
+def _grounding_sources(data: dict, limit: int = 3) -> list:
+    """أسماء المواقع اللي اعتمد عليها البحث (بدون تكرار)."""
+    try:
+        chunks = data["candidates"][0].get("groundingMetadata", {}).get("groundingChunks", [])
+    except Exception:
+        return []
+    out = []
+    for c in chunks:
+        title = (c.get("web") or {}).get("title")
+        if title and title not in out:
+            out.append(title)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def evaluate_signal_with_search(symbol: str, signal_data: dict) -> dict:
+    """
+    نفس evaluate_signal بس مع بحث Google عن أخبار العملة (Grounding).
+    Returns: {"approved", "reason_ar", "source": "gemini_search"|"fallback"|"error", "sources": [...], "error_type": str (عند الخطأ)}
+    الاستشارة فقط — قرارات الشراء الفعلية بتمر على risk_gate.
+    """
+    if not AI_AGENT_ENABLED or not GEMINI_API_KEY:
+        return {"approved": True, "reason_ar": "الوكيل مطفي أو ما في مفتاح Gemini", "source": "fallback", "sources": []}
+
+    user_payload = {"symbol": symbol, **signal_data}
+    body = {
+        "system_instruction": {"parts": [{"text": _SYSTEM_RULES + _SEARCH_RULES}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": json.dumps(user_payload, ensure_ascii=False, default=str)}]}
+        ],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"temperature": 0.1},   # بدون responseMimeType: مو متوافق مع أداة البحث
+    }
+    try:
+        resp = requests.post(
+            _GEMINI_SEARCH_URL, params={"key": GEMINI_API_KEY}, json=body, timeout=AI_AGENT_SEARCH_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        parsed = _extract_json(_candidate_text(data))
+        reason = str(parsed.get("reason_ar") or "").strip() or "بدون توضيح من الوكيل"
+        news = str(parsed.get("news_ar") or "").strip()
+        if news:
+            reason = f"{reason}\n📰 {news}"
+        return {
+            "approved": bool(parsed.get("approved")),
+            "reason_ar": reason,
+            "source": "gemini_search",
+            "sources": _grounding_sources(data),
+        }
+    except Exception as e:
+        log.error(f"❌ AI Agent (Gemini + بحث) لـ {symbol}: {e}")
+        return {
+            "approved": False,
+            "reason_ar": f"تعذر البحث عبر Gemini ({type(e).__name__})",
+            "source": "error",
+            "sources": [],
+            "error_type": type(e).__name__,
+        }
+
+
+_CHAT_SEARCH_NOTE = """
+
+🔎 لما المستخدم يسأل عن عملة، عندك أداة بحث بالإنترنت: استخدمها لآخر أخبار العملة بس (اختراق، إلغاء
+إدراج، فك قفل، قرار تنظيمي، خبر مهم). اذكر الخبر بجملة وحدة وابدأها بـ «حسب الأخبار:»، ولو ما لقيت
+خبر مؤثر قول هيك. أرقام البوت وصفقاته وإعداداته تضل من «المعلومات الحية» حصراً — ما تاخدها من الإنترنت.
+تطبق عليها قاعدة الاختصار نفسها (سطر أو سطرين)."""
+
+
 _CHAT_RULES = """أنت مساعد ذكي جوا تطبيق بوت تداول عملات رقمية آلي. بتحكي مع صاحب البوت
 مباشرة بمحادثة حرة (مو تقييم صفقة محددة). جاوب بالعربي العامي بأسلوب طبيعي.
 
@@ -171,7 +281,7 @@ _CHAT_RULES = """أنت مساعد ذكي جوا تطبيق بوت تداول ع
 تحليلي بس، القرار النهائي للمستخدم."""
 
 
-def chat(message: str, context: str = "", history: list = None) -> dict:
+def chat(message: str, context: str = "", history: list = None, use_search: bool = False) -> dict:
     """
     محادثة حرة عامة مع الوكيل (مو تقييم صفقة). الجواب مختصر دايماً.
 
@@ -181,6 +291,8 @@ def chat(message: str, context: str = "", history: list = None) -> dict:
             يُعاد بناؤه بكل طلب عشان يكون محدّث دايماً، مش جزء من history
         history: قائمة الرسائل السابقة بنفس الجلسة، كل عنصر
             {"role": "user"|"model", "text": str}، بالترتيب الزمني
+        use_search: لو True (المستخدم ذكر عملة) نجرّب أول شي مع بحث بالإنترنت لأخبار العملة؛
+            لو البحث ما اشتغل (مو مدعوم مثلاً) بنرجع للمحادثة العادية بدون بحث
 
     Returns:
         dict: {"ok": bool, "reply": str, "source": "gemini"|"fallback"|"error"}
@@ -200,6 +312,25 @@ def chat(message: str, context: str = "", history: list = None) -> dict:
         "contents": contents,
         "generationConfig": {"temperature": 0.15, "maxOutputTokens": 200},
     }
+
+    if use_search:
+        search_body = {
+            "system_instruction": {"parts": [{"text": _CHAT_RULES + _CHAT_SEARCH_NOTE}]},
+            "contents": contents,
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.15, "maxOutputTokens": 400},
+        }
+        try:
+            resp = requests.post(_GEMINI_SEARCH_URL, params={"key": GEMINI_API_KEY}, json=search_body, timeout=AI_AGENT_SEARCH_TIMEOUT)
+            resp.raise_for_status()
+            text = _candidate_text(resp.json())
+            if text:
+                return {"ok": True, "reply": text, "source": "gemini_search"}
+            log.warning("⚠️ AI Agent شات + بحث: رد فاضي — نرجع للمحادثة بدون بحث")
+        except Exception as e:
+            log.error(f"❌ AI Agent (Gemini + بحث) شات: {e}")
+            if type(e).__name__ in UNREACHABLE_ERRORS:
+                return {"ok": False, "reply": f"تعذر التواصل مع الوكيل ({type(e).__name__})", "source": "error"}
 
     try:
         resp = requests.post(_GEMINI_URL, params={"key": GEMINI_API_KEY}, json=body, timeout=AI_AGENT_TIMEOUT)
