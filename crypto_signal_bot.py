@@ -265,6 +265,7 @@ _lock           = threading.Lock()
 trading_enabled = True
 watch_list      = set()
 open_trades     = {}
+RSI_ENABLED = True   # ✅ تشغيل/إيقاف شراء استراتيجية RSI العادي (الصفقات المفتوحة منها بتضل مُدارة: ستوب/Trailing/خروج)
 current_strategy   = "rsi"   # 🎯 الاستراتيجية الأساسية الوحيدة: "rsi"
 
 STRATEGY_LABELS = {
@@ -448,6 +449,7 @@ def save_settings():
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global FIND_STRATEGY_ENABLED
+    global RSI_ENABLED
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -469,6 +471,7 @@ def save_settings():
                 "trail_activate_atr_multiple": TRAIL_ACTIVATE_ATR_MULTIPLE,
                 "squeeze_breakout_enabled": SQUEEZE_BREAKOUT_ENABLED,
                 "find_strategy_enabled": FIND_STRATEGY_ENABLED,
+                "rsi_enabled": RSI_ENABLED,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"❌ خطأ حفظ الإعدادات: {e}")
@@ -481,6 +484,7 @@ def load_settings():
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global FIND_STRATEGY_ENABLED
+    global RSI_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     if not os.path.exists(SETTINGS_FILE):
         return
@@ -522,6 +526,7 @@ def load_settings():
         TRAIL_ACTIVATE_ATR_MULTIPLE = s.get("trail_activate_atr_multiple", TRAIL_ACTIVATE_ATR_MULTIPLE)
         SQUEEZE_BREAKOUT_ENABLED = s.get("squeeze_breakout_enabled", SQUEEZE_BREAKOUT_ENABLED)
         FIND_STRATEGY_ENABLED = s.get("find_strategy_enabled", FIND_STRATEGY_ENABLED)
+        RSI_ENABLED = s.get("rsi_enabled", RSI_ENABLED)
         log.info("✅ تم تحميل الإعدادات المحفوظة من قبل")
     except Exception as e:
         log.error(f"❌ خطأ تحميل الإعدادات: {e}")
@@ -790,6 +795,7 @@ def telegram_command_listener(client):
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global FIND_STRATEGY_ENABLED
+    global RSI_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     offset = None  # ✅ إصلاح: None يعني "لسا ما تأكدنا من offset الصحيح"
 
@@ -1142,6 +1148,20 @@ def telegram_command_listener(client):
                             f"{pos_line}"
                         )
 
+                    # ── /set_rsi on|off (شراء استراتيجية RSI العادي؛ الصفقات المفتوحة بتكمل إدارتها) ──
+                    elif text.startswith("/set_rsi "):
+                        value = text.replace("/set_rsi ", "").strip().lower()
+                        if value in ("on", "off"):
+                            with _lock:
+                                RSI_ENABLED = (value == "on")
+                            save_settings()
+                            send_admin(
+                                "✅ استراتيجية RSI العادي مفعّلة" if RSI_ENABLED else
+                                "❌ تم إيقاف شراء استراتيجية RSI العادي (الصفقات المفتوحة منها بتكمل بنفس الستوب والـ Trailing)"
+                            )
+                        else:
+                            send_admin("❌ مثال: /set_rsi on  أو  /set_rsi off")
+
                     # ── /set_find_strategy on|off (استراتيجية "ابحث عن صفقة" التلقائية — صفقات حقيقية) ──
                     elif text.startswith("/set_find_strategy "):
                         value = text.replace("/set_find_strategy ", "").strip().lower()
@@ -1454,6 +1474,9 @@ def telegram_command_listener(client):
                             "/watch AVAX SOL — مراقبة مباشرة (أو من محادثة الوكيل: \"راقب AVAX واشتري\" ثم تأكيد)\n"
                             "/watch_list — المراقبات النشطة\n"
                             "/watch_cancel AVAX — إلغاء مراقبة\n\n"
+                            "<b>📊 RSI العادي:</b>\n"
+                            "/set_rsi on — تفعيل شراء RSI\n"
+                            "/set_rsi off — إيقاف شراءه (الصفقات المفتوحة بتكمل عادي)\n\n"
                             "<b>🔍 ابحث عن صفقة (استراتيجية تلقائية):</b>\n"
                             "/set_find_strategy on — تشغيل (صفقات حقيقية، فحص كل دقيقتين تقريباً، حد أقصى صفقتين)\n"
                             "/set_find_strategy off — إيقاف (الصفقات المفتوحة بتكمل عادي)\n"
@@ -2503,6 +2526,7 @@ def api_get_settings():
             "squeeze_breakout_position": _squeeze_breakout_strategy.position if _squeeze_breakout_strategy else None,
             # ✅ ابحث عن صفقة كاستراتيجية مستقلة
             "find_strategy_enabled": FIND_STRATEGY_ENABLED,
+            "rsi_enabled": RSI_ENABLED,
             "find_strategy_max_open": FIND_STRATEGY_MAX_OPEN,
             "find_strategy_last_scan": _find_strategy_last_scan,
         })
@@ -2517,6 +2541,7 @@ def api_set_settings():
     global ATR_ENABLED
     global SQUEEZE_BREAKOUT_ENABLED
     global FIND_STRATEGY_ENABLED
+    global RSI_ENABLED
     global SQUEEZE_BREAKOUT_USDT_PER_TRADE
     data = request.get_json(silent=True) or {}
     errors = []
@@ -2606,6 +2631,10 @@ def api_set_settings():
         # ✅ ابحث عن صفقة (تلقائي) — تشغيل/إيقاف من التطبيق
         if "find_strategy_enabled" in data:
             FIND_STRATEGY_ENABLED = bool(data["find_strategy_enabled"])
+
+        # ✅ RSI العادي — تشغيل/إيقاف الشراء من التطبيق
+        if "rsi_enabled" in data:
+            RSI_ENABLED = bool(data["rsi_enabled"])
 
     if errors:
         return jsonify({"error": "؛ ".join(errors)}), 400
@@ -3738,7 +3767,7 @@ def run_bot():
             with _lock:
                 is_trading = trading_enabled
 
-            if watch_list and is_trading and count_active_trades() < MAX_TRADES and not is_api_blocked():
+            if RSI_ENABLED and watch_list and is_trading and count_active_trades() < MAX_TRADES and not is_api_blocked():
                 with _lock:
                     strategy = current_strategy
 
