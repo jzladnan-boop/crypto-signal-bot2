@@ -2463,6 +2463,20 @@ def load_parallel_strategies_history():
     return records
 
 
+LOCAL_UTC_OFFSET_HOURS = float(os.getenv("LOCAL_UTC_OFFSET_HOURS", "3"))   # توقيتك المحلي مقابل UTC (سوريا/العراق/السعودية = +3)
+
+
+def week_start_epoch(now_epoch=None):
+    """بداية الأسبوع الحالي (السبت 00:00 بالتوقيت المحلي، الأسبوع سبت ← جمعة) كـ epoch UTC."""
+    if now_epoch is None:
+        now_epoch = time.time()
+    offset = datetime.timedelta(hours=LOCAL_UTC_OFFSET_HOURS)
+    local_now = datetime.datetime.fromtimestamp(now_epoch, tz=datetime.timezone.utc) + offset
+    days_since_saturday = (local_now.weekday() - 5) % 7      # الاثنين=0 ... السبت=5 ... الأحد=6
+    local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0) - datetime.timedelta(days=days_since_saturday)
+    return (local_start - offset).timestamp()
+
+
 @app.route("/api/history")
 @login_required
 def api_history():
@@ -2478,7 +2492,8 @@ def api_history():
         records = [r for r in load_all_profit_log() if r["time"].startswith(yesterday)]
         records += [r for r in load_parallel_strategies_history() if r["time"].startswith(yesterday)]
     elif period == "week":
-        cutoff  = time.time() - 7 * 86400
+        # ⬅️ بطلب المستخدم: أسبوع ثابت من السبت 00:00 (توقيتك المحلي) لحد الجمعة، ويصفّر كل سبت — بدل آخر 7 أيام متحركة
+        cutoff  = week_start_epoch()
         records = [r for r in load_all_profit_log()
                    if parse_record_time_epoch(r["time"]) >= cutoff]
         records += [r for r in load_parallel_strategies_history()
